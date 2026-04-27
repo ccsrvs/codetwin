@@ -15,6 +15,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,6 +39,13 @@ import (
 	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
+
+// skillBody is the full skill guide printed by --skill. It mirrors the
+// repo-root codetwin-SKILL.md but lives next to the binary so the loader-
+// visible markdown can stay short and let agents fetch detail on demand.
+//
+//go:embed skill.md
+var skillBody string
 
 var supportedExts = map[string]bool{
 	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
@@ -81,8 +89,14 @@ func main() {
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
+	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	flag.Usage = usage
 	flag.Parse()
+
+	if *skill {
+		fmt.Print(skillBody)
+		return
+	}
 
 	isTTY := stderrIsTTY()
 	startTime := time.Now()
@@ -1118,10 +1132,12 @@ FLAGS:
   --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)
   --sort string        result ordering: score | score-asc | size | size-asc | name (default score)
   --limit int          show only the top N pairs and N clusters (0 = no limit)
+  --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off)
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
   --debug              print phase checkpoints with elapsed time to stderr
+  --skill              print the full skill guide and exit
 
 EXAMPLES:
   codetwin ./src

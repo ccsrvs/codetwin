@@ -70,6 +70,7 @@ codetwin --verbose ./src
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
+| `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
 
 ## Scoring
 
