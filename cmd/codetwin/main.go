@@ -239,88 +239,115 @@ func main() {
 		clusters = append(clusters, report.Cluster{ID: id, Members: names, Score: avg})
 	}
 
-	var previews map[string]report.Preview
-	if *preview {
-		nameIdx := make(map[string]int, len(snippets))
-		for i, s := range snippets {
-			nameIdx[s.name] = i
-		}
-
-		// Determine which snippets will appear in the rendered report.
-		shown := make(map[int]bool)
-		for _, p := range pairs {
-			if p.Score >= *threshold {
-				shown[nameIdx[p.NameA]] = true
-				shown[nameIdx[p.NameB]] = true
-			}
-		}
-		for _, c := range clusters {
-			for _, m := range c.Members {
-				shown[nameIdx[m]] = true
-			}
-		}
-
-		// For each shown snippet, find the bounding token range covered by
-		// fingerprints shared with any OTHER shown snippet. Falls back to
-		// (-1, -1) when no positional match exists, in which case we render
-		// the chunk's leading lines like before.
-		type rng struct{ first, last int }
-		ranges := make(map[int]rng, len(shown))
-		for i := range shown {
-			for j := range shown {
-				if i == j {
-					continue
-				}
-				f, l := fingerprint.MatchRange(snippets[i].fps, snippets[j].fps)
-				if f < 0 {
-					continue
-				}
-				r, ok := ranges[i]
-				if !ok {
-					ranges[i] = rng{first: f, last: l}
-					continue
-				}
-				if f < r.first {
-					r.first = f
-				}
-				if l > r.last {
-					r.last = l
-				}
-				ranges[i] = r
-			}
-		}
-
-		previews = make(map[string]report.Preview, len(shown))
-		for i := range shown {
-			s := snippets[i]
-			if r, ok := ranges[i]; ok {
-				previews[s.name] = buildMatchPreview(s.code, s.lines, s.startLine, r.first, r.last, s.fps.K, *previewLines)
-			} else {
-				// No structural overlap — fall back to a leading excerpt.
-				previews[s.name] = report.Preview{
-					StartLine: s.startLine,
-					Text:      extractPreview(s.code, *previewLines),
-				}
-			}
-		}
-	}
-
 	opts := report.Options{
 		Plain:     *plain,
 		Threshold: *threshold,
 		Verbose:   *verbose,
 		Sort:      report.SortMode(*sortMode),
 		Limit:     *limit,
-		Previews:  previews,
+	}
+
+	// Sort + threshold filter + limit ONCE here in main.go, then build
+	// previews scoped to just the snippets that will actually render.
+	// On a big repo this avoids an O(shown²) MatchRange storm over
+	// thousands of snippets when --limit means we'll only show a handful.
+	visiblePairs, visibleClusters := report.Prepare(pairs, clusters, opts)
+
+	if *preview {
+		if showProgress {
+			fmt.Fprint(os.Stderr, "\r\033[Kbuilding previews...")
+		}
+		opts.Previews = buildPreviews(visiblePairs, visibleClusters, snippets, *previewLines)
+	}
+
+	if showProgress {
+		fmt.Fprint(os.Stderr, "\r\033[K")
 	}
 
 	if *jsonOut {
-		visiblePairs, visibleClusters := report.Prepare(pairs, clusters, opts)
-		printJSON(visiblePairs, visibleClusters, previews)
+		printJSON(visiblePairs, visibleClusters, opts.Previews)
 		return
 	}
 
-	report.Render(os.Stdout, pairs, clusters, opts)
+	// Render gets already-prepared inputs. Its internal Prepare call is
+	// idempotent on sorted+filtered+limited data.
+	report.Render(os.Stdout, visiblePairs, visibleClusters, opts)
+}
+
+// buildPreviews computes a Preview map for every snippet that appears in
+// the supplied (already-prepared) visible pairs and clusters. Match
+// ranges are derived only over the visible set, so cost is O(visible²)
+// rather than O(allShown²). For each snippet, the bounding token range
+// covered by fingerprints shared with any OTHER visible snippet becomes
+// the preview region (subject to --preview-lines), with a leading-excerpt
+// fallback when there's no structural overlap.
+func buildPreviews(
+	visiblePairs []report.Pair,
+	visibleClusters []report.Cluster,
+	snippets []snippet,
+	previewLines int,
+) map[string]report.Preview {
+	nameIdx := make(map[string]int, len(snippets))
+	for i, s := range snippets {
+		nameIdx[s.name] = i
+	}
+
+	visible := make(map[int]struct{})
+	for _, p := range visiblePairs {
+		if i, ok := nameIdx[p.NameA]; ok {
+			visible[i] = struct{}{}
+		}
+		if i, ok := nameIdx[p.NameB]; ok {
+			visible[i] = struct{}{}
+		}
+	}
+	for _, c := range visibleClusters {
+		for _, m := range c.Members {
+			if i, ok := nameIdx[m]; ok {
+				visible[i] = struct{}{}
+			}
+		}
+	}
+
+	type rng struct{ first, last int }
+	ranges := make(map[int]rng, len(visible))
+	for i := range visible {
+		for j := range visible {
+			if i == j {
+				continue
+			}
+			f, l := fingerprint.MatchRange(snippets[i].fps, snippets[j].fps)
+			if f < 0 {
+				continue
+			}
+			r, ok := ranges[i]
+			if !ok {
+				ranges[i] = rng{first: f, last: l}
+				continue
+			}
+			if f < r.first {
+				r.first = f
+			}
+			if l > r.last {
+				r.last = l
+			}
+			ranges[i] = r
+		}
+	}
+
+	previews := make(map[string]report.Preview, len(visible))
+	for i := range visible {
+		s := snippets[i]
+		if r, ok := ranges[i]; ok {
+			previews[s.name] = buildMatchPreview(s.code, s.lines, s.startLine, r.first, r.last, s.fps.K, previewLines)
+		} else {
+			previews[s.name] = report.Preview{
+				StartLine: s.startLine,
+				Text:      extractPreview(s.code, previewLines),
+			}
+		}
+	}
+	return previews
 }
 
 // chunkName produces a unique, human-readable identifier for a chunk. The
