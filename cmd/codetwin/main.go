@@ -46,6 +46,8 @@ func main() {
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
+	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name")
+	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -67,13 +69,14 @@ func main() {
 	}
 
 	type snippet struct {
-		name      string
-		lang      tokenizer.Language
-		code      string
-		startLine int
-		tokens    []string
-		lines     []int // parallel to tokens; 1-based source line of each token, relative to chunk start
-		fps       fingerprint.PositionalSet
+		name       string
+		lang       tokenizer.Language
+		code       string
+		startLine  int
+		nonBlankLn int // non-blank line count of the chunk (used for size sorts)
+		tokens     []string
+		lines      []int // parallel to tokens; 1-based source line of each token, relative to chunk start
+		fps        fingerprint.PositionalSet
 	}
 
 	snippets := make([]snippet, 0, len(files))
@@ -94,13 +97,14 @@ func main() {
 				continue
 			}
 			snippets = append(snippets, snippet{
-				name:      chunkName(ch),
-				lang:      lang,
-				code:      ch.Code,
-				startLine: ch.StartLine,
-				tokens:    tokens,
-				lines:     lines,
-				fps:       fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW),
+				name:       chunkName(ch),
+				lang:       lang,
+				code:       ch.Code,
+				startLine:  ch.StartLine,
+				nonBlankLn: countLines(ch.Code),
+				tokens:     tokens,
+				lines:      lines,
+				fps:        fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW),
 			})
 		}
 	}
@@ -143,6 +147,8 @@ func main() {
 				Structural: structural,
 				Semantic:   semantic,
 				Score:      combined,
+				LinesA:     snippets[i].nonBlankLn,
+				LinesB:     snippets[j].nonBlankLn,
 			})
 		}
 	}
@@ -157,7 +163,22 @@ func main() {
 		for k, idx := range members {
 			names[k] = snippets[idx].name
 		}
-		clusters = append(clusters, report.Cluster{ID: id, Members: names})
+		// Average internal pair score: mean of matrix[a][b] for every distinct
+		// member pair. Single-member clusters (which DBSCAN won't produce, but
+		// guard anyway) get a score of 0.
+		var sum float64
+		var nPairs int
+		for k := 0; k < len(members); k++ {
+			for l := k + 1; l < len(members); l++ {
+				sum += matrix[members[k]][members[l]]
+				nPairs++
+			}
+		}
+		avg := 0.0
+		if nPairs > 0 {
+			avg = sum / float64(nPairs)
+		}
+		clusters = append(clusters, report.Cluster{ID: id, Members: names, Score: avg})
 	}
 
 	var previews map[string]report.Preview
@@ -230,11 +251,14 @@ func main() {
 		Plain:     *plain,
 		Threshold: *threshold,
 		Verbose:   *verbose,
+		Sort:      report.SortMode(*sortMode),
+		Limit:     *limit,
 		Previews:  previews,
 	}
 
 	if *jsonOut {
-		printJSON(pairs, clusters, previews, *threshold)
+		visiblePairs, visibleClusters := report.Prepare(pairs, clusters, opts)
+		printJSON(visiblePairs, visibleClusters, previews)
 		return
 	}
 
@@ -341,6 +365,7 @@ type jsonPair struct {
 type jsonCluster struct {
 	ID      int      `json:"id"`
 	Members []string `json:"members"`
+	Score   float64  `json:"score"`
 }
 
 type jsonPreview struct {
@@ -348,7 +373,11 @@ type jsonPreview struct {
 	Text      string `json:"text"`
 }
 
-func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview, threshold float64) {
+// printJSON emits the prepared (already sorted, threshold-filtered, limited)
+// pairs and clusters as JSON. Sort and limit are applied upstream via
+// report.Prepare so JSON consumers see the same set of findings as the
+// terminal renderer.
+func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview) {
 	out := jsonOutput{}
 	if len(previews) > 0 {
 		out.Previews = make(map[string]jsonPreview, len(previews))
@@ -357,9 +386,6 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 		}
 	}
 	for _, p := range pairs {
-		if p.Score < threshold {
-			continue
-		}
 		out.Pairs = append(out.Pairs, jsonPair{
 			FileA: p.NameA, FileB: p.NameB,
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
@@ -367,7 +393,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 		})
 	}
 	for _, c := range clusters {
-		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members})
+		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score})
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -449,6 +475,8 @@ FLAGS:
   --min-pts int        DBSCAN min cluster size (default 2)
   --preview            show a short code excerpt for each finding
   --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)
+  --sort string        result ordering: score | score-asc | size | size-asc | name (default score)
+  --limit int          show only the top N pairs and N clusters (0 = no limit)
 
 EXAMPLES:
   codetwin ./src

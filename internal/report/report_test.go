@@ -135,6 +135,222 @@ func TestRender_PreviewInClusters(t *testing.T) {
 	}
 }
 
+func TestRender_ClustersSortedByID(t *testing.T) {
+	// Clusters arrive in random order from upstream map iteration; Render
+	// must stabilize them so output is deterministic and "Cluster 1, 2, 3"
+	// always appears in numerical order.
+	var buf strings.Builder
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 0.9, Structural: 0.9, Semantic: 0.9}}
+	clusters := []Cluster{
+		{ID: 2, Members: []string{"x", "y"}},
+		{ID: 0, Members: []string{"a", "b"}},
+		{ID: 1, Members: []string{"m", "n"}},
+	}
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.30})
+	out := buf.String()
+	idx1 := strings.Index(out, "Cluster 1")
+	idx2 := strings.Index(out, "Cluster 2")
+	idx3 := strings.Index(out, "Cluster 3")
+	if idx1 < 0 || idx2 < 0 || idx3 < 0 {
+		t.Fatalf("expected Cluster 1, 2, 3 in output:\n%s", out)
+	}
+	if !(idx1 < idx2 && idx2 < idx3) {
+		t.Errorf("clusters not in numerical order: positions 1=%d 2=%d 3=%d", idx1, idx2, idx3)
+	}
+}
+
+func TestRender_PairOrderStableForTiedScores(t *testing.T) {
+	// Equal scores must not reorder between renders. Tested by rendering
+	// the same input twice and comparing the output — sort.SliceStable
+	// guarantees this; sort.Slice does not.
+	pairs := []Pair{
+		{NameA: "a", NameB: "b", Score: 0.5, Structural: 0.5, Semantic: 0.5},
+		{NameA: "c", NameB: "d", Score: 0.5, Structural: 0.5, Semantic: 0.5},
+		{NameA: "e", NameB: "f", Score: 0.5, Structural: 0.5, Semantic: 0.5},
+	}
+	var a, b strings.Builder
+	Render(&a, append([]Pair(nil), pairs...), nil, Options{Plain: true, Threshold: 0.30})
+	Render(&b, append([]Pair(nil), pairs...), nil, Options{Plain: true, Threshold: 0.30})
+	if a.String() != b.String() {
+		t.Errorf("Render output not deterministic for tied scores")
+	}
+}
+
+func TestRender_SummaryReflectsThreshold(t *testing.T) {
+	// A pair scoring 0.50 must NOT appear in any summary bucket when the
+	// threshold filters it out — otherwise "Refactor targets" claims
+	// findings the user can't see.
+	pairs := []Pair{
+		{NameA: "high_a", NameB: "high_b", Score: 0.90, Structural: 0.9, Semantic: 0.9},
+		{NameA: "mid_a", NameB: "mid_b", Score: 0.50, Structural: 0.5, Semantic: 0.5},
+	}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.60})
+	out := buf.String()
+
+	if !strings.Contains(out, "Pairs shown       1") {
+		t.Errorf("summary should report 1 pair shown, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Exact clones      1") {
+		t.Errorf("summary should count the high-score pair, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Refactor targets  0") {
+		t.Errorf("summary must NOT count pairs filtered by threshold; got:\n%s", out)
+	}
+}
+
+func TestRender_SummaryShowsWeakBucketWhenVerbose(t *testing.T) {
+	// In verbose mode all pairs render, including weak similarities (≤ 0.45).
+	// The summary should expose a "Weak similarities" line so totals add up.
+	pairs := []Pair{
+		{NameA: "weak_a", NameB: "weak_b", Score: 0.30, Structural: 0.3, Semantic: 0.3},
+	}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30, Verbose: true})
+	out := buf.String()
+	if !strings.Contains(out, "Weak similarities 1") {
+		t.Errorf("summary should include 'Weak similarities 1' in verbose mode, got:\n%s", out)
+	}
+}
+
+func TestPrepare_SortBySize(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "a", NameB: "b", Score: 0.9, LinesA: 5, LinesB: 5},
+		{NameA: "c", NameB: "d", Score: 0.5, LinesA: 50, LinesB: 30},
+		{NameA: "e", NameB: "f", Score: 0.7, LinesA: 20, LinesB: 20},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortSize, Threshold: 0})
+	// Expect order by max(LinesA, LinesB) desc: 50, 20, 5
+	wantOrder := []string{"c", "e", "a"}
+	for i, w := range wantOrder {
+		if out[i].NameA != w {
+			t.Errorf("position %d: got NameA=%q, want %q", i, out[i].NameA, w)
+		}
+	}
+}
+
+func TestPrepare_SortBySizeAsc(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "big", NameB: "x", Score: 0.5, LinesA: 50, LinesB: 50},
+		{NameA: "tiny", NameB: "y", Score: 0.5, LinesA: 3, LinesB: 3},
+		{NameA: "mid", NameB: "z", Score: 0.5, LinesA: 20, LinesB: 20},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortSizeAsc, Threshold: 0})
+	wantOrder := []string{"tiny", "mid", "big"}
+	for i, w := range wantOrder {
+		if out[i].NameA != w {
+			t.Errorf("position %d: got NameA=%q, want %q", i, out[i].NameA, w)
+		}
+	}
+}
+
+func TestPrepare_SortByName(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "zeta", NameB: "x", Score: 0.5},
+		{NameA: "alpha", NameB: "y", Score: 0.5},
+		{NameA: "mu", NameB: "z", Score: 0.5},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
+	wantOrder := []string{"alpha", "mu", "zeta"}
+	for i, w := range wantOrder {
+		if out[i].NameA != w {
+			t.Errorf("position %d: got NameA=%q, want %q", i, out[i].NameA, w)
+		}
+	}
+}
+
+func TestPrepare_SortByScoreAsc(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "high", NameB: "x", Score: 0.9},
+		{NameA: "low", NameB: "y", Score: 0.3},
+		{NameA: "mid", NameB: "z", Score: 0.6},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortScoreAsc, Threshold: 0})
+	wantOrder := []string{"low", "mid", "high"}
+	for i, w := range wantOrder {
+		if out[i].NameA != w {
+			t.Errorf("position %d: got NameA=%q, want %q", i, out[i].NameA, w)
+		}
+	}
+}
+
+func TestPrepare_ClustersSortBySize(t *testing.T) {
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"a", "b"}, Score: 0.9},
+		{ID: 1, Members: []string{"c", "d", "e", "f"}, Score: 0.6},
+		{ID: 2, Members: []string{"g", "h", "i"}, Score: 0.7},
+	}
+	_, out := Prepare(nil, clusters, Options{Sort: SortSize})
+	if len(out) != 3 {
+		t.Fatalf("expected 3 clusters, got %d", len(out))
+	}
+	// Expect by member count desc: 4, 3, 2 → IDs 1, 2, 0
+	wantIDs := []int{1, 2, 0}
+	for i, id := range wantIDs {
+		if out[i].ID != id {
+			t.Errorf("position %d: got ID=%d, want %d", i, out[i].ID, id)
+		}
+	}
+}
+
+func TestPrepare_ClustersSortByScore(t *testing.T) {
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"a", "b"}, Score: 0.5},
+		{ID: 1, Members: []string{"c", "d"}, Score: 0.9},
+		{ID: 2, Members: []string{"e", "f"}, Score: 0.7},
+	}
+	_, out := Prepare(nil, clusters, Options{Sort: SortScore})
+	wantIDs := []int{1, 2, 0}
+	for i, id := range wantIDs {
+		if out[i].ID != id {
+			t.Errorf("position %d: got ID=%d, want %d", i, out[i].ID, id)
+		}
+	}
+}
+
+func TestPrepare_LimitClampsBothSections(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "p1", Score: 0.9},
+		{NameA: "p2", Score: 0.8},
+		{NameA: "p3", Score: 0.7},
+		{NameA: "p4", Score: 0.6},
+	}
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"a"}, Score: 0.9},
+		{ID: 1, Members: []string{"b"}, Score: 0.8},
+		{ID: 2, Members: []string{"c"}, Score: 0.7},
+	}
+	visP, visC := Prepare(pairs, clusters, Options{Sort: SortScore, Limit: 2, Threshold: 0})
+	if len(visP) != 2 {
+		t.Errorf("pairs: expected 2 after limit, got %d", len(visP))
+	}
+	if len(visC) != 2 {
+		t.Errorf("clusters: expected 2 after limit, got %d", len(visC))
+	}
+}
+
+func TestPrepare_LimitDoesNotPadShortSection(t *testing.T) {
+	clusters := []Cluster{{ID: 0, Members: []string{"a"}, Score: 0.9}}
+	_, visC := Prepare(nil, clusters, Options{Limit: 5})
+	if len(visC) != 1 {
+		t.Errorf("expected 1 cluster (no padding), got %d", len(visC))
+	}
+}
+
+func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
+	// 4 pairs, threshold=0.50 keeps 2, limit=3 should still yield 2 (not 3).
+	pairs := []Pair{
+		{NameA: "high1", Score: 0.9},
+		{NameA: "high2", Score: 0.8},
+		{NameA: "low1", Score: 0.3},
+		{NameA: "low2", Score: 0.2},
+	}
+	visP, _ := Prepare(pairs, nil, Options{Sort: SortScore, Threshold: 0.5, Limit: 3})
+	if len(visP) != 2 {
+		t.Errorf("expected 2 pairs after threshold+limit, got %d", len(visP))
+	}
+}
+
 func TestRender_LabelsByScore(t *testing.T) {
 	cases := []struct {
 		score float64

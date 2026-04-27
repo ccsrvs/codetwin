@@ -71,7 +71,27 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --min-pts int           DBSCAN min cluster size (default 2)
 --preview               show a short code excerpt for each finding
 --preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
+--sort string           result ordering: score | score-asc | size | size-asc | name (default score)
+--limit int             show only the top N pairs and N clusters (0 = no limit)
 ```
+
+### Sorting and limiting results
+
+`--sort` applies the same ordering to both pairs and clusters, with each
+section using its natural interpretation:
+
+| Mode         | Pairs                            | Clusters                              |
+|--------------|----------------------------------|---------------------------------------|
+| `score`      | highest similarity first         | highest avg internal pair score first |
+| `score-asc`  | borderline cases first           | loosest clusters first                |
+| `size`       | biggest snippets first           | most members first ("biggest bang")   |
+| `size-asc`   | smallest snippets first          | smallest clusters first ("quick wins")|
+| `name`       | alphabetical by file path        | alphabetical by first member          |
+
+`--limit N` caps **each** section at N items independently (top N pairs and
+top N clusters), applied after sort and threshold filtering. Use it together
+with `--sort` to focus on what matters: e.g. `--sort size --limit 5` for the
+five biggest refactor opportunities.
 
 ## Step 3 — Interpret results
 
