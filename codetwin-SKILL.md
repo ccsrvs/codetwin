@@ -62,6 +62,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Machine-readable | `codetwin --json --threshold 0.40 <path>` |
 | Show everything | `codetwin --verbose --threshold 0.20 <path>` |
 | Inline code previews | `codetwin --preview --threshold 0.40 <path>` |
+| Filter noisy short-snippet matches | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
 
@@ -79,6 +80,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
 --sort string           result ordering: score | score-asc | size | size-asc | name (default score)
 --limit int             show only the top N pairs and N clusters (0 = no limit)
+--min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off);
+                            multiplier ramps from 0.5× at 0 lines to 1.0× at N
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
@@ -115,7 +118,8 @@ strip before tokenization. CLI flags always win over the `defaults` block.
     "preview": true,
     "preview_lines": 15,
     "sort": "size",
-    "limit": 20
+    "limit": 20,
+    "min_confidence_lines": 20
   },
   "ignore_paths": [
     "vendor/**",
@@ -265,4 +269,5 @@ codetwin --preview --threshold 0.40 ./testdata
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |
 | Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
 | Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
+| 100% scores on tiny snippets that aren't real duplicates | Add `--min-confidence-lines 20` — short matches lose proportional score |
 | Build errors | Run `go test ./...` first to isolate the broken package |

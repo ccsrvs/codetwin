@@ -76,6 +76,7 @@ func main() {
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
 	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name")
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
+	minConfLines := flag.Int("min-confidence-lines", 0, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
@@ -112,7 +113,7 @@ func main() {
 		applied := flagsExplicitlySet()
 		applyConfigDefaults(cfg.Defaults, applied,
 			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
-			preview, previewLines, sortMode, limit)
+			preview, previewLines, sortMode, limit, minConfLines)
 	}
 
 	ignoreMatcher, err := compileIgnoreMatcher(cfg)
@@ -275,11 +276,12 @@ func main() {
 	debugf("clusters built: %d", len(clusters))
 
 	opts := report.Options{
-		Plain:     *plain,
-		Threshold: *threshold,
-		Verbose:   *verbose,
-		Sort:      report.SortMode(*sortMode),
-		Limit:     *limit,
+		Plain:              *plain,
+		Threshold:          *threshold,
+		Verbose:            *verbose,
+		Sort:               report.SortMode(*sortMode),
+		Limit:              *limit,
+		MinConfidenceLines: *minConfLines,
 	}
 
 	// Sort + threshold filter + limit ONCE here in main.go, then build
@@ -1011,6 +1013,7 @@ func applyConfigDefaults(
 	threshold *float64, plain *bool, jsonOut *bool, verbose *bool,
 	minLines *int, eps *float64, minPts *int,
 	preview *bool, previewLines *int, sortMode *string, limit *int,
+	minConfLines *int,
 ) {
 	if d.Threshold != nil && !explicit["threshold"] {
 		*threshold = *d.Threshold
@@ -1044,6 +1047,9 @@ func applyConfigDefaults(
 	}
 	if d.Limit != nil && !explicit["limit"] {
 		*limit = *d.Limit
+	}
+	if d.MinConfidenceLines != nil && !explicit["min-confidence-lines"] {
+		*minConfLines = *d.MinConfidenceLines
 	}
 }
 

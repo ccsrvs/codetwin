@@ -32,9 +32,9 @@ const Filename = ".codetwin.json"
 // Config mirrors the on-disk JSON schema. All fields are optional; nil
 // pointers in Defaults distinguish "not specified" from "set to zero".
 type Config struct {
-	Defaults        *Defaults `json:"defaults,omitempty"`
-	IgnorePaths     []string  `json:"ignore_paths,omitempty"`
-	IgnorePatterns  []string  `json:"ignore_patterns,omitempty"`
+	Defaults       *Defaults `json:"defaults,omitempty"`
+	IgnorePaths    []string  `json:"ignore_paths,omitempty"`
+	IgnorePatterns []string  `json:"ignore_patterns,omitempty"`
 }
 
 // Defaults overrides built-in flag defaults. Using pointers so the absence
@@ -51,6 +51,8 @@ type Defaults struct {
 	PreviewLines *int     `json:"preview_lines,omitempty"`
 	Sort         *string  `json:"sort,omitempty"`
 	Limit        *int     `json:"limit,omitempty"`
+
+	MinConfidenceLines *int `json:"min_confidence_lines,omitempty"`
 }
 
 // Load reads .codetwin.json from dir and returns a parsed Config. When the
@@ -193,9 +195,9 @@ func matchPathComponent(path, name string) bool {
 // globToRegex converts a gitignore-style glob to an anchored regular
 // expression. Supports:
 //
-//	*   any run of chars except '/'
-//	**  any run of chars including '/' (collapses surrounding slashes)
-//	?   any single char except '/'
+//   - any run of chars except '/'
+//     **  any run of chars including '/' (collapses surrounding slashes)
+//     ?   any single char except '/'
 //
 // All other regex metacharacters are escaped. The returned regex is
 // anchored at both ends; callers test it against either the full path or

@@ -66,6 +66,7 @@ codetwin --verbose ./src
 | `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
 | `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
+| `--min-confidence-lines` | `0` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). See [Scoring](#scoring). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
@@ -80,6 +81,19 @@ codetwin --verbose ./src
 | < 45% | Weak similarity | Probably coincidental |
 
 Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF)`.
+
+### Short-snippet confidence
+
+Two 5-line snippets that share their entire token shape and two 25-line
+snippets that do the same both score 100%, but the first is much weaker
+evidence — short snippets are forced into a shared shape by their API
+surface (e.g. test scaffolding that has to call one function and assert
+on the result). `--min-confidence-lines N` opts into a length-aware
+dampener: a pair's score is multiplied by `0.5 + 0.5 · min(LinesA, LinesB) / N`
+(capped at 1.0), so matches under N non-blank lines lose proportional
+score. A common starting point is `--min-confidence-lines 20` — enough to
+push test boilerplate out of the "exact clone" bucket while leaving real
+multi-line refactor targets unaffected.
 
 ## Sorting
 
@@ -111,7 +125,8 @@ always win over config defaults.
     "preview": true,
     "preview_lines": 15,
     "sort": "size",
-    "limit": 20
+    "limit": 20,
+    "min_confidence_lines": 20
   },
   "ignore_paths": [
     "vendor/**",
@@ -333,6 +348,9 @@ codetwin --sort size --limit 5 --preview ./src
 
 # Triage borderline cases — pairs that ALMOST cleared the threshold
 codetwin --sort score-asc --threshold 0.40 ./src
+
+# Suppress noisy short-snippet matches (test boilerplate, tiny wrappers)
+codetwin --min-confidence-lines 20 --threshold 0.50 ./src
 
 # Strict CI gate — fail if any exact clones exist
 codetwin --json --threshold 0.85 ./src | jq '.pairs | length' \

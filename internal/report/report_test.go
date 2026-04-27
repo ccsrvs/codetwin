@@ -351,6 +351,57 @@ func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
 	}
 }
 
+func TestPrepare_MinConfidenceLinesDampensShortMatches(t *testing.T) {
+	// A 5-line match with threshold=20 gets multiplier 0.5 + 0.5*(5/20) = 0.625;
+	// a 25-line match (>= threshold) is unchanged.
+	pairs := []Pair{
+		{NameA: "short", Score: 1.00, Structural: 1, Semantic: 1, LinesA: 5, LinesB: 5},
+		{NameA: "long", Score: 1.00, Structural: 1, Semantic: 1, LinesA: 25, LinesB: 30},
+	}
+	visP, _ := Prepare(pairs, nil, Options{
+		Sort:               SortName,
+		MinConfidenceLines: 20,
+	})
+	if len(visP) != 2 {
+		t.Fatalf("expected 2 pairs, got %d", len(visP))
+	}
+	var short, long Pair
+	for _, p := range visP {
+		switch p.NameA {
+		case "short":
+			short = p
+		case "long":
+			long = p
+		}
+	}
+	if got, want := short.Score, 0.625; got != want {
+		t.Errorf("short.Score = %.4f; want %.4f", got, want)
+	}
+	if got, want := long.Score, 1.0; got != want {
+		t.Errorf("long.Score = %.4f; want %.4f (unchanged)", got, want)
+	}
+}
+
+func TestPrepare_MinConfidenceLinesOffByDefault(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "x", Score: 1.0, LinesA: 3, LinesB: 3},
+	}
+	visP, _ := Prepare(pairs, nil, Options{Sort: SortName})
+	if got, want := visP[0].Score, 1.0; got != want {
+		t.Errorf("default damping should be off; Score = %.4f, want %.4f", got, want)
+	}
+}
+
+func TestPrepare_MinConfidenceLinesDoesNotMutateInput(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "x", Score: 1.0, LinesA: 4, LinesB: 4},
+	}
+	_, _ = Prepare(pairs, nil, Options{Sort: SortName, MinConfidenceLines: 20})
+	if got := pairs[0].Score; got != 1.0 {
+		t.Errorf("Prepare mutated caller's slice: Score = %.4f, want 1.0", got)
+	}
+}
+
 func TestRender_LabelsByScore(t *testing.T) {
 	cases := []struct {
 		score float64
