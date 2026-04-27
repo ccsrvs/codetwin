@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -124,6 +125,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	showProgress := !*noProgress && stderrIsTTY()
+
 	// Cache stores per-file tokenize+fingerprint output keyed by content
 	// hash + ignore_patterns hash + tokenizer version. Hits skip the
 	// expensive splitter+tokenizer+fingerprint work on unchanged files.
@@ -139,89 +142,17 @@ func main() {
 	}
 	patternsHash := cache.PatternsHash(stripPatternStrings(cfg))
 
-	snippets := make([]snippet, 0, len(files))
-	for _, path := range files {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not read %s: %v\n", path, err)
-			continue
-		}
-
-		absPath, _ := filepath.Abs(path)
-		contentHash := cache.HashContent(data)
-		key := cache.Key(absPath, contentHash, patternsHash)
-
-		if entry, ok := cacheState.Get(key); ok {
-			// Cache hit — every chunk reconstructed without rerunning
-			// the tokenizer or fingerprinter. min_lines is applied here
-			// (not at cache write time) so the same cache is valid for
-			// different --min-lines values.
-			for _, c := range entry.Chunks {
-				if c.NonBlankLn < *minLines {
-					continue
-				}
-				snippets = append(snippets, snippet{
-					name:       c.Name,
-					lang:       tokenizer.Language(c.Lang),
-					code:       c.Code,
-					startLine:  c.StartLine,
-					nonBlankLn: c.NonBlankLn,
-					tokens:     c.Tokens,
-					lines:      c.Lines,
-					fps:        positionalFromCache(c),
-				})
-			}
-			continue
-		}
-
-		// Cache miss — full processing path. Cache everything tokenizable
-		// (skip empty-token chunks); apply --min-lines on read instead.
-		code := string(data)
-		lang := tokenizer.Detect(path, code)
-		var entryChunks []cache.Chunk
-		for _, ch := range splitter.Split(path, code, lang) {
-			tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang,
-				tokenizer.WithStripPatterns(stripPatterns))
-			if len(tokens) == 0 {
-				continue
-			}
-			nonBlank := countLines(ch.Code)
-			ps := fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW)
-			name := chunkName(ch)
-
-			entryChunks = append(entryChunks, cache.Chunk{
-				Name:       name,
-				Lang:       string(lang),
-				StartLine:  ch.StartLine,
-				EndLine:    ch.EndLine,
-				Code:       ch.Code,
-				Tokens:     tokens,
-				Lines:      lines,
-				NonBlankLn: nonBlank,
-				Hashes:     setToHashes(ps.Set),
-				Positions:  ps.Positions,
-				K:          ps.K,
-			})
-
-			if nonBlank < *minLines {
-				continue
-			}
-			snippets = append(snippets, snippet{
-				name:       name,
-				lang:       lang,
-				code:       ch.Code,
-				startLine:  ch.StartLine,
-				nonBlankLn: nonBlank,
-				tokens:     tokens,
-				lines:      lines,
-				fps:        ps,
-			})
-		}
-
-		cacheState.Put(key, cache.Entry{
-			ContentHash: contentHash,
-			Chunks:      entryChunks,
-		})
+	snippets, fileWarnings := processFilesParallel(
+		files, *minLines, stripPatterns, cacheState, patternsHash, showProgress,
+	)
+	// Workers complete in nondeterministic order; sort by name so snippet
+	// indices (and therefore pair construction order, cluster IDs, and any
+	// equal-score tie ordering) are stable across runs.
+	sort.Slice(snippets, func(i, j int) bool {
+		return snippets[i].name < snippets[j].name
+	})
+	for _, w := range fileWarnings {
+		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 
 	if !*noCache {
@@ -261,7 +192,6 @@ func main() {
 	// most pairs fall into this bucket.
 	hashIndex := buildHashIndex(snippets)
 
-	showProgress := !*noProgress && stderrIsTTY()
 	pairs := computeSimilarityMatrix(
 		matrix, snippets, vectors, hashIndex, showProgress,
 	)
@@ -652,7 +582,7 @@ func computeSimilarityMatrix(
 	if showProgress && totalPairs > 0 {
 		progStop = make(chan struct{})
 		progWg.Add(1)
-		go reportProgress(&done, totalPairs, progStop, &progWg)
+		go reportProgress(&done, totalPairs, progStop, &progWg, "comparing snippets")
 	}
 
 	pairsByWorker := make([][]report.Pair, workers)
@@ -729,10 +659,11 @@ func computeSimilarityMatrix(
 	return pairs
 }
 
-// reportProgress prints a one-line progress indicator to stderr while the
-// matrix is being computed. Stops when stop is closed and clears the line
-// before returning so it doesn't bleed into the report output.
-func reportProgress(done *atomic.Int64, total int64, stop <-chan struct{}, wg *sync.WaitGroup) {
+// reportProgress prints a one-line progress indicator to stderr until stop
+// is closed. The line is cleared before returning so it doesn't bleed into
+// the report output. label appears at the start of every tick (e.g.
+// "processing files" or "comparing snippets").
+func reportProgress(done *atomic.Int64, total int64, stop <-chan struct{}, wg *sync.WaitGroup, label string) {
 	defer wg.Done()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
@@ -744,9 +675,183 @@ func reportProgress(done *atomic.Int64, total int64, stop <-chan struct{}, wg *s
 		case <-ticker.C:
 			d := done.Load()
 			pct := float64(d) / float64(total) * 100
-			fmt.Fprintf(os.Stderr, "\rcomparing snippets: %d/%d (%.1f%%)", d, total, pct)
+			fmt.Fprintf(os.Stderr, "\r%s: %d/%d (%.1f%%)", label, d, total, pct)
 		}
 	}
+}
+
+// processFilesParallel runs the per-file split → tokenize → fingerprint
+// pipeline across runtime.NumCPU() goroutines. Each worker pulls from a
+// channel of file paths and accumulates snippets into a per-worker buffer
+// to avoid lock contention on a shared slice. Cache.Get/Put are already
+// internally synchronized so the cache is shared safely.
+//
+// Errors per file (e.g. a file we can't read) are collected as warnings
+// and returned alongside the snippet list, rather than printed inline,
+// so they don't tear the progress indicator. main() prints them after.
+func processFilesParallel(
+	files []string,
+	minLines int,
+	stripPatterns []*regexp.Regexp,
+	cacheState *cache.Cache,
+	patternsHash string,
+	showProgress bool,
+) ([]snippet, []string) {
+	n := len(files)
+	if n == 0 {
+		return nil, nil
+	}
+	workers := runtime.NumCPU()
+	if workers > n {
+		workers = n
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	var done atomic.Int64
+	var progStop chan struct{}
+	var progWg sync.WaitGroup
+	if showProgress {
+		progStop = make(chan struct{})
+		progWg.Add(1)
+		go reportProgress(&done, int64(n), progStop, &progWg, "processing files")
+	}
+
+	workCh := make(chan string, n)
+	for _, p := range files {
+		workCh <- p
+	}
+	close(workCh)
+
+	type result struct {
+		snippets []snippet
+		warnings []string
+	}
+	resultsCh := make(chan result, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var local result
+			for path := range workCh {
+				snips, warn := processOneFile(path, minLines, stripPatterns, cacheState, patternsHash)
+				local.snippets = append(local.snippets, snips...)
+				if warn != "" {
+					local.warnings = append(local.warnings, warn)
+				}
+				done.Add(1)
+			}
+			resultsCh <- local
+		}()
+	}
+	wg.Wait()
+	close(resultsCh)
+
+	if progStop != nil {
+		close(progStop)
+		progWg.Wait()
+	}
+
+	var allSnippets []snippet
+	var allWarnings []string
+	for r := range resultsCh {
+		allSnippets = append(allSnippets, r.snippets...)
+		allWarnings = append(allWarnings, r.warnings...)
+	}
+	return allSnippets, allWarnings
+}
+
+// processOneFile is the per-file pipeline (cache lookup, splitter, tokenizer,
+// fingerprint), pulled out of main() so it's safe to call concurrently.
+// Returns the snippets that survive --min-lines plus an optional warning
+// string for read errors. Cache state is shared and thread-safe via its
+// internal mutex.
+func processOneFile(
+	path string,
+	minLines int,
+	stripPatterns []*regexp.Regexp,
+	cacheState *cache.Cache,
+	patternsHash string,
+) ([]snippet, string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Sprintf("could not read %s: %v", path, err)
+	}
+
+	absPath, _ := filepath.Abs(path)
+	contentHash := cache.HashContent(data)
+	key := cache.Key(absPath, contentHash, patternsHash)
+
+	if entry, ok := cacheState.Get(key); ok {
+		var out []snippet
+		for _, c := range entry.Chunks {
+			if c.NonBlankLn < minLines {
+				continue
+			}
+			out = append(out, snippet{
+				name:       c.Name,
+				lang:       tokenizer.Language(c.Lang),
+				code:       c.Code,
+				startLine:  c.StartLine,
+				nonBlankLn: c.NonBlankLn,
+				tokens:     c.Tokens,
+				lines:      c.Lines,
+				fps:        positionalFromCache(c),
+			})
+		}
+		return out, ""
+	}
+
+	code := string(data)
+	lang := tokenizer.Detect(path, code)
+	var out []snippet
+	var entryChunks []cache.Chunk
+	for _, ch := range splitter.Split(path, code, lang) {
+		tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang,
+			tokenizer.WithStripPatterns(stripPatterns))
+		if len(tokens) == 0 {
+			continue
+		}
+		nonBlank := countLines(ch.Code)
+		ps := fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW)
+		name := chunkName(ch)
+
+		entryChunks = append(entryChunks, cache.Chunk{
+			Name:       name,
+			Lang:       string(lang),
+			StartLine:  ch.StartLine,
+			EndLine:    ch.EndLine,
+			Code:       ch.Code,
+			Tokens:     tokens,
+			Lines:      lines,
+			NonBlankLn: nonBlank,
+			Hashes:     setToHashes(ps.Set),
+			Positions:  ps.Positions,
+			K:          ps.K,
+		})
+
+		if nonBlank < minLines {
+			continue
+		}
+		out = append(out, snippet{
+			name:       name,
+			lang:       lang,
+			code:       ch.Code,
+			startLine:  ch.StartLine,
+			nonBlankLn: nonBlank,
+			tokens:     tokens,
+			lines:      lines,
+			fps:        ps,
+		})
+	}
+
+	cacheState.Put(key, cache.Entry{
+		ContentHash: contentHash,
+		Chunks:      entryChunks,
+	})
+	return out, ""
 }
 
 // stderrIsTTY reports whether stderr is connected to a terminal. Used to

@@ -79,6 +79,9 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
 --sort string           result ordering: score | score-asc | size | size-asc | name (default score)
 --limit int             show only the top N pairs and N clusters (0 = no limit)
+--no-progress           suppress the live progress indicator on stderr
+--no-cache              skip reading and writing .codetwin-cache.bin
+--rebuild-cache         ignore any existing cache and rebuild from scratch
 ```
 
 ### Sorting and limiting results
@@ -142,6 +145,29 @@ similarity scores.
 
 When you scan multiple paths and one is nested inside another (e.g.
 `./src ./src/utils`), only the outer path is walked — no double-counting.
+
+### Performance and the cache
+
+codetwin parallelizes the all-pairs comparison across CPU cores and uses
+an inverted index to skip Jaccard work for pairs that share no
+fingerprints, so a fresh scan of a big repo runs in seconds.
+
+The expensive per-file work (split → tokenize → fingerprint) is also
+persisted to `.codetwin-cache.bin` in the working directory. On a
+warm rerun any file whose content + ignore_patterns are unchanged is
+served from cache, often making subsequent runs nearly instant. Add
+the cache file to `.gitignore` (or let codetwin's installer do it for
+you).
+
+| Goal | Flag |
+|---|---|
+| Skip caching entirely | `--no-cache` |
+| Force a fresh build, then re-cache | `--rebuild-cache` |
+| Suppress the live progress counter | `--no-progress` |
+
+A live `comparing snippets: N/M (X%)` indicator prints to stderr while
+the matrix is computing. It's auto-suppressed when stderr isn't a TTY
+(piping to a file or running under CI), so log capture stays clean.
 
 ## Step 3 — Interpret results
 

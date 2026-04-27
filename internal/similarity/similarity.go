@@ -5,7 +5,10 @@
 // structure differs, by comparing the vocabulary distribution of token streams.
 package similarity
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // Vector is a sparse TF-IDF weighted term vector.
 type Vector map[string]float64
@@ -62,41 +65,52 @@ func (c *Corpus) Vectorize(tokens []string) Vector {
 	return vec
 }
 
-// NormalizedVector pairs a Vector with its precomputed L2 norm so the inner
-// loop of similarity computation is a single map walk plus one division per
-// pair, instead of recomputing norms on every comparison.
+// NormalizedVector pairs a Vector with its precomputed L2 norm and a sorted
+// key list. Cached norms cut O(n²) re-computation; the sorted keys ensure
+// the inner-loop dot product iterates terms in a deterministic order so
+// floating-point sums (and thus pair scores) are bit-identical across
+// runs. Without that, Go's randomized map iteration would produce slightly
+// different scores each run, which a stable sort would then order
+// differently when many pairs tie at the displayed precision.
 type NormalizedVector struct {
 	V    Vector
-	Norm float64 // sqrt(sum of squares)
+	Keys []string // sorted keys of V, for deterministic iteration
+	Norm float64  // sqrt(sum of squares)
 }
 
-// Normalize precomputes the L2 norm so subsequent CosineFromNormalized calls
-// don't redo it. Use when the same vector is compared against many others,
-// as in the all-pairs similarity matrix.
+// Normalize precomputes the L2 norm and sorted key list so subsequent
+// CosineFromNormalized calls don't redo either. The norm itself is summed
+// in sorted-key order so the same vector always yields the same norm bit-
+// for-bit.
 func Normalize(v Vector) NormalizedVector {
+	keys := make([]string, 0, len(v))
+	for k := range v {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var sumSq float64
-	for _, val := range v {
+	for _, k := range keys {
+		val := v[k]
 		sumSq += val * val
 	}
-	return NormalizedVector{V: v, Norm: math.Sqrt(sumSq)}
+	return NormalizedVector{V: v, Keys: keys, Norm: math.Sqrt(sumSq)}
 }
 
-// CosineFromNormalized computes cosine similarity using precomputed norms.
-// Matches Cosine() exactly; this variant just amortizes the norm
-// computation across all comparisons of the same vector.
+// CosineFromNormalized computes cosine similarity using precomputed norms,
+// iterating the smaller vector's sorted keys so the dot product is
+// deterministic.
 func CosineFromNormalized(a, b NormalizedVector) float64 {
 	if a.Norm == 0 || b.Norm == 0 || len(a.V) == 0 || len(b.V) == 0 {
 		return 0
 	}
-	// Iterate the smaller map for cache locality.
-	small, large := a.V, b.V
+	smallKeys, small, large := a.Keys, a.V, b.V
 	if len(b.V) < len(a.V) {
-		small, large = b.V, a.V
+		smallKeys, small, large = b.Keys, b.V, a.V
 	}
 	var dot float64
-	for term, va := range small {
+	for _, term := range smallKeys {
 		if vb, ok := large[term]; ok {
-			dot += va * vb
+			dot += small[term] * vb
 		}
 	}
 	return dot / (a.Norm * b.Norm)

@@ -66,6 +66,9 @@ codetwin --verbose ./src
 | `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
 | `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
+| `--no-progress` | false | Suppress the live progress indicator on stderr |
+| `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
+| `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 
 ## Scoring
 
@@ -145,6 +148,36 @@ Useful for filtering out boilerplate that would otherwise inflate scores
 expressions with `(?m)` multi-line mode automatically applied so `^` and
 `$` anchor on each line.
 
+## Performance
+
+codetwin is designed to handle large repositories. A few mechanisms in
+play:
+
+**Parallel matrix.** The all-pairs similarity computation shards rows
+across `runtime.NumCPU()` goroutines. On an 8-core machine that's
+roughly an 8x speedup on the dominant cost.
+
+**Inverted-index pair pruning.** Before computing scores, codetwin
+builds a `fingerprint-hash → snippet-indices` map. Pairs that share
+zero fingerprints get structural=0 without paying for a Jaccard call —
+on a typical big repo, most pairs are in that bucket. Cosine still
+runs for every pair so cross-language semantic-only matches still
+surface.
+
+**Per-file cache.** The expensive per-file work (split → tokenize →
+fingerprint with positions) is persisted to `.codetwin-cache.bin` in
+the working directory. Cache keys are
+`sha256(absPath ‖ contentHash ‖ patternsHash)` so any of those
+changing invalidates the relevant entry automatically. On a warm rerun
+unchanged files skip the entire pipeline. Add `.codetwin-cache.bin` to
+your `.gitignore`. Use `--no-cache` to skip caching entirely or
+`--rebuild-cache` to force a fresh build.
+
+**Live progress.** While the matrix is computing, codetwin prints a
+counter to stderr (`comparing snippets: N/M (X%)`). Auto-suppressed
+when stderr isn't a TTY so CI logs stay clean. Use `--no-progress` to
+force off.
+
 ## Architecture
 
 ```
@@ -158,7 +191,8 @@ codetwin/
     ├── similarity/              # TF-IDF vectors + cosine similarity (semantic)
     ├── cluster/                 # DBSCAN clustering
     ├── report/                  # ANSI terminal + plain text rendering
-    └── config/                  # .codetwin.json loading + ignore matching
+    ├── config/                  # .codetwin.json loading + ignore matching
+    └── cache/                   # .codetwin-cache.bin persistence
 ```
 
 ### How each layer works

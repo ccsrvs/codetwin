@@ -64,6 +64,27 @@ func TestCosine_Symmetric(t *testing.T) {
 	}
 }
 
+func TestCosineFromNormalized_BitDeterministicAcrossCalls(t *testing.T) {
+	// Without sorted-key iteration, Go's randomized map iteration would
+	// give slightly different float sums on each call, breaking
+	// stable-sort ties for pairs with otherwise-equal scores. The norm
+	// must therefore be sum-stable across calls on the same vector.
+	v := Vector{
+		"alpha": 0.5, "beta": 0.7, "gamma": 0.3, "delta": 0.9,
+		"epsilon": 0.1, "zeta": 0.4, "eta": 0.6, "theta": 0.2,
+	}
+	a := Normalize(v)
+	b := Normalize(v)
+	if a.Norm != b.Norm {
+		t.Errorf("two Normalize calls on the same vector produced different norms: %v vs %v", a.Norm, b.Norm)
+	}
+	score1 := CosineFromNormalized(a, b)
+	score2 := CosineFromNormalized(a, b)
+	if score1 != score2 {
+		t.Errorf("two CosineFromNormalized calls on identical inputs differ: %v vs %v", score1, score2)
+	}
+}
+
 func TestCosineFromNormalized_MatchesCosine(t *testing.T) {
 	// The precomputed-norm variant must produce identical scores to the
 	// straightforward Cosine for the same inputs.
