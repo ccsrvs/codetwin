@@ -1,6 +1,9 @@
 package cluster
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestDBSCAN_AllNoiseWhenSparse(t *testing.T) {
 	// All point pairs far apart → no clusters form
@@ -62,6 +65,35 @@ func TestGroups_ExcludesNoise(t *testing.T) {
 	}
 	if len(g[0]) != 2 || len(g[1]) != 2 {
 		t.Errorf("each cluster should have 2 members; got g[0]=%v g[1]=%v", g[0], g[1])
+	}
+}
+
+func TestDBSCAN_FullyConnectedDoesNotExplode(t *testing.T) {
+	// Regression: on a fully-connected graph, the previous implementation
+	// enqueued every point O(n) times and recomputed neighbors O(n³)
+	// total — practically a hang for n ≥ a few thousand. With the
+	// inSeeds dedupe, total work is O(n²) and 2000 points run in well
+	// under a second.
+	const n = 2000
+	distFn := func(i, j int) float64 { return 0.0 } // everyone neighbors everyone
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- DBSCAN(n, 0.5, 2, distFn)
+	}()
+
+	select {
+	case res := <-done:
+		if res.NumClusters != 1 {
+			t.Errorf("fully-connected graph should form 1 cluster, got %d", res.NumClusters)
+		}
+		for i, label := range res.Labels {
+			if label != 0 {
+				t.Errorf("point %d: label = %d; want 0", i, label)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DBSCAN took longer than 5s on n=2000 fully-connected graph; the seed-dedupe regression may be back")
 	}
 }
 

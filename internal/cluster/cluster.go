@@ -37,9 +37,23 @@ func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 			continue // remains noise for now
 		}
 
+		// inSeeds tracks which points have ever been queued for this
+		// cluster's expansion, so densely-connected graphs don't enqueue
+		// the same point multiple times. Without this, a fully-connected
+		// graph with n points enqueues O(n²) entries and recomputes
+		// neighbors O(n³) times — the practical "hang" pathology on
+		// codebases where a single big cluster swallows most chunks.
+		inSeeds := make([]bool, n)
+		inSeeds[i] = true
+
 		labels[i] = clusterID
-		seeds := make([]int, len(nb))
-		copy(seeds, nb)
+		seeds := make([]int, 0, len(nb))
+		for _, k := range nb {
+			if !inSeeds[k] {
+				inSeeds[k] = true
+				seeds = append(seeds, k)
+			}
+		}
 
 		for len(seeds) > 0 {
 			j := seeds[0]
@@ -56,7 +70,8 @@ func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 			nb2 := neighbors(j, n, eps, dist)
 			if len(nb2) >= minPts-1 {
 				for _, k := range nb2 {
-					if labels[k] == noise {
+					if !inSeeds[k] {
+						inSeeds[k] = true
 						seeds = append(seeds, k)
 					}
 				}
