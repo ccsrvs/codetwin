@@ -155,15 +155,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 
-	if !*noCache {
-		if err := cacheState.Save("."); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cache save failed: %v\n", err)
-		}
-	}
-
 	if len(snippets) < 2 {
 		fmt.Fprintln(os.Stderr, "error: not enough parseable snippets to compare")
 		os.Exit(1)
+	}
+
+	// Static placeholder so the user has a visible indicator during the
+	// silent gap between phase 1 ("processing files") and phase 2
+	// ("comparing snippets"). Covers cache save + corpus build +
+	// vectorize + matrix alloc + hash-index build. The matrix progress
+	// bar's first \r-prefixed tick overwrites this line cleanly.
+	if showProgress {
+		fmt.Fprint(os.Stderr, "\rindexing snippets...")
+	}
+
+	if !*noCache {
+		if err := cacheState.Save("."); err != nil {
+			if showProgress {
+				fmt.Fprint(os.Stderr, "\r\033[K")
+			}
+			fmt.Fprintf(os.Stderr, "warning: cache save failed: %v\n", err)
+			if showProgress {
+				fmt.Fprint(os.Stderr, "\rindexing snippets...")
+			}
+		}
 	}
 
 	tokenStreams := make([][]string, len(snippets))
