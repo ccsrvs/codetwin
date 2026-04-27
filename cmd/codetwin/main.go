@@ -79,8 +79,26 @@ func main() {
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
+	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	flag.Usage = usage
 	flag.Parse()
+
+	isTTY := stderrIsTTY()
+	startTime := time.Now()
+	debugf := func(format string, args ...any) {
+		if !*debug {
+			return
+		}
+		elapsed := time.Since(startTime).Round(time.Millisecond)
+		// Only clear the active \r-overwrite progress line when stderr
+		// is a real terminal — otherwise the escape characters show up
+		// as garbage in pipes / log captures.
+		if isTTY {
+			fmt.Fprint(os.Stderr, "\r\033[K")
+		}
+		msg := fmt.Sprintf(format, args...)
+		fmt.Fprintf(os.Stderr, "[debug %v] %s\n", elapsed, msg)
+	}
 
 	// Optional .codetwin.json in CWD: provides flag default overrides plus
 	// ignore_paths / ignore_patterns. Missing file is fine. Apply defaults
@@ -114,18 +132,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	debugf("starting; loaded config=%v patternsHash=%q", cfg != nil, "")
+
 	files, err := collectFiles(paths, ignoreMatcher)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error collecting files: %v\n", err)
 		os.Exit(1)
 	}
+	debugf("collectFiles: %d files", len(files))
 
 	if len(files) < 2 {
 		fmt.Fprintln(os.Stderr, "error: need at least 2 source files to compare")
 		os.Exit(1)
 	}
 
-	showProgress := !*noProgress && stderrIsTTY()
+	showProgress := !*noProgress && isTTY
 
 	// Cache stores per-file tokenize+fingerprint output keyed by content
 	// hash + ignore_patterns hash + tokenizer version. Hits skip the
@@ -141,10 +162,13 @@ func main() {
 		}
 	}
 	patternsHash := cache.PatternsHash(stripPatternStrings(cfg))
+	debugf("cache loaded: %d entries", len(cacheState.Entries))
 
 	snippets, fileWarnings := processFilesParallel(
 		files, *minLines, stripPatterns, cacheState, patternsHash, showProgress,
 	)
+	debugf("processFilesParallel: %d snippets from %d files (%d warnings)",
+		len(snippets), len(files), len(fileWarnings))
 	// Workers complete in nondeterministic order; sort by name so snippet
 	// indices (and therefore pair construction order, cluster IDs, and any
 	// equal-score tie ordering) are stable across runs.
@@ -179,6 +203,7 @@ func main() {
 				fmt.Fprint(os.Stderr, "\rindexing snippets...")
 			}
 		}
+		debugf("cache saved")
 	}
 
 	tokenStreams := make([][]string, len(snippets))
@@ -186,6 +211,7 @@ func main() {
 		tokenStreams[i] = s.tokens
 	}
 	corpus := similarity.NewCorpus(tokenStreams)
+	debugf("corpus built")
 
 	// NormalizedVector precomputes each vector's L2 norm so the inner-loop
 	// cosine is just one dot-product map-walk plus a divide.
@@ -193,26 +219,34 @@ func main() {
 	for i, s := range snippets {
 		vectors[i] = similarity.Normalize(corpus.Vectorize(s.tokens))
 	}
+	debugf("vectorized %d snippets", len(vectors))
 
 	n := len(snippets)
+	matrixBytes := int64(n) * int64(n) * 8
+	debugf("allocating matrix: %d × %d (%d MB)", n, n, matrixBytes/(1024*1024))
 	matrix := make([][]float64, n)
 	for i := range matrix {
 		matrix[i] = make([]float64, n)
 		matrix[i][i] = 1.0
 	}
+	debugf("matrix allocated")
 
 	// Inverted index from fingerprint hash → snippet indices that selected
 	// it. Lets us skip Jaccard work for snippet pairs that share no
 	// fingerprints — those will score 0 anyway, and on a typical big repo
 	// most pairs fall into this bucket.
 	hashIndex := buildHashIndex(snippets)
+	debugf("hash index built: %d unique fingerprints", len(hashIndex))
 
+	debugf("comparing %d × %d = %d pairs", n, n, int64(n)*int64(n-1)/2)
 	pairs := computeSimilarityMatrix(
 		matrix, snippets, vectors, hashIndex, showProgress,
 	)
+	debugf("computeSimilarityMatrix: %d pairs above noise floor", len(pairs))
 
 	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
 	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
+	debugf("DBSCAN: %d clusters", clusterResult.NumClusters)
 	groups := cluster.Groups(clusterResult)
 
 	clusters := make([]report.Cluster, 0, len(groups))
@@ -238,6 +272,7 @@ func main() {
 		}
 		clusters = append(clusters, report.Cluster{ID: id, Members: names, Score: avg})
 	}
+	debugf("clusters built: %d", len(clusters))
 
 	opts := report.Options{
 		Plain:     *plain,
@@ -252,12 +287,15 @@ func main() {
 	// On a big repo this avoids an O(shown²) MatchRange storm over
 	// thousands of snippets when --limit means we'll only show a handful.
 	visiblePairs, visibleClusters := report.Prepare(pairs, clusters, opts)
+	debugf("prepared: %d visible pairs, %d visible clusters",
+		len(visiblePairs), len(visibleClusters))
 
 	if *preview {
 		if showProgress {
 			fmt.Fprint(os.Stderr, "\r\033[Kbuilding previews...")
 		}
 		opts.Previews = buildPreviews(visiblePairs, visibleClusters, snippets, *previewLines)
+		debugf("previews built: %d", len(opts.Previews))
 	}
 
 	if showProgress {
@@ -266,12 +304,14 @@ func main() {
 
 	if *jsonOut {
 		printJSON(visiblePairs, visibleClusters, opts.Previews)
+		debugf("done (json)")
 		return
 	}
 
 	// Render gets already-prepared inputs. Its internal Prepare call is
 	// idempotent on sorted+filtered+limited data.
 	report.Render(os.Stdout, visiblePairs, visibleClusters, opts)
+	debugf("done (rendered)")
 }
 
 // buildPreviews computes a Preview map for every snippet that appears in
@@ -1075,6 +1115,7 @@ FLAGS:
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
+  --debug              print phase checkpoints with elapsed time to stderr
 
 EXAMPLES:
   codetwin ./src
