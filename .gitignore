@@ -1,0 +1,11 @@
+.idea
+.cline*
+.zencoder/
+.claude/worktrees
+.claude/sessions
+*.out
+/codetwin
+/codetwin.exe
+coverage.html
+post_run.log
+.envrc
