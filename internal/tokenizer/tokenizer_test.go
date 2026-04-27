@@ -264,6 +264,97 @@ end`
 	}
 }
 
+func TestTokenizeWithLines_AssignsCorrectLineNumbers(t *testing.T) {
+	code := `def foo():
+    x = 1
+    return x
+`
+	tokens, lines := TokenizeWithLines(code, Python)
+	if len(tokens) != len(lines) {
+		t.Fatalf("tokens (%d) and lines (%d) length mismatch", len(tokens), len(lines))
+	}
+	// Expected tokens: def VAR  VAR NUM  return VAR
+	want := []struct {
+		tok  string
+		line int
+	}{
+		{"def", 1}, {"VAR", 1}, // def foo()
+		{"VAR", 2}, {"NUM", 2}, // x = 1
+		{"return", 3}, {"VAR", 3}, // return x
+	}
+	if len(tokens) != len(want) {
+		t.Fatalf("expected %d tokens, got %d: %v on lines %v", len(want), len(tokens), tokens, lines)
+	}
+	for i, w := range want {
+		if tokens[i] != w.tok || lines[i] != w.line {
+			t.Errorf("token %d: got (%q, line %d); want (%q, line %d)", i, tokens[i], lines[i], w.tok, w.line)
+		}
+	}
+}
+
+func TestTokenizeWithLines_MatchesTokenize(t *testing.T) {
+	// TokenizeWithLines and Tokenize must produce identical token streams —
+	// the only difference is the parallel line-number slice.
+	cases := []struct {
+		name string
+		code string
+		lang Language
+	}{
+		{"python", "def f():\n    x = \"hi\"\n    return x\n", Python},
+		{"go", "package main\nfunc f() int {\n\treturn 1\n}\n", Go},
+		{"js", "function f() { return 'hi'; }\n", JavaScript},
+		{"python with docstring", `def f():
+    """
+    multi-line docstring
+    """
+    return 1
+`, Python},
+		{"with imports", "import os\nfrom pathlib import Path\ndef f():\n    return 1\n", Python},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := Tokenize(c.code, c.lang)
+			b, _ := TokenizeWithLines(c.code, c.lang)
+			if len(a) != len(b) {
+				t.Fatalf("token count mismatch: Tokenize=%d, TokenizeWithLines=%d\n  a=%v\n  b=%v",
+					len(a), len(b), a, b)
+			}
+			for i := range a {
+				if a[i] != b[i] {
+					t.Errorf("token[%d] mismatch: Tokenize=%q, TokenizeWithLines=%q", i, a[i], b[i])
+				}
+			}
+		})
+	}
+}
+
+func TestTokenizeWithLines_MultilineStringPreservesLines(t *testing.T) {
+	// A multi-line string becomes "STR" attributed to the opening-quote line.
+	// Tokens AFTER the string must still carry correct line numbers.
+	code := `def f():
+    msg = """
+hello
+world
+"""
+    return msg
+`
+	tokens, lines := TokenizeWithLines(code, Python)
+	// Find the 'return' token and verify its line is 6 (after the 4-line string)
+	found := false
+	for i, tok := range tokens {
+		if tok == "return" {
+			found = true
+			if lines[i] != 6 {
+				t.Errorf("expected 'return' on line 6, got line %d", lines[i])
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("'return' token not found in: %v", tokens)
+	}
+}
+
 func TestTokenize_ElixirNormalizesSingleQuotedStrings(t *testing.T) {
 	// Single-quoted strings should normalize to STR (regression test for the
 	// Elixir string regex bug fixed during initial setup).

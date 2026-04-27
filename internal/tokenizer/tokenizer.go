@@ -248,21 +248,86 @@ func Normalize(code string, lang Language) string {
 // Tokenize normalizes the code then splits on whitespace and punctuation
 // returning a clean token slice ready for fingerprinting.
 func Tokenize(code string, lang Language) []string {
-	norm := Normalize(code, lang)
-	raw := strings.FieldsFunc(norm, func(r rune) bool {
-		return unicode.IsSpace(r)
-	})
+	tokens, _ := TokenizeWithLines(code, lang)
+	return tokens
+}
 
-	out := make([]string, 0, len(raw))
-	for _, t := range raw {
-		t = strings.TrimFunc(t, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+// TokenizeWithLines is Tokenize plus a parallel slice of 1-based line numbers,
+// where lines[i] is the originating source line of tokens[i]. Multi-line
+// constructs (block comments, multi-line strings) are replaced with their
+// canonical token (e.g. "STR") attributed to the line where they opened, with
+// downstream blank lines preserved so subsequent token line numbers remain
+// accurate.
+func TokenizeWithLines(code string, lang Language) ([]string, []int) {
+	p, ok := patterns[lang]
+	if !ok {
+		p = patterns[JavaScript]
+	}
+
+	preprocessed := preprocessKeepLines(code, p)
+
+	kwSet := make(map[string]bool, len(p.keywords))
+	for _, kw := range p.keywords {
+		kwSet[kw] = true
+	}
+	ident := regexp.MustCompile(`\b[a-zA-Z_][a-zA-Z0-9_]*\b`)
+
+	var tokens []string
+	var lineNums []int
+	for i, line := range strings.Split(preprocessed, "\n") {
+		// Replace non-keyword identifiers with VAR
+		normalizedLine := ident.ReplaceAllStringFunc(line, func(m string) string {
+			if kwSet[m] || m == "STR" || m == "NUM" {
+				return m
+			}
+			return "VAR"
 		})
-		if t != "" {
-			out = append(out, t)
+		raw := strings.FieldsFunc(normalizedLine, func(r rune) bool {
+			return unicode.IsSpace(r)
+		})
+		for _, t := range raw {
+			t = strings.TrimFunc(t, func(r rune) bool {
+				return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+			})
+			if t == "" {
+				continue
+			}
+			tokens = append(tokens, t)
+			lineNums = append(lineNums, i+1)
 		}
 	}
-	return out
+	return tokens, lineNums
+}
+
+// preprocessKeepLines is Normalize's comment/import/string/number passes done
+// in a way that preserves newline positions: each replacement keeps the same
+// number of newlines as the matched span so that downstream line-number
+// tracking stays accurate. Identifier replacement is intentionally NOT done
+// here — callers handle that per-line so they can attribute each token to a
+// source line.
+func preprocessKeepLines(code string, p *langPatterns) string {
+	s := replacePreservingNewlines(code, p.comments, " ")
+	for _, im := range p.imports {
+		s = replacePreservingNewlines(s, im, " ")
+	}
+	s = replacePreservingNewlines(s, p.strings, "STR")
+	// Numeric literals are line-internal in every supported language.
+	s = p.numbers.ReplaceAllString(s, "NUM")
+	return s
+}
+
+// replacePreservingNewlines replaces each match of re with `replacement`,
+// then re-appends one '\n' per newline that was inside the original match.
+// This keeps the total newline count of the document unchanged so that line
+// indexes computed downstream still line up with the original source.
+func replacePreservingNewlines(s string, re *regexp.Regexp, replacement string) string {
+	return re.ReplaceAllStringFunc(s, func(match string) string {
+		nl := strings.Count(match, "\n")
+		if nl == 0 {
+			return replacement
+		}
+		return replacement + strings.Repeat("\n", nl)
+	})
 }
 
 func collapseWhitespace(s string) string {

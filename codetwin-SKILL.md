@@ -70,7 +70,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --eps float             DBSCAN epsilon — cluster density (default 0.45)
 --min-pts int           DBSCAN min cluster size (default 2)
 --preview               show a short code excerpt for each finding
---preview-lines int     number of lines per preview (default 10)
+--preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
 ```
 
 ## Step 3 — Interpret results

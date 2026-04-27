@@ -64,3 +64,83 @@ func TestJaccard_OneEmpty(t *testing.T) {
 		t.Errorf("Jaccard with one empty set = %v; want 0.0", got)
 	}
 }
+
+func TestGeneratePositional_SetMatchesGenerate(t *testing.T) {
+	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	plain := Generate(tokens, DefaultK, DefaultW)
+	pos := GeneratePositional(tokens, DefaultK, DefaultW)
+	if len(plain) != len(pos.Set) {
+		t.Errorf("Generate set size %d != GeneratePositional set size %d", len(plain), len(pos.Set))
+	}
+	for h := range plain {
+		if _, ok := pos.Set[h]; !ok {
+			t.Errorf("hash %d in Generate but missing from GeneratePositional", h)
+		}
+	}
+	if pos.K != DefaultK {
+		t.Errorf("expected K=%d on PositionalSet, got %d", DefaultK, pos.K)
+	}
+}
+
+func TestGeneratePositional_PositionsAreInRange(t *testing.T) {
+	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	pos := GeneratePositional(tokens, DefaultK, DefaultW)
+	maxPos := len(tokens) - DefaultK // last valid k-gram start
+	for hash, positions := range pos.Positions {
+		for _, p := range positions {
+			if p < 0 || p > maxPos {
+				t.Errorf("hash %d: position %d out of range [0, %d]", hash, p, maxPos)
+			}
+		}
+	}
+}
+
+func TestMatchRange_NoOverlap(t *testing.T) {
+	a := PositionalSet{
+		Set:       Set{1: {}, 2: {}},
+		Positions: map[uint32][]int{1: {0}, 2: {3}},
+		K:         5,
+	}
+	b := PositionalSet{
+		Set:       Set{99: {}},
+		Positions: map[uint32][]int{99: {0}},
+		K:         5,
+	}
+	first, last := MatchRange(a, b)
+	if first != -1 || last != -1 {
+		t.Errorf("expected (-1, -1) for disjoint sets, got (%d, %d)", first, last)
+	}
+}
+
+func TestMatchRange_SpansMatchingPositions(t *testing.T) {
+	// Hash 7 matches at positions 2 and 9 in a; hash 8 only in a.
+	// Range should span 2 to 9 (the matching positions).
+	a := PositionalSet{
+		Set:       Set{7: {}, 8: {}},
+		Positions: map[uint32][]int{7: {2, 9}, 8: {15}},
+		K:         5,
+	}
+	b := PositionalSet{
+		Set:       Set{7: {}},
+		Positions: map[uint32][]int{7: {0}},
+		K:         5,
+	}
+	first, last := MatchRange(a, b)
+	if first != 2 || last != 9 {
+		t.Errorf("expected (2, 9), got (%d, %d)", first, last)
+	}
+}
+
+func TestMatchRange_IdenticalInputsCoverFullStream(t *testing.T) {
+	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	pos := GeneratePositional(tokens, DefaultK, DefaultW)
+	first, last := MatchRange(pos, pos)
+	if first < 0 || last < first {
+		t.Fatalf("expected valid range, got (%d, %d)", first, last)
+	}
+	// Last possible k-gram start = len(tokens) - K.
+	maxStart := len(tokens) - DefaultK
+	if last > maxStart {
+		t.Errorf("last position %d exceeds max k-gram start %d", last, maxStart)
+	}
+}

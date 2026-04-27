@@ -45,7 +45,7 @@ func main() {
 	eps := flag.Float64("eps", 0.45, "DBSCAN epsilon: max distance for two snippets to be neighbours")
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
-	previewLines := flag.Int("preview-lines", 10, "number of lines to show in each preview")
+	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -72,7 +72,8 @@ func main() {
 		code      string
 		startLine int
 		tokens    []string
-		fps       fingerprint.Set
+		lines     []int // parallel to tokens; 1-based source line of each token, relative to chunk start
+		fps       fingerprint.PositionalSet
 	}
 
 	snippets := make([]snippet, 0, len(files))
@@ -88,7 +89,7 @@ func main() {
 			if countLines(ch.Code) < *minLines {
 				continue
 			}
-			tokens := tokenizer.Tokenize(ch.Code, lang)
+			tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang)
 			if len(tokens) == 0 {
 				continue
 			}
@@ -98,7 +99,8 @@ func main() {
 				code:      ch.Code,
 				startLine: ch.StartLine,
 				tokens:    tokens,
-				fps:       fingerprint.Generate(tokens, fingerprint.DefaultK, fingerprint.DefaultW),
+				lines:     lines,
+				fps:       fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW),
 			})
 		}
 	}
@@ -129,7 +131,7 @@ func main() {
 	var pairs []report.Pair
 	for i := 0; i < n; i++ {
 		for j := i + 1; j < n; j++ {
-			structural := fingerprint.Jaccard(snippets[i].fps, snippets[j].fps)
+			structural := fingerprint.Jaccard(snippets[i].fps.Set, snippets[j].fps.Set)
 			semantic := similarity.Cosine(vectors[i], vectors[j])
 			combined := similarity.Combined(structural, semantic, 0.5)
 			matrix[i][j] = combined
@@ -160,11 +162,66 @@ func main() {
 
 	var previews map[string]report.Preview
 	if *preview {
-		previews = make(map[string]report.Preview, len(snippets))
-		for _, s := range snippets {
-			previews[s.name] = report.Preview{
-				StartLine: s.startLine,
-				Text:      extractPreview(s.code, *previewLines),
+		nameIdx := make(map[string]int, len(snippets))
+		for i, s := range snippets {
+			nameIdx[s.name] = i
+		}
+
+		// Determine which snippets will appear in the rendered report.
+		shown := make(map[int]bool)
+		for _, p := range pairs {
+			if p.Score >= *threshold {
+				shown[nameIdx[p.NameA]] = true
+				shown[nameIdx[p.NameB]] = true
+			}
+		}
+		for _, c := range clusters {
+			for _, m := range c.Members {
+				shown[nameIdx[m]] = true
+			}
+		}
+
+		// For each shown snippet, find the bounding token range covered by
+		// fingerprints shared with any OTHER shown snippet. Falls back to
+		// (-1, -1) when no positional match exists, in which case we render
+		// the chunk's leading lines like before.
+		type rng struct{ first, last int }
+		ranges := make(map[int]rng, len(shown))
+		for i := range shown {
+			for j := range shown {
+				if i == j {
+					continue
+				}
+				f, l := fingerprint.MatchRange(snippets[i].fps, snippets[j].fps)
+				if f < 0 {
+					continue
+				}
+				r, ok := ranges[i]
+				if !ok {
+					ranges[i] = rng{first: f, last: l}
+					continue
+				}
+				if f < r.first {
+					r.first = f
+				}
+				if l > r.last {
+					r.last = l
+				}
+				ranges[i] = r
+			}
+		}
+
+		previews = make(map[string]report.Preview, len(shown))
+		for i := range shown {
+			s := snippets[i]
+			if r, ok := ranges[i]; ok {
+				previews[s.name] = buildMatchPreview(s.code, s.lines, s.startLine, r.first, r.last, s.fps.K, *previewLines)
+			} else {
+				// No structural overlap — fall back to a leading excerpt.
+				previews[s.name] = report.Preview{
+					StartLine: s.startLine,
+					Text:      extractPreview(s.code, *previewLines),
+				}
 			}
 		}
 	}
@@ -199,17 +256,69 @@ func chunkName(ch splitter.Chunk) string {
 }
 
 // extractPreview returns the first n lines of code as a single newline-joined
-// string. Line numbers are preserved by the caller via the chunk's StartLine,
-// so this function does not skip leading blanks.
+// string. When n <= 0 the entire code is returned (unlimited mode). Line
+// numbers are preserved by the caller via the chunk's StartLine, so this
+// function does not skip leading blanks.
 func extractPreview(code string, n int) string {
-	if n <= 0 {
-		return ""
-	}
 	lines := strings.Split(code, "\n")
-	if n > len(lines) {
-		n = len(lines)
+	if n <= 0 || n > len(lines) {
+		return strings.Join(lines, "\n")
 	}
 	return strings.Join(lines[:n], "\n")
+}
+
+// buildMatchPreview returns a Preview focused on the line range covered by
+// [firstTok, lastTok], extending the last token by k-1 to cover the full
+// k-gram. Behavior by maxLines:
+//
+//	maxLines == 0:          show the whole chunk (unlimited)
+//	chunk lines <= maxLines: show the whole chunk (it fits)
+//	otherwise:              focus on the match range, taking up to maxLines
+//	                        lines starting at the first matching line
+func buildMatchPreview(code string, tokenLines []int, chunkStartLine, firstTok, lastTok, k, maxLines int) report.Preview {
+	chunkLines := strings.Split(code, "\n")
+	if maxLines <= 0 || len(chunkLines) <= maxLines {
+		return report.Preview{
+			StartLine: chunkStartLine,
+			Text:      strings.Join(chunkLines, "\n"),
+		}
+	}
+
+	if firstTok < 0 || firstTok >= len(tokenLines) {
+		return report.Preview{
+			StartLine: chunkStartLine,
+			Text:      strings.Join(chunkLines[:maxLines], "\n"),
+		}
+	}
+	endTok := lastTok + k - 1
+	if endTok >= len(tokenLines) {
+		endTok = len(tokenLines) - 1
+	}
+	if endTok < firstTok {
+		endTok = firstTok
+	}
+
+	chunkFirstLine := tokenLines[firstTok]
+	chunkLastLine := tokenLines[endTok]
+	if chunkLastLine < chunkFirstLine {
+		chunkLastLine = chunkFirstLine
+	}
+	if chunkFirstLine > len(chunkLines) {
+		chunkFirstLine = len(chunkLines)
+	}
+	if chunkLastLine > len(chunkLines) {
+		chunkLastLine = len(chunkLines)
+	}
+
+	selected := chunkLines[chunkFirstLine-1 : chunkLastLine]
+	if len(selected) > maxLines {
+		selected = selected[:maxLines]
+	}
+
+	return report.Preview{
+		StartLine: chunkStartLine + chunkFirstLine - 1,
+		Text:      strings.Join(selected, "\n"),
+	}
 }
 
 // ── JSON output ───────────────────────────────────────────────────────────────
@@ -339,7 +448,7 @@ FLAGS:
   --eps float          DBSCAN epsilon distance (default 0.45)
   --min-pts int        DBSCAN min cluster size (default 2)
   --preview            show a short code excerpt for each finding
-  --preview-lines int  number of lines per preview (default 10)
+  --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)
 
 EXAMPLES:
   codetwin ./src
