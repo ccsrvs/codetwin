@@ -62,6 +62,46 @@ func (c *Corpus) Vectorize(tokens []string) Vector {
 	return vec
 }
 
+// NormalizedVector pairs a Vector with its precomputed L2 norm so the inner
+// loop of similarity computation is a single map walk plus one division per
+// pair, instead of recomputing norms on every comparison.
+type NormalizedVector struct {
+	V    Vector
+	Norm float64 // sqrt(sum of squares)
+}
+
+// Normalize precomputes the L2 norm so subsequent CosineFromNormalized calls
+// don't redo it. Use when the same vector is compared against many others,
+// as in the all-pairs similarity matrix.
+func Normalize(v Vector) NormalizedVector {
+	var sumSq float64
+	for _, val := range v {
+		sumSq += val * val
+	}
+	return NormalizedVector{V: v, Norm: math.Sqrt(sumSq)}
+}
+
+// CosineFromNormalized computes cosine similarity using precomputed norms.
+// Matches Cosine() exactly; this variant just amortizes the norm
+// computation across all comparisons of the same vector.
+func CosineFromNormalized(a, b NormalizedVector) float64 {
+	if a.Norm == 0 || b.Norm == 0 || len(a.V) == 0 || len(b.V) == 0 {
+		return 0
+	}
+	// Iterate the smaller map for cache locality.
+	small, large := a.V, b.V
+	if len(b.V) < len(a.V) {
+		small, large = b.V, a.V
+	}
+	var dot float64
+	for term, va := range small {
+		if vb, ok := large[term]; ok {
+			dot += va * vb
+		}
+	}
+	return dot / (a.Norm * b.Norm)
+}
+
 // Cosine returns the cosine similarity between two vectors in [0, 1].
 // Returns 0 if either vector is the zero vector.
 func Cosine(a, b Vector) float64 {

@@ -22,8 +22,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
@@ -38,6 +43,26 @@ var supportedExts = map[string]bool{
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
 }
 
+// pairNoiseFloor is the minimum combined score below which we drop pairs
+// from the materialized list. The matrix still records the true value so
+// DBSCAN clustering is unaffected; this only bounds the memory footprint
+// of `pairs` on big repos. 0.05 is well below any user-visible threshold.
+const pairNoiseFloor = 0.05
+
+// snippet is one analyzable unit (typically a function- or class-level
+// chunk produced by splitter.Split). Moved to package scope so concurrent
+// helpers can take []snippet without relying on closures over a local type.
+type snippet struct {
+	name       string
+	lang       tokenizer.Language
+	code       string
+	startLine  int
+	nonBlankLn int
+	tokens     []string
+	lines      []int // parallel to tokens; 1-based source line of each token
+	fps        fingerprint.PositionalSet
+}
+
 func main() {
 	threshold := flag.Float64("threshold", 0.30, "minimum similarity score to report (0.0–1.0)")
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
@@ -50,6 +75,9 @@ func main() {
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
 	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name")
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
+	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
+	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
+	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -96,16 +124,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	type snippet struct {
-		name       string
-		lang       tokenizer.Language
-		code       string
-		startLine  int
-		nonBlankLn int // non-blank line count of the chunk (used for size sorts)
-		tokens     []string
-		lines      []int // parallel to tokens; 1-based source line of each token, relative to chunk start
-		fps        fingerprint.PositionalSet
+	// Cache stores per-file tokenize+fingerprint output keyed by content
+	// hash + ignore_patterns hash + tokenizer version. Hits skip the
+	// expensive splitter+tokenizer+fingerprint work on unchanged files.
+	var cacheState *cache.Cache
+	if *noCache || *rebuildCache {
+		cacheState = cache.New()
+	} else {
+		cacheState, err = cache.Load(".")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cache load failed: %v\n", err)
+			cacheState = cache.New()
+		}
 	}
+	patternsHash := cache.PatternsHash(stripPatternStrings(cfg))
 
 	snippets := make([]snippet, 0, len(files))
 	for _, path := range files {
@@ -114,26 +146,87 @@ func main() {
 			fmt.Fprintf(os.Stderr, "warning: could not read %s: %v\n", path, err)
 			continue
 		}
+
+		absPath, _ := filepath.Abs(path)
+		contentHash := cache.HashContent(data)
+		key := cache.Key(absPath, contentHash, patternsHash)
+
+		if entry, ok := cacheState.Get(key); ok {
+			// Cache hit — every chunk reconstructed without rerunning
+			// the tokenizer or fingerprinter. min_lines is applied here
+			// (not at cache write time) so the same cache is valid for
+			// different --min-lines values.
+			for _, c := range entry.Chunks {
+				if c.NonBlankLn < *minLines {
+					continue
+				}
+				snippets = append(snippets, snippet{
+					name:       c.Name,
+					lang:       tokenizer.Language(c.Lang),
+					code:       c.Code,
+					startLine:  c.StartLine,
+					nonBlankLn: c.NonBlankLn,
+					tokens:     c.Tokens,
+					lines:      c.Lines,
+					fps:        positionalFromCache(c),
+				})
+			}
+			continue
+		}
+
+		// Cache miss — full processing path. Cache everything tokenizable
+		// (skip empty-token chunks); apply --min-lines on read instead.
 		code := string(data)
 		lang := tokenizer.Detect(path, code)
+		var entryChunks []cache.Chunk
 		for _, ch := range splitter.Split(path, code, lang) {
-			if countLines(ch.Code) < *minLines {
-				continue
-			}
-			tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang, tokenizer.WithStripPatterns(stripPatterns))
+			tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang,
+				tokenizer.WithStripPatterns(stripPatterns))
 			if len(tokens) == 0 {
 				continue
 			}
+			nonBlank := countLines(ch.Code)
+			ps := fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW)
+			name := chunkName(ch)
+
+			entryChunks = append(entryChunks, cache.Chunk{
+				Name:       name,
+				Lang:       string(lang),
+				StartLine:  ch.StartLine,
+				EndLine:    ch.EndLine,
+				Code:       ch.Code,
+				Tokens:     tokens,
+				Lines:      lines,
+				NonBlankLn: nonBlank,
+				Hashes:     setToHashes(ps.Set),
+				Positions:  ps.Positions,
+				K:          ps.K,
+			})
+
+			if nonBlank < *minLines {
+				continue
+			}
 			snippets = append(snippets, snippet{
-				name:       chunkName(ch),
+				name:       name,
 				lang:       lang,
 				code:       ch.Code,
 				startLine:  ch.StartLine,
-				nonBlankLn: countLines(ch.Code),
+				nonBlankLn: nonBlank,
 				tokens:     tokens,
 				lines:      lines,
-				fps:        fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW),
+				fps:        ps,
 			})
+		}
+
+		cacheState.Put(key, cache.Entry{
+			ContentHash: contentHash,
+			Chunks:      entryChunks,
+		})
+	}
+
+	if !*noCache {
+		if err := cacheState.Save("."); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cache save failed: %v\n", err)
 		}
 	}
 
@@ -148,9 +241,11 @@ func main() {
 	}
 	corpus := similarity.NewCorpus(tokenStreams)
 
-	vectors := make([]similarity.Vector, len(snippets))
+	// NormalizedVector precomputes each vector's L2 norm so the inner-loop
+	// cosine is just one dot-product map-walk plus a divide.
+	vectors := make([]similarity.NormalizedVector, len(snippets))
 	for i, s := range snippets {
-		vectors[i] = corpus.Vectorize(s.tokens)
+		vectors[i] = similarity.Normalize(corpus.Vectorize(s.tokens))
 	}
 
 	n := len(snippets)
@@ -160,26 +255,16 @@ func main() {
 		matrix[i][i] = 1.0
 	}
 
-	var pairs []report.Pair
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			structural := fingerprint.Jaccard(snippets[i].fps.Set, snippets[j].fps.Set)
-			semantic := similarity.Cosine(vectors[i], vectors[j])
-			combined := similarity.Combined(structural, semantic, 0.5)
-			matrix[i][j] = combined
-			matrix[j][i] = combined
+	// Inverted index from fingerprint hash → snippet indices that selected
+	// it. Lets us skip Jaccard work for snippet pairs that share no
+	// fingerprints — those will score 0 anyway, and on a typical big repo
+	// most pairs fall into this bucket.
+	hashIndex := buildHashIndex(snippets)
 
-			pairs = append(pairs, report.Pair{
-				NameA:      snippets[i].name,
-				NameB:      snippets[j].name,
-				Structural: structural,
-				Semantic:   semantic,
-				Score:      combined,
-				LinesA:     snippets[i].nonBlankLn,
-				LinesB:     snippets[j].nonBlankLn,
-			})
-		}
-	}
+	showProgress := !*noProgress && stderrIsTTY()
+	pairs := computeSimilarityMatrix(
+		matrix, snippets, vectors, hashIndex, showProgress,
+	)
 
 	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
 	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
@@ -486,6 +571,195 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error
 	return files, nil
 }
 
+// setToHashes flattens a fingerprint Set to a slice for cache storage.
+// Order doesn't matter for correctness; the receiver rebuilds the Set.
+func setToHashes(s fingerprint.Set) []uint32 {
+	out := make([]uint32, 0, len(s))
+	for h := range s {
+		out = append(out, h)
+	}
+	return out
+}
+
+// positionalFromCache reconstructs a fingerprint.PositionalSet from a
+// cached chunk. The Set is rebuilt from the flat hash list; Positions and
+// K survive serialization unchanged.
+func positionalFromCache(c cache.Chunk) fingerprint.PositionalSet {
+	set := make(fingerprint.Set, len(c.Hashes))
+	for _, h := range c.Hashes {
+		set[h] = struct{}{}
+	}
+	return fingerprint.PositionalSet{Set: set, Positions: c.Positions, K: c.K}
+}
+
+// stripPatternStrings extracts the raw ignore_patterns strings (not the
+// compiled regexes) from cfg, for cache key derivation. Hashing the raw
+// strings means a config edit that changes a pattern invalidates only the
+// affected cache entries.
+func stripPatternStrings(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.IgnorePatterns
+}
+
+// buildHashIndex builds an inverted index from fingerprint hash → snippet
+// indices that selected that hash. Used by computeSimilarityMatrix to skip
+// Jaccard computation for snippet pairs that share zero fingerprints
+// (those structural scores would be 0 anyway, and on a typical big repo
+// most pairs fall into that bucket).
+func buildHashIndex(snippets []snippet) map[uint32][]int {
+	idx := make(map[uint32][]int)
+	for i, s := range snippets {
+		for h := range s.fps.Set {
+			idx[h] = append(idx[h], i)
+		}
+	}
+	return idx
+}
+
+// computeSimilarityMatrix populates `matrix` and returns the materialized
+// pair list. Work is sharded across runtime.NumCPU() goroutines using a
+// stripe partition (worker w handles rows where i % numWorkers == w),
+// which balances small-row and big-row work. Each worker writes to its
+// own pair buffer and to disjoint matrix cells, so no synchronization is
+// needed beyond the final WaitGroup join.
+//
+// Pairs scoring below pairNoiseFloor are excluded from the returned slice
+// to keep the materialized list bounded on big repos. The matrix still
+// receives the true value so DBSCAN sees the full topology.
+func computeSimilarityMatrix(
+	matrix [][]float64,
+	snippets []snippet,
+	vectors []similarity.NormalizedVector,
+	hashIndex map[uint32][]int,
+	showProgress bool,
+) []report.Pair {
+	n := len(snippets)
+	workers := runtime.NumCPU()
+	if workers > n {
+		workers = n
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	totalPairs := int64(n) * int64(n-1) / 2
+	var done atomic.Int64
+
+	var progStop chan struct{}
+	var progWg sync.WaitGroup
+	if showProgress && totalPairs > 0 {
+		progStop = make(chan struct{})
+		progWg.Add(1)
+		go reportProgress(&done, totalPairs, progStop, &progWg)
+	}
+
+	pairsByWorker := make([][]report.Pair, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			var local []report.Pair
+			batchProgress := int64(0)
+			for i := workerID; i < n; i += workers {
+				// Candidates: any j > i that shares a fingerprint with i.
+				// Pairs not in this set get structural=0 without paying for
+				// a Jaccard call. We still compute cosine for every pair so
+				// cross-language semantic-only matches still surface.
+				cands := make(map[int]struct{})
+				for h := range snippets[i].fps.Set {
+					for _, k := range hashIndex[h] {
+						if k > i {
+							cands[k] = struct{}{}
+						}
+					}
+				}
+
+				for j := i + 1; j < n; j++ {
+					var structural float64
+					if _, ok := cands[j]; ok {
+						structural = fingerprint.Jaccard(snippets[i].fps.Set, snippets[j].fps.Set)
+					}
+					semantic := similarity.CosineFromNormalized(vectors[i], vectors[j])
+					combined := similarity.Combined(structural, semantic, 0.5)
+					matrix[i][j] = combined
+					matrix[j][i] = combined
+
+					batchProgress++
+					if combined < pairNoiseFloor {
+						continue
+					}
+					local = append(local, report.Pair{
+						NameA:      snippets[i].name,
+						NameB:      snippets[j].name,
+						Structural: structural,
+						Semantic:   semantic,
+						Score:      combined,
+						LinesA:     snippets[i].nonBlankLn,
+						LinesB:     snippets[j].nonBlankLn,
+					})
+				}
+				// Flush progress in batches per row to avoid hammering the
+				// atomic counter per inner-loop iteration.
+				if batchProgress > 0 {
+					done.Add(batchProgress)
+					batchProgress = 0
+				}
+			}
+			pairsByWorker[workerID] = local
+		}(w)
+	}
+	wg.Wait()
+
+	if progStop != nil {
+		close(progStop)
+		progWg.Wait()
+	}
+
+	total := 0
+	for _, p := range pairsByWorker {
+		total += len(p)
+	}
+	pairs := make([]report.Pair, 0, total)
+	for _, p := range pairsByWorker {
+		pairs = append(pairs, p...)
+	}
+	return pairs
+}
+
+// reportProgress prints a one-line progress indicator to stderr while the
+// matrix is being computed. Stops when stop is closed and clears the line
+// before returning so it doesn't bleed into the report output.
+func reportProgress(done *atomic.Int64, total int64, stop <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			fmt.Fprint(os.Stderr, "\r\033[K")
+			return
+		case <-ticker.C:
+			d := done.Load()
+			pct := float64(d) / float64(total) * 100
+			fmt.Fprintf(os.Stderr, "\rcomparing snippets: %d/%d (%.1f%%)", d, total, pct)
+		}
+	}
+}
+
+// stderrIsTTY reports whether stderr is connected to a terminal. Used to
+// auto-suppress the progress indicator when the caller is piping output
+// into a file or running in CI.
+func stderrIsTTY() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
 // dedupePaths removes duplicate inputs and inputs that are contained within
 // another input on the list. Given ./src and ./src/utils, only ./src is
 // returned because walking it will already cover ./src/utils. Identical
@@ -651,6 +925,9 @@ FLAGS:
   --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)
   --sort string        result ordering: score | score-asc | size | size-asc | name (default score)
   --limit int          show only the top N pairs and N clusters (0 = no limit)
+  --no-progress        suppress the live progress indicator on stderr
+  --no-cache           skip reading and writing .codetwin-cache.bin
+  --rebuild-cache      ignore any existing cache and rebuild it from scratch
 
 EXAMPLES:
   codetwin ./src

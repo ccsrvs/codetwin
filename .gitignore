@@ -9,3 +9,4 @@
 coverage.html
 post_run.log
 .envrc
+.codetwin-cache.bin

@@ -64,6 +64,26 @@ func TestCosine_Symmetric(t *testing.T) {
 	}
 }
 
+func TestCosineFromNormalized_MatchesCosine(t *testing.T) {
+	// The precomputed-norm variant must produce identical scores to the
+	// straightforward Cosine for the same inputs.
+	cases := []struct {
+		a, b Vector
+	}{
+		{Vector{"a": 1.0, "b": 2.0}, Vector{"a": 0.5, "c": 1.5}},
+		{Vector{"x": 3.0}, Vector{"x": 3.0}},
+		{Vector{"a": 1.0}, Vector{"b": 1.0}}, // orthogonal
+		{Vector{}, Vector{"a": 1.0}},          // empty
+	}
+	for _, c := range cases {
+		want := Cosine(c.a, c.b)
+		got := CosineFromNormalized(Normalize(c.a), Normalize(c.b))
+		if math.Abs(want-got) > 1e-12 {
+			t.Errorf("Cosine=%v, CosineFromNormalized=%v for a=%v b=%v", want, got, c.a, c.b)
+		}
+	}
+}
+
 func TestCombined_WeightedAverage(t *testing.T) {
 	if got := Combined(0.8, 0.4, 0.5); math.Abs(got-0.6) > 1e-9 {
 		t.Errorf("Combined(0.8, 0.4, 0.5) = %v; want 0.6", got)
