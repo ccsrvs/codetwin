@@ -16,12 +16,17 @@ codebase. Reports pairs and clusters with optional line-numbered code previews.
 
 ## How the tool works
 
-codetwin operates in four internal stages — all handled automatically:
+codetwin operates in five internal stages — all handled automatically:
 
-1. **Tokenize & normalize** — strip comments, replace literals/identifiers with canonical tokens
-2. **Winnowing fingerprints** — structural (Jaccard) similarity via k-gram hashing
-3. **TF-IDF vectors** — semantic (cosine) similarity across the full corpus
-4. **DBSCAN clustering** — groups related findings into one refactoring opportunity each
+1. **Chunk** — split each file into per-definition chunks (Python `def`,
+   Go `func`, JS `function`/`class`/arrow, Rust `fn`). A 500-line module
+   with one duplicated 20-line helper scores high on the helper rather
+   than getting washed out by 480 lines of unrelated code.
+2. **Tokenize & normalize** — strip comments, imports, replace literals/
+   identifiers with canonical tokens
+3. **Winnowing fingerprints** — structural (Jaccard) similarity via k-gram hashing
+4. **TF-IDF vectors** — semantic (cosine) similarity across the full corpus
+5. **DBSCAN clustering** — groups related findings into one refactoring opportunity each
 
 Final score = `0.5 × structural + 0.5 × semantic`
 
@@ -58,6 +63,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Show everything | `codetwin --verbose --threshold 0.20 <path>` |
 | Inline code previews | `codetwin --preview --threshold 0.40 <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
+| Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
 
 ### All flags
 
@@ -66,7 +72,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --plain                 no ANSI colors — use for piping or file output
 --json                  JSON output
 --verbose               show all pairs including weak similarities
---min-lines int         skip files shorter than N non-blank lines (default 3)
+--min-lines int         skip chunks shorter than N non-blank lines (default 3)
 --eps float             DBSCAN epsilon — cluster density (default 0.45)
 --min-pts int           DBSCAN min cluster size (default 2)
 --preview               show a short code excerpt for each finding
@@ -92,6 +98,50 @@ section using its natural interpretation:
 top N clusters), applied after sort and threshold filtering. Use it together
 with `--sort` to focus on what matters: e.g. `--sort size --limit 5` for the
 five biggest refactor opportunities.
+
+### Configuration file (`.codetwin.json`)
+
+If a `.codetwin.json` exists in the current working directory, codetwin
+reads it for default flag overrides, files to ignore, and lines/regexes to
+strip before tokenization. CLI flags always win over the `defaults` block.
+
+```json
+{
+  "defaults": {
+    "threshold": 0.5,
+    "preview": true,
+    "preview_lines": 15,
+    "sort": "size",
+    "limit": 20
+  },
+  "ignore_paths": [
+    "vendor/**",
+    "**/*_test.go",
+    "migrations/"
+  ],
+  "ignore_patterns": [
+    "^\\s*log\\.(info|debug|warn|error)\\(",
+    "^\\s*println!\\("
+  ]
+}
+```
+
+**`ignore_paths`** — gitignore-flavored:
+
+- `vendor` — matches any path component named exactly `vendor`
+- `vendor/lib` — matches that multi-component path anywhere in the tree
+- `vendor/` — directory-only (file `vendor` won't match)
+- `*_test.go` — basename glob, anywhere
+- `vendor/**` — anything under any `vendor` directory
+- `/build` — leading `/` anchors to the scan root only
+
+**`ignore_patterns`** — Go regexes (with `(?m)` automatically applied).
+Lines matching any pattern are stripped before tokenization, like comments.
+Useful for filtering out logging boilerplate that would otherwise inflate
+similarity scores.
+
+When you scan multiple paths and one is nested inside another (e.g.
+`./src ./src/utils`), only the outer path is walked — no double-counting.
 
 ## Step 3 — Interpret results
 
@@ -157,23 +207,26 @@ go test ./...
 ```bash
 codetwin --preview --threshold 0.40 ./testdata
 
-# Expected output:
+# Expected output (chunk-level — note "path:start-end Symbol" naming):
 #  SIMILARITY PAIRS
 #
 #   [EXACT CLONE     ]  100%
-#     testdata/sum_a.js
+#     testdata/sum_a.js:1-7 sumArray
 #          1 │ function sumArray(arr) {
 #          2 │   let total = 0;
 #          3 │   for (let i = 0; i < arr.length; i++) {
 #          4 │     total += arr[i];
 #          5 │   }
-#     testdata/sum_b.js
+#          6 │   return total;
+#          7 │ }
+#     testdata/sum_b.js:1-7 addNumbers
 #          1 │ function addNumbers(nums) {
-#          2 │   let result = 0;
 #          ...
 #
 #  REFACTORING CLUSTERS
-#   Cluster 1 — 2 snippets: testdata/sum_a.js, testdata/sum_b.js
+#   Cluster 1 — 2 snippets:
+#     testdata/sum_a.js:1-7 sumArray
+#     testdata/sum_b.js:1-7 addNumbers
 ```
 
 ## Troubleshooting
@@ -184,4 +237,6 @@ codetwin --preview --threshold 0.40 ./testdata
 | All scores near 0% | Files may be too short — lower `--min-lines` |
 | No clusters formed | Lower `--eps` (e.g. `--eps 0.35`) or `--min-pts 2` |
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |
+| Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
+| Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
 | Build errors | Run `go test ./...` first to isolate the broken package |

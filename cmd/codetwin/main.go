@@ -21,9 +21,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/ccsrvs/codetwin/internal/cluster"
+	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/similarity"
@@ -51,13 +53,39 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
+	// Optional .codetwin.json in CWD: provides flag default overrides plus
+	// ignore_paths / ignore_patterns. Missing file is fine. Apply defaults
+	// only to flags the user did NOT pass on the CLI so explicit args win.
+	cfg, err := config.Load(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg != nil && cfg.Defaults != nil {
+		applied := flagsExplicitlySet()
+		applyConfigDefaults(cfg.Defaults, applied,
+			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
+			preview, previewLines, sortMode, limit)
+	}
+
+	ignoreMatcher, err := compileIgnoreMatcher(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error in ignore_paths: %v\n", err)
+		os.Exit(1)
+	}
+	stripPatterns, err := compileStripPatterns(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning in ignore_patterns: %v\n", err)
+		// Continue with whatever patterns compiled successfully.
+	}
+
 	paths := flag.Args()
 	if len(paths) == 0 {
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	files, err := collectFiles(paths)
+	files, err := collectFiles(paths, ignoreMatcher)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error collecting files: %v\n", err)
 		os.Exit(1)
@@ -92,7 +120,7 @@ func main() {
 			if countLines(ch.Code) < *minLines {
 				continue
 			}
-			tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang)
+			tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang, tokenizer.WithStripPatterns(stripPatterns))
 			if len(tokens) == 0 {
 				continue
 			}
@@ -415,9 +443,13 @@ func jsonLabel(score float64) string {
 
 // ── File collection ───────────────────────────────────────────────────────────
 
-func collectFiles(paths []string) ([]string, error) {
+func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error) {
+	deduped, err := dedupePaths(paths)
+	if err != nil {
+		return nil, err
+	}
 	var files []string
-	for _, p := range paths {
+	for _, p := range deduped {
 		info, err := os.Stat(p)
 		if err != nil {
 			return nil, err
@@ -427,8 +459,17 @@ func collectFiles(paths []string) ([]string, error) {
 				if err != nil {
 					return err
 				}
-				if d.IsDir() && strings.HasPrefix(d.Name(), ".") {
+				// Skip dotfile dirs (.git, .idea, etc.) but never the walk
+				// root itself — passing "." as a path would otherwise be
+				// rejected before any file got visited.
+				if d.IsDir() && path != p && strings.HasPrefix(d.Name(), ".") {
 					return filepath.SkipDir
+				}
+				if ignore.Match(path, d.IsDir()) {
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
 				}
 				if !d.IsDir() && supportedExts[filepath.Ext(path)] {
 					files = append(files, path)
@@ -438,11 +479,144 @@ func collectFiles(paths []string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-		} else if supportedExts[filepath.Ext(p)] {
+		} else if supportedExts[filepath.Ext(p)] && !ignore.Match(p, false) {
 			files = append(files, p)
 		}
 	}
 	return files, nil
+}
+
+// dedupePaths removes duplicate inputs and inputs that are contained within
+// another input on the list. Given ./src and ./src/utils, only ./src is
+// returned because walking it will already cover ./src/utils. Identical
+// paths (after canonicalization) are also collapsed.
+//
+// Order from the input slice is preserved for the survivors so users see
+// their first-mentioned form in error messages and progress.
+func dedupePaths(paths []string) ([]string, error) {
+	type entry struct {
+		original string
+		abs      string
+	}
+	var entries []entry
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, err
+		}
+		abs = filepath.Clean(abs)
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		entries = append(entries, entry{original: p, abs: abs})
+	}
+
+	out := make([]string, 0, len(entries))
+	for _, ai := range entries {
+		contained := false
+		for _, aj := range entries {
+			if aj.abs == ai.abs {
+				continue
+			}
+			if pathContains(aj.abs, ai.abs) {
+				contained = true
+				break
+			}
+		}
+		if !contained {
+			out = append(out, ai.original)
+		}
+	}
+	return out, nil
+}
+
+// flagsExplicitlySet returns the set of flag names that were passed on the
+// command line. Used to decide which flag defaults a config file may
+// override (CLI args always win).
+func flagsExplicitlySet() map[string]bool {
+	set := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+// applyConfigDefaults overrides each flag's value with the config default,
+// but only when the user did NOT explicitly pass the flag on the CLI.
+// Pointers in d distinguish "not specified in config" from "set to zero".
+func applyConfigDefaults(
+	d *config.Defaults,
+	explicit map[string]bool,
+	threshold *float64, plain *bool, jsonOut *bool, verbose *bool,
+	minLines *int, eps *float64, minPts *int,
+	preview *bool, previewLines *int, sortMode *string, limit *int,
+) {
+	if d.Threshold != nil && !explicit["threshold"] {
+		*threshold = *d.Threshold
+	}
+	if d.Plain != nil && !explicit["plain"] {
+		*plain = *d.Plain
+	}
+	if d.JSON != nil && !explicit["json"] {
+		*jsonOut = *d.JSON
+	}
+	if d.Verbose != nil && !explicit["verbose"] {
+		*verbose = *d.Verbose
+	}
+	if d.MinLines != nil && !explicit["min-lines"] {
+		*minLines = *d.MinLines
+	}
+	if d.Eps != nil && !explicit["eps"] {
+		*eps = *d.Eps
+	}
+	if d.MinPts != nil && !explicit["min-pts"] {
+		*minPts = *d.MinPts
+	}
+	if d.Preview != nil && !explicit["preview"] {
+		*preview = *d.Preview
+	}
+	if d.PreviewLines != nil && !explicit["preview-lines"] {
+		*previewLines = *d.PreviewLines
+	}
+	if d.Sort != nil && !explicit["sort"] {
+		*sortMode = *d.Sort
+	}
+	if d.Limit != nil && !explicit["limit"] {
+		*limit = *d.Limit
+	}
+}
+
+// compileIgnoreMatcher returns a (possibly nil-safe) matcher built from
+// cfg.IgnorePaths. A nil cfg yields a nil matcher whose Match method is a
+// no-op.
+func compileIgnoreMatcher(cfg *config.Config) (*config.IgnoreMatcher, error) {
+	if cfg == nil || len(cfg.IgnorePaths) == 0 {
+		return nil, nil
+	}
+	return config.CompileIgnorePaths(cfg.IgnorePaths)
+}
+
+// compileStripPatterns compiles cfg.IgnorePatterns to regexes. Errors are
+// returned alongside the patterns that DID compile so the caller can warn
+// and continue rather than fail the run.
+func compileStripPatterns(cfg *config.Config) ([]*regexp.Regexp, error) {
+	if cfg == nil || len(cfg.IgnorePatterns) == 0 {
+		return nil, nil
+	}
+	return config.CompileIgnorePatterns(cfg.IgnorePatterns)
+}
+
+// pathContains reports whether `child` lives inside the directory tree
+// rooted at `parent`. Both paths must be absolute and clean. The check is
+// purely lexical (no filesystem access): parent must be a strict prefix of
+// child with the next character being a separator, so /foo does not match
+// /foobar.
+func pathContains(parent, child string) bool {
+	if !strings.HasPrefix(child, parent) {
+		return false
+	}
+	rest := child[len(parent):]
+	return len(rest) > 0 && rest[0] == filepath.Separator
 }
 
 func countLines(code string) int {

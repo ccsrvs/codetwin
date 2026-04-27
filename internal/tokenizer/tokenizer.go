@@ -245,10 +245,26 @@ func Normalize(code string, lang Language) string {
 	return strings.TrimSpace(s)
 }
 
+// Option configures Tokenize / TokenizeWithLines. Pass via variadic args.
+type Option func(*tokenizeOpts)
+
+type tokenizeOpts struct {
+	userStrip []*regexp.Regexp
+}
+
+// WithStripPatterns adds extra regex patterns to be applied (newline-
+// preserving) right after comment stripping and before imports/strings.
+// Useful for stripping language-specific noise like log statements before
+// it gets fingerprinted. Each pattern is treated like a comment region —
+// matches are replaced with whitespace, newlines preserved.
+func WithStripPatterns(patterns []*regexp.Regexp) Option {
+	return func(o *tokenizeOpts) { o.userStrip = patterns }
+}
+
 // Tokenize normalizes the code then splits on whitespace and punctuation
 // returning a clean token slice ready for fingerprinting.
-func Tokenize(code string, lang Language) []string {
-	tokens, _ := TokenizeWithLines(code, lang)
+func Tokenize(code string, lang Language, opts ...Option) []string {
+	tokens, _ := TokenizeWithLines(code, lang, opts...)
 	return tokens
 }
 
@@ -258,13 +274,18 @@ func Tokenize(code string, lang Language) []string {
 // canonical token (e.g. "STR") attributed to the line where they opened, with
 // downstream blank lines preserved so subsequent token line numbers remain
 // accurate.
-func TokenizeWithLines(code string, lang Language) ([]string, []int) {
+func TokenizeWithLines(code string, lang Language, opts ...Option) ([]string, []int) {
+	cfg := &tokenizeOpts{}
+	for _, o := range opts {
+		o(cfg)
+	}
+
 	p, ok := patterns[lang]
 	if !ok {
 		p = patterns[JavaScript]
 	}
 
-	preprocessed := preprocessKeepLines(code, p)
+	preprocessed := preprocessKeepLines(code, p, cfg.userStrip)
 
 	kwSet := make(map[string]bool, len(p.keywords))
 	for _, kw := range p.keywords {
@@ -305,8 +326,15 @@ func TokenizeWithLines(code string, lang Language) ([]string, []int) {
 // tracking stays accurate. Identifier replacement is intentionally NOT done
 // here — callers handle that per-line so they can attribute each token to a
 // source line.
-func preprocessKeepLines(code string, p *langPatterns) string {
+//
+// userStrip is applied after comments but before imports, so that user
+// patterns target language-stripped code and run before the canonical
+// import/string passes.
+func preprocessKeepLines(code string, p *langPatterns, userStrip []*regexp.Regexp) string {
 	s := replacePreservingNewlines(code, p.comments, " ")
+	for _, re := range userStrip {
+		s = replacePreservingNewlines(s, re, " ")
+	}
 	for _, im := range p.imports {
 		s = replacePreservingNewlines(s, im, " ")
 	}

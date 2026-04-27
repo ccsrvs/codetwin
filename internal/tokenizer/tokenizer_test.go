@@ -1,6 +1,7 @@
 package tokenizer
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -352,6 +353,54 @@ world
 	}
 	if !found {
 		t.Errorf("'return' token not found in: %v", tokens)
+	}
+}
+
+func TestTokenizeWithLines_UserStripPatternsApplied(t *testing.T) {
+	// Lines matching a user-provided strip regex should disappear from the
+	// token stream entirely (treated like a comment).
+	code := `def f():
+    log.info("loading config")
+    x = 1
+    return x
+`
+	stripLogCalls := regexp.MustCompile(`(?m)^\s*log\.\w+\([^)]*\)`)
+	tokens, _ := TokenizeWithLines(code, Python, WithStripPatterns([]*regexp.Regexp{stripLogCalls}))
+	for _, tok := range tokens {
+		if strings.Contains(tok, "log") {
+			t.Errorf("user strip pattern failed; 'log' leaked through: %v", tokens)
+			break
+		}
+	}
+}
+
+func TestTokenizeWithLines_UserStripPreservesLineNumbers(t *testing.T) {
+	// After stripping a line via user pattern, subsequent tokens must keep
+	// the correct source line — i.e. the strip is newline-preserving.
+	code := `def f():
+    log.info("noise")
+    return x
+`
+	stripLogCalls := regexp.MustCompile(`(?m)^\s*log\.\w+\([^)]*\)`)
+	tokens, lines := TokenizeWithLines(code, Python, WithStripPatterns([]*regexp.Regexp{stripLogCalls}))
+	// 'return' should be on line 3.
+	for i, tok := range tokens {
+		if tok == "return" {
+			if lines[i] != 3 {
+				t.Errorf("expected 'return' on line 3, got line %d", lines[i])
+			}
+			return
+		}
+	}
+	t.Error("'return' token not found in stream")
+}
+
+func TestTokenize_NoOptionsBackCompat(t *testing.T) {
+	// Passing no opts must produce the same tokens as before the option
+	// signature was added.
+	a := Tokenize(`function f() { return 1; }`, JavaScript)
+	if len(a) == 0 {
+		t.Fatal("Tokenize without options returned no tokens")
 	}
 }
 

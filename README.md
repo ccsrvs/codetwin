@@ -1,19 +1,20 @@
 # codetwin
 
 Multi-language code similarity detector — finds duplicate and refactorable code
-across `.go`, `.js`, `.ts`, `.py`, `.java`, `.rs`, and `.ex`/`.exs` files with zero external
-dependencies.
+across `.go`, `.js`, `.ts`, `.jsx`, `.tsx`, `.py`, `.java`, `.rs`, and
+`.ex`/`.exs` files. Function-level chunking, semantic + structural scoring,
+DBSCAN clustering, no external dependencies.
 
 ## Install
 
 ```bash
-go install github.com/codetwin/codetwin/cmd/codetwin@latest
+go install github.com/ccsrvs/codetwin/cmd/codetwin@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/codetwin/codetwin
+git clone https://github.com/ccsrvs/codetwin
 cd codetwin
 make build          # produces ./codetwin binary
 make test           # run all unit + integration tests
@@ -28,6 +29,9 @@ codetwin ./src
 # Compare specific files
 codetwin ./utils/a.go ./utils/b.go
 
+# Multiple paths — nested ones get deduped automatically
+codetwin ./src ./pkg
+
 # Only report pairs with >= 60% similarity
 codetwin --threshold 0.6 ./pkg
 
@@ -36,6 +40,12 @@ codetwin --plain ./src > report.txt
 
 # JSON output (pipe-friendly)
 codetwin --json ./src | jq '.pairs[] | select(.score > 0.8)'
+
+# Show line-numbered code excerpts under each finding
+codetwin --preview ./src
+
+# Top 5 biggest refactor opportunities
+codetwin --sort size --limit 5 ./src
 
 # Show everything including weak matches
 codetwin --verbose ./src
@@ -49,9 +59,13 @@ codetwin --verbose ./src
 | `--plain` | false | Disable ANSI colors (CI-safe) |
 | `--json` | false | JSON output |
 | `--verbose` | false | Show all pairs including weak |
-| `--min-lines` | `3` | Skip files shorter than N non-blank lines |
+| `--min-lines` | `3` | Skip chunks shorter than N non-blank lines |
 | `--eps` | `0.45` | DBSCAN epsilon (cluster density threshold) |
 | `--min-pts` | `2` | DBSCAN minimum cluster size |
+| `--preview` | false | Show line-numbered code excerpts under each finding |
+| `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
+| `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
+| `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
 
 ## Scoring
 
@@ -62,6 +76,75 @@ codetwin --verbose ./src
 | > 45% | Refactor target | Evaluate shared abstraction |
 | < 45% | Weak similarity | Probably coincidental |
 
+Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF)`.
+
+## Sorting
+
+`--sort` applies the same mode to both pairs and clusters, with each section
+using its natural interpretation:
+
+| Mode         | Pairs                          | Clusters                          |
+|--------------|--------------------------------|-----------------------------------|
+| `score`      | highest similarity first       | highest avg internal score first  |
+| `score-asc`  | borderline cases first         | loosest clusters first            |
+| `size`       | biggest snippets first         | most members first                |
+| `size-asc`   | smallest snippets first        | smallest clusters first           |
+| `name`       | alphabetical by file path      | alphabetical by first member      |
+
+`--limit N` caps each section at N items independently, applied **after**
+sort and threshold filtering — so `--limit 5` always yields up to 5 visible
+items per section.
+
+## Configuration
+
+Drop a `.codetwin.json` file in the directory you run codetwin from to set
+defaults, ignore files, or strip lines before tokenization. CLI flags
+always win over config defaults.
+
+```json
+{
+  "defaults": {
+    "threshold": 0.5,
+    "preview": true,
+    "preview_lines": 15,
+    "sort": "size",
+    "limit": 20
+  },
+  "ignore_paths": [
+    "vendor/**",
+    "**/*_test.go",
+    "migrations/"
+  ],
+  "ignore_patterns": [
+    "^\\s*log\\.(info|debug|warn|error)\\(",
+    "^\\s*println!\\("
+  ]
+}
+```
+
+### Path patterns (`ignore_paths`)
+
+| Pattern              | Matches                                                  |
+|----------------------|----------------------------------------------------------|
+| `vendor`             | any path component named exactly `vendor`                |
+| `vendor/lib`         | the multi-component path anywhere in the tree            |
+| `vendor/`            | only when `vendor` is a directory (file `vendor` won't)  |
+| `*_test.go`          | any file whose basename matches the glob, anywhere       |
+| `vendor/**`          | anything under any `vendor` directory                    |
+| `/build`             | leading `/` anchors the pattern to the scan root only    |
+
+Globs use `*` (within a path component), `**` (across components), and
+`?` (single character). Plain literals match path components, not loose
+substrings — so `lib` matches `src/lib/x` but not `library`.
+
+### Line patterns (`ignore_patterns`)
+
+Lines matching any pattern are stripped before tokenization, like comments.
+Useful for filtering out boilerplate that would otherwise inflate scores
+(logging calls, debug prints, license headers). Patterns are Go regular
+expressions with `(?m)` multi-line mode automatically applied so `^` and
+`$` anchor on each line.
+
 ## Architecture
 
 ```
@@ -70,61 +153,62 @@ codetwin/
 │   └── main.go                  # CLI: flag parsing, file collection, orchestration
 └── internal/
     ├── tokenizer/               # Language-aware lexing + normalization
-    │   ├── tokenizer.go
-    │   └── tokenizer_test.go
+    ├── splitter/                # Function/class-level chunking per language
     ├── fingerprint/             # Winnowing algorithm (structural similarity)
-    │   ├── fingerprint.go
-    │   └── fingerprint_test.go
     ├── similarity/              # TF-IDF vectors + cosine similarity (semantic)
-    │   ├── similarity.go
-    │   └── similarity_test.go
     ├── cluster/                 # DBSCAN clustering
-    │   ├── cluster.go
-    │   └── cluster_test.go
-    └── report/                  # ANSI terminal + plain text rendering
-        ├── report.go
-        └── report_test.go
+    ├── report/                  # ANSI terminal + plain text rendering
+    └── config/                  # .codetwin.json loading + ignore matching
 ```
 
 ### How each layer works
 
 **Tokenizer** (`internal/tokenizer`)
-Language-aware normalization before comparison. Comments are stripped. String
-literals become `STR`, numbers become `NUM`, all non-keyword identifiers become
-`VAR`. This means `sumArray(arr)` and `addNumbers(nums)` normalize to the same
-token stream — only structure matters.
+Language-aware normalization before comparison. Comments and import statements
+are stripped. String literals become `STR`, numbers become `NUM`, all
+non-keyword identifiers become `VAR`. This means `sumArray(arr)` and
+`addNumbers(nums)` normalize to the same token stream — only structure matters.
+
+`TokenizeWithLines` returns each token's source line so the rendered preview
+can show absolute file line numbers and the match-range slicer can find the
+duplicated lines.
+
+**Splitter** (`internal/splitter`)
+Breaks each file into per-definition chunks: every Python `def`, Go `func`,
+JS `function` / `const arrow` / `class`, Rust `fn`. Each chunk is then
+compared independently. A 500-line module with one duplicated 20-line helper
+now scores high on that helper instead of being washed out by 480 lines of
+unrelated code. Java and Elixir fall back to whole-file chunks (they need a
+language-specific splitter; PRs welcome).
 
 **Fingerprint** (`internal/fingerprint`)
 Implements the Winnowing algorithm. Slides a window over k-gram hashes and
 selects the minimum hash in each window as a "fingerprint". Jaccard similarity
-between two fingerprint sets gives the **structural score** — fast and exact for
-near-duplicate detection.
+between two fingerprint sets gives the **structural score** — fast and exact
+for near-duplicate detection. `PositionalSet` retains the originating token
+positions so the renderer can highlight which lines actually matched.
 
 **Similarity** (`internal/similarity`)
-Builds TF-IDF weighted token vectors across the full corpus and computes cosine
-similarity. This is the **semantic score** — it catches functionally similar code
-even when structure differs (e.g. a Python loop vs a Go loop with different
-control flow patterns).
+Builds TF-IDF weighted token vectors across the full corpus and computes
+cosine similarity. This is the **semantic score** — it catches functionally
+similar code even when structure differs (e.g. a Python loop vs a Go loop
+with different control flow patterns).
 
 **Cluster** (`internal/cluster`)
-DBSCAN over the combined similarity matrix. Rather than reporting O(n²) pairs, it
-groups families of similar snippets into clusters. Each cluster is one refactoring
-opportunity. Noise points (unique files) are omitted.
+DBSCAN over the combined similarity matrix. Rather than reporting O(n²) pairs,
+it groups families of similar snippets into clusters. Each cluster is one
+refactoring task. Noise points (unique snippets) are omitted.
 
 **Report** (`internal/report`)
-Renders results to stdout with ANSI colour-coded labels, a similarity matrix
-summary, and cluster membership. `--plain` disables colour for CI pipelines.
-`--json` emits machine-readable output.
+Renders results to stdout with ANSI colour-coded labels and cluster membership.
+Sort, threshold filter, and limit run in a shared `Prepare()` helper so
+terminal and JSON output reflect the same set of findings. `--plain` disables
+colour for CI pipelines. `--json` emits machine-readable output.
 
-### Final score
-
-```
-score = 0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF)
-```
-
-The 50/50 weight can be tuned via code — raise the structural weight if you care
-more about copy-paste detection; raise semantic if you want to catch logic
-equivalence across different coding styles.
+**Config** (`internal/config`)
+Loads `.codetwin.json` from the working directory. Compiles `ignore_paths`
+into a glob/component matcher and `ignore_patterns` into regexes consumed by
+the tokenizer.
 
 ## Adding a new language
 
@@ -134,18 +218,27 @@ equivalence across different coding styles.
 Ruby: {
     keywords: []string{"def", "end", "class", "return", "if", "else", ...},
     comments: regexp.MustCompile(`#[^\n]*`),
+    imports:  []*regexp.Regexp{regexp.MustCompile(`(?m)^[ \t]*require\s+['"][^'"]+['"]`)},
     strings:  regexp.MustCompile(`'[^']*'|"[^"]*"`),
     numbers:  regexp.MustCompile(`\b\d+(\.\d+)?\b`),
 },
 ```
 
-2. Add the file extension in `internal/tokenizer/tokenizer.go` `Detect()` and in
-   `cmd/codetwin/main.go` `supportedExts`.
+2. Add the file extension in `internal/tokenizer/tokenizer.go` `Detect()` and
+   in `cmd/codetwin/main.go` `supportedExts`.
 
-3. Add a test in `internal/tokenizer/tokenizer_test.go`.
+3. Add tests in `internal/tokenizer/tokenizer_test.go`.
 
-That's it — the fingerprint, similarity, cluster, and report layers are fully
-language-agnostic.
+4. (Optional but recommended) Add a splitter for the language in
+   `internal/splitter/splitter.go` so chunks are function-sized rather than
+   whole-file.
+
+The fingerprint, similarity, cluster, and report layers are fully
+language-agnostic — they don't need changes for a new language.
+
+> **Heads up — Go's regex engine is RE2.** No lookaround (`(?=`, `(?!`) and
+> no backreferences (`\1`). Use explicit alternation when you'd otherwise
+> reach for those features.
 
 ## Running tests
 
@@ -164,33 +257,54 @@ go test -run TestNormalize # single test by name
 
  SIMILARITY PAIRS
 
-  [EXACT CLONE     ]  91%
-  │  JS: sumArray
-  │  JS: addNumbers
-  │  structural: 100%  semantic: 82%
-
-  [STRONG CLONE    ]  74%
-  │  JS: sumArray
-  │  Python: sum_list
-  │  structural: 68%  semantic: 80%
-
-  [REFACTOR TARGET ]  61%
-  │  JS: sumArray
-  │  Go: SumSlice
-  │  structural: 55%  semantic: 67%
+  [EXACT CLONE     ]  100%
+    src/utils/sum.go:3-9 SumSlice
+         3 │ func SumSlice(nums []int) int {
+         4 │     total := 0
+         5 │     for i := 0; i < len(nums); i++ {
+         6 │         total += nums[i]
+         7 │     }
+         8 │     return total
+         9 │ }
+    src/aggregate.go:14-20 SumAll
+        14 │ func SumAll(values []int) int {
+        15 │     total := 0
+        16 │     for i := 0; i < len(values); i++ {
+        17 │         total += values[i]
+        18 │     }
+        19 │     return total
+        20 │ }
+  structural: 100%  semantic: 100%
 
  REFACTORING CLUSTERS
 
-  Cluster 1 — 4 snippets
-    · JS: sumArray
-    · JS: addNumbers
-    · Python: sum_list
-    · Go: SumSlice
+  Cluster 1 — 2 snippets
+    · src/utils/sum.go:3-9 SumSlice
+    · src/aggregate.go:14-20 SumAll
 
  SUMMARY
 ────────────────────────────────────────────────────────────
+  Pairs shown       1
   Exact clones      1
-  Strong clones     1
-  Refactor targets  2
+  Strong clones     0
+  Refactor targets  0
   Clusters found    1
+```
+
+## Recipes
+
+```bash
+# Find the five biggest refactor opportunities in your repo
+codetwin --sort size --limit 5 --preview ./src
+
+# Triage borderline cases — pairs that ALMOST cleared the threshold
+codetwin --sort score-asc --threshold 0.40 ./src
+
+# Strict CI gate — fail if any exact clones exist
+codetwin --json --threshold 0.85 ./src | jq '.pairs | length' \
+  | xargs -I{} test {} -eq 0
+
+# Generate a markdown digest of clusters, sorted by impact
+codetwin --json --sort size ./src \
+  | jq -r '.clusters[] | "## Cluster \(.id+1) (\(.members|length) snippets)\n\n" + (.members | map("- `\(.)`") | join("\n"))'
 ```
