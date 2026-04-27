@@ -3,6 +3,7 @@
 package report
 
 import (
+	"container/heap"
 	"fmt"
 	"io"
 	"sort"
@@ -76,18 +77,19 @@ const (
 	white  = "\033[97m"
 )
 
-// Prepare applies the report pipeline to raw pairs+clusters: sort by
-// Options.Sort, drop pairs below Options.Threshold (unless Verbose), then
-// cap each section to Options.Limit. The input slices are mutated in place
-// during sorting; the returned slices may be sub-slices or fresh allocations
-// depending on filtering.
+// Prepare applies the report pipeline to raw pairs+clusters: filter by
+// Options.Threshold (unless Verbose), then sort by Options.Sort, then cap
+// each section to Options.Limit.
+//
+// Order matters for performance on big repos. Filtering before sorting
+// drops millions of below-threshold pairs before they pay the n-log-n
+// sort cost. When Options.Limit is small, a top-K heap walk replaces the
+// full sort entirely — turning 20s of sorting on 11M pairs into a single
+// O(n log k) pass.
 //
 // Both Render and JSON consumers call Prepare so the two output formats
 // always reflect the same set of findings.
 func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster) {
-	sortPairs(pairs, opts.Sort)
-	sortClusters(clusters, opts.Sort)
-
 	visiblePairs := pairs
 	if !opts.Verbose {
 		visiblePairs = make([]Pair, 0, len(pairs))
@@ -98,16 +100,109 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster)
 		}
 	}
 
-	visibleClusters := clusters
-	if opts.Limit > 0 {
-		if len(visiblePairs) > opts.Limit {
-			visiblePairs = visiblePairs[:opts.Limit]
-		}
-		if len(visibleClusters) > opts.Limit {
-			visibleClusters = visibleClusters[:opts.Limit]
+	visiblePairs = sortAndLimitPairs(visiblePairs, opts.Sort, opts.Limit)
+	visibleClusters := sortAndLimitClusters(clusters, opts.Sort, opts.Limit)
+	return visiblePairs, visibleClusters
+}
+
+// sortAndLimitPairs returns up to `limit` pairs in the order specified by
+// `mode`. When limit is 0 (unlimited) or larger than the input, it falls
+// back to a full sort. Otherwise it uses a top-K heap, which is O(n log k)
+// instead of the full O(n log n) — a big win for "show me the top 5 of
+// 11 million pairs."
+func sortAndLimitPairs(pairs []Pair, mode SortMode, limit int) []Pair {
+	if limit <= 0 || limit >= len(pairs) {
+		sortPairs(pairs, mode)
+		return pairs
+	}
+	less := pairLessFunc(mode)
+	// Build a min-heap of capacity `limit` keyed by `less`, so the root
+	// is the worst entry currently in the heap. For each subsequent pair,
+	// if it beats the root we evict the root.
+	h := &pairHeap{items: make([]Pair, 0, limit+1), less: less}
+	for i := range pairs {
+		if len(h.items) < limit {
+			heap.Push(h, pairs[i])
+		} else if less(pairs[i], h.items[0]) {
+			h.items[0] = pairs[i]
+			heap.Fix(h, 0)
 		}
 	}
-	return visiblePairs, visibleClusters
+	// Drain the heap into a slice, then reverse so the output is best-first.
+	out := make([]Pair, h.Len())
+	for i := h.Len() - 1; i >= 0; i-- {
+		out[i] = heap.Pop(h).(Pair)
+	}
+	return out
+}
+
+// sortAndLimitClusters mirrors sortAndLimitPairs for clusters. Cluster
+// counts are usually small (hundreds at most), so the speedup matters
+// less here, but using the same code path keeps semantics consistent.
+func sortAndLimitClusters(clusters []Cluster, mode SortMode, limit int) []Cluster {
+	if limit <= 0 || limit >= len(clusters) {
+		sortClusters(clusters, mode)
+		return clusters
+	}
+	less := clusterLessFunc(mode)
+	h := &clusterHeap{items: make([]Cluster, 0, limit+1), less: less}
+	for i := range clusters {
+		if len(h.items) < limit {
+			heap.Push(h, clusters[i])
+		} else if less(clusters[i], h.items[0]) {
+			h.items[0] = clusters[i]
+			heap.Fix(h, 0)
+		}
+	}
+	out := make([]Cluster, h.Len())
+	for i := h.Len() - 1; i >= 0; i-- {
+		out[i] = heap.Pop(h).(Cluster)
+	}
+	return out
+}
+
+// pairHeap is a min-heap of pairs ordered by `less`. The root is the
+// worst pair currently retained, so a new pair only displaces the root
+// when `less(new, root)` — i.e. new is "better" than the worst.
+type pairHeap struct {
+	items []Pair
+	less  func(a, b Pair) bool
+}
+
+func (h *pairHeap) Len() int { return len(h.items) }
+func (h *pairHeap) Less(i, j int) bool {
+	// We want a min-heap on the *output* ordering, so the heap's Less
+	// returns true when items[i] is "worse" than items[j]. Since the
+	// caller's `less(a, b)` returns true when a should appear before b
+	// in the output (a is "better"), the heap's Less is the inverse.
+	return h.less(h.items[j], h.items[i])
+}
+func (h *pairHeap) Swap(i, j int) { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *pairHeap) Push(x any)    { h.items = append(h.items, x.(Pair)) }
+func (h *pairHeap) Pop() any {
+	old := h.items
+	n := len(old)
+	x := old[n-1]
+	h.items = old[:n-1]
+	return x
+}
+
+// clusterHeap mirrors pairHeap for clusters.
+type clusterHeap struct {
+	items []Cluster
+	less  func(a, b Cluster) bool
+}
+
+func (h *clusterHeap) Len() int            { return len(h.items) }
+func (h *clusterHeap) Less(i, j int) bool  { return h.less(h.items[j], h.items[i]) }
+func (h *clusterHeap) Swap(i, j int)       { h.items[i], h.items[j] = h.items[j], h.items[i] }
+func (h *clusterHeap) Push(x any)          { h.items = append(h.items, x.(Cluster)) }
+func (h *clusterHeap) Pop() any {
+	old := h.items
+	n := len(old)
+	x := old[n-1]
+	h.items = old[:n-1]
+	return x
 }
 
 // Render writes the full report to w. Calls Prepare internally; callers that
@@ -130,70 +225,82 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	printSummary(w, visiblePairs, visibleClusters, opts)
 }
 
-// sortPairs orders pairs in place per mode. Stable so that ties preserve the
-// caller's input order — important for deterministic output across runs.
-func sortPairs(pairs []Pair, mode SortMode) {
-	var less func(i, j int) bool
+// pairLessFunc returns the value-based less function for the given sort
+// mode: less(a, b) is true when a should appear before b in the output.
+// Used by both the full sort path and the top-K heap path so the two
+// share a single source of truth for ordering.
+func pairLessFunc(mode SortMode) func(a, b Pair) bool {
 	switch mode {
 	case SortScoreAsc:
-		less = func(i, j int) bool { return pairs[i].Score < pairs[j].Score }
+		return func(a, b Pair) bool { return a.Score < b.Score }
 	case SortSize:
-		less = func(i, j int) bool { return pairSize(pairs[i]) > pairSize(pairs[j]) }
+		return func(a, b Pair) bool { return pairSize(a) > pairSize(b) }
 	case SortSizeAsc:
-		less = func(i, j int) bool { return pairSize(pairs[i]) < pairSize(pairs[j]) }
+		return func(a, b Pair) bool { return pairSize(a) < pairSize(b) }
 	case SortName:
-		less = func(i, j int) bool {
-			if pairs[i].NameA != pairs[j].NameA {
-				return pairs[i].NameA < pairs[j].NameA
+		return func(a, b Pair) bool {
+			if a.NameA != b.NameA {
+				return a.NameA < b.NameA
 			}
-			return pairs[i].NameB < pairs[j].NameB
+			return a.NameB < b.NameB
 		}
 	default: // SortScore or empty
-		less = func(i, j int) bool { return pairs[i].Score > pairs[j].Score }
+		return func(a, b Pair) bool { return a.Score > b.Score }
 	}
-	sort.SliceStable(pairs, less)
 }
 
-// sortClusters orders clusters in place per mode. The ID is used as a stable
-// tiebreaker for score sorts so that runs with identical input produce
-// identical output.
-func sortClusters(clusters []Cluster, mode SortMode) {
-	var less func(i, j int) bool
+// clusterLessFunc returns the value-based less function for clusters.
+// Score sorts use ID as a stable tiebreaker so runs with identical input
+// produce identical output.
+func clusterLessFunc(mode SortMode) func(a, b Cluster) bool {
 	switch mode {
 	case SortScoreAsc:
-		less = func(i, j int) bool {
-			if clusters[i].Score != clusters[j].Score {
-				return clusters[i].Score < clusters[j].Score
+		return func(a, b Cluster) bool {
+			if a.Score != b.Score {
+				return a.Score < b.Score
 			}
-			return clusters[i].ID < clusters[j].ID
+			return a.ID < b.ID
 		}
 	case SortSize:
-		less = func(i, j int) bool {
-			if len(clusters[i].Members) != len(clusters[j].Members) {
-				return len(clusters[i].Members) > len(clusters[j].Members)
+		return func(a, b Cluster) bool {
+			if len(a.Members) != len(b.Members) {
+				return len(a.Members) > len(b.Members)
 			}
-			return clusters[i].ID < clusters[j].ID
+			return a.ID < b.ID
 		}
 	case SortSizeAsc:
-		less = func(i, j int) bool {
-			if len(clusters[i].Members) != len(clusters[j].Members) {
-				return len(clusters[i].Members) < len(clusters[j].Members)
+		return func(a, b Cluster) bool {
+			if len(a.Members) != len(b.Members) {
+				return len(a.Members) < len(b.Members)
 			}
-			return clusters[i].ID < clusters[j].ID
+			return a.ID < b.ID
 		}
 	case SortName:
-		less = func(i, j int) bool {
-			return firstMember(clusters[i]) < firstMember(clusters[j])
+		return func(a, b Cluster) bool {
+			return firstMember(a) < firstMember(b)
 		}
 	default: // SortScore or empty
-		less = func(i, j int) bool {
-			if clusters[i].Score != clusters[j].Score {
-				return clusters[i].Score > clusters[j].Score
+		return func(a, b Cluster) bool {
+			if a.Score != b.Score {
+				return a.Score > b.Score
 			}
-			return clusters[i].ID < clusters[j].ID
+			return a.ID < b.ID
 		}
 	}
-	sort.SliceStable(clusters, less)
+}
+
+// sortPairs orders pairs in place per mode. Stable so that ties preserve
+// the caller's input order — important for deterministic output across
+// runs.
+func sortPairs(pairs []Pair, mode SortMode) {
+	less := pairLessFunc(mode)
+	sort.SliceStable(pairs, func(i, j int) bool { return less(pairs[i], pairs[j]) })
+}
+
+// sortClusters orders clusters in place per mode.
+func sortClusters(clusters []Cluster, mode SortMode) {
+	less := clusterLessFunc(mode)
+	sort.SliceStable(clusters, func(i, j int) bool { return less(clusters[i], clusters[j]) })
 }
 
 func pairSize(p Pair) int {
