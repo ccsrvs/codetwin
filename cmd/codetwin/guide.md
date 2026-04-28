@@ -100,3 +100,12 @@ scores reflect intentional duplication that you should NOT refactor:
 
 The judgment of "is this duplication worth removing?" is yours; the
 tool's job is to surface candidates.
+
+## A note on config
+
+Some `.codetwin.json` knobs change what the tool *sees* before it
+scores — `ignore_patterns` strips matching lines (often logging) before
+tokenization, and `ignore_paths` excludes whole files from the scan.
+Both can explain "why did this score lower than I expected?" or "why
+is this pair missing from the report?" Run `codetwin --skill` for the
+full config schema and ignore-pattern semantics.
