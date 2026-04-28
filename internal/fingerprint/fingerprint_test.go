@@ -30,41 +30,24 @@ func TestGenerate_DeterministicForSameInput(t *testing.T) {
 	}
 }
 
-func TestJaccard_IdenticalSets(t *testing.T) {
-	a := Set{1: {}, 2: {}, 3: {}}
-	b := Set{1: {}, 2: {}, 3: {}}
-	if got := Jaccard(a, b); got != 1.0 {
-		t.Errorf("Jaccard of identical sets = %v; want 1.0", got)
+func TestJaccard(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b Set
+		want float64
+	}{
+		{"identical sets", Set{1: {}, 2: {}, 3: {}}, Set{1: {}, 2: {}, 3: {}}, 1.0},
+		{"disjoint sets", Set{1: {}, 2: {}}, Set{3: {}, 4: {}}, 0.0},
+		{"partial overlap (2 of 4)", Set{1: {}, 2: {}, 3: {}}, Set{2: {}, 3: {}, 4: {}}, 0.5},
+		{"both empty is vacuously 1.0", Set{}, Set{}, 1.0},
+		{"one empty", Set{1: {}, 2: {}}, Set{}, 0.0},
 	}
-}
-
-func TestJaccard_DisjointSets(t *testing.T) {
-	a := Set{1: {}, 2: {}}
-	b := Set{3: {}, 4: {}}
-	if got := Jaccard(a, b); got != 0.0 {
-		t.Errorf("Jaccard of disjoint sets = %v; want 0.0", got)
-	}
-}
-
-func TestJaccard_PartialOverlap(t *testing.T) {
-	a := Set{1: {}, 2: {}, 3: {}}
-	b := Set{2: {}, 3: {}, 4: {}}
-	// |intersection| = 2, |union| = 4, ratio = 0.5
-	if got := Jaccard(a, b); got != 0.5 {
-		t.Errorf("Jaccard partial overlap = %v; want 0.5", got)
-	}
-}
-
-func TestJaccard_BothEmpty(t *testing.T) {
-	if got := Jaccard(Set{}, Set{}); got != 1.0 {
-		t.Errorf("Jaccard of two empty sets = %v; want 1.0 (vacuous)", got)
-	}
-}
-
-func TestJaccard_OneEmpty(t *testing.T) {
-	a := Set{1: {}, 2: {}}
-	if got := Jaccard(a, Set{}); got != 0.0 {
-		t.Errorf("Jaccard with one empty set = %v; want 0.0", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Jaccard(tc.a, tc.b); got != tc.want {
+				t.Errorf("Jaccard(%v, %v) = %v; want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }
 
