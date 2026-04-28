@@ -353,6 +353,146 @@ func Real() {
 	}
 }
 
+func TestSplit_GoGoroutineAnonymous(t *testing.T) {
+	code := `package main
+
+func Run() {
+	go func() {
+		doWork()
+	}()
+}
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Run" {
+		t.Errorf("outer symbol: want Run, got %q", chunks[0].Symbol)
+	}
+	if chunks[1].Symbol != "goroutine@L4" {
+		t.Errorf("inner symbol: want goroutine@L4, got %q", chunks[1].Symbol)
+	}
+	if chunks[1].StartLine != 4 || chunks[1].EndLine != 6 {
+		t.Errorf("inner range: want 4-6, got %d-%d", chunks[1].StartLine, chunks[1].EndLine)
+	}
+}
+
+func TestSplit_GoDeferAnonymous(t *testing.T) {
+	code := `package main
+
+func Run() {
+	defer func() {
+		cleanup()
+	}()
+	work()
+}
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Run" || chunks[1].Symbol != "defer@L4" {
+		t.Errorf("symbols: want [Run defer@L4], got [%s %s]", chunks[0].Symbol, chunks[1].Symbol)
+	}
+}
+
+func TestSplit_GoAssignmentClosure(t *testing.T) {
+	code := `package main
+
+func Run() {
+	helper := func(x int) int {
+		return x * 2
+	}
+	_ = helper
+}
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Run" || chunks[1].Symbol != "helper" {
+		t.Errorf("symbols: want [Run helper], got [%s %s]", chunks[0].Symbol, chunks[1].Symbol)
+	}
+}
+
+func TestSplit_GoVarClosure(t *testing.T) {
+	code := `package main
+
+var double = func(x int) int { return x + x }
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "double" {
+		t.Errorf("symbol: want double, got %q", chunks[0].Symbol)
+	}
+}
+
+func TestSplit_GoIIFE(t *testing.T) {
+	code := `package main
+
+func Run() {
+	func() {
+		println("init")
+	}()
+}
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Run" || chunks[1].Symbol != "anonymous@L4" {
+		t.Errorf("symbols: want [Run anonymous@L4], got [%s %s]", chunks[0].Symbol, chunks[1].Symbol)
+	}
+}
+
+func TestSplit_GoFuncTypeFieldNotChunked(t *testing.T) {
+	// `Handler func(...)` is a struct field type declaration, not a function
+	// definition — it has no body braces, so findBraceEnd rejects it and no
+	// chunk is emitted. The Real func should be the only chunk.
+	code := `package main
+
+type Server struct {
+	Handler func(http.ResponseWriter, *http.Request)
+}
+
+func Real() {
+	x := 1
+	_ = x
+}
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 1 || chunks[0].Symbol != "Real" {
+		t.Errorf("expected only Real chunk, got %+v", chunks)
+	}
+}
+
+func TestSplit_GoMultilineAnonSignature(t *testing.T) {
+	code := `package main
+
+func Run() {
+	f := func(
+		x int,
+		y int,
+	) int {
+		return x + y
+	}
+	_ = f
+}
+`
+	chunks := Split("a.go", code, tokenizer.Go)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[1].Symbol != "f" {
+		t.Errorf("inner symbol: want f, got %q", chunks[1].Symbol)
+	}
+	if chunks[1].StartLine != 4 || chunks[1].EndLine != 9 {
+		t.Errorf("inner range: want 4-9, got %d-%d", chunks[1].StartLine, chunks[1].EndLine)
+	}
+}
+
 func TestSplit_JavaScriptFunctionAndArrow(t *testing.T) {
 	code := `function App() {
   return 1;
