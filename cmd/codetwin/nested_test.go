@@ -2,6 +2,33 @@ package main
 
 import "testing"
 
+func TestJsonLabel_BandsMatchTerminalClassifier(t *testing.T) {
+	// JSON consumers script against the label string. If this diverges from
+	// the terminal classify() in report.go, downstream filters silently
+	// break — the bug that prompted adding this test was 151 pairs ≥0.85
+	// all reporting "exact_clone" while the terminal split them across
+	// "EXACT CLONE" (>0.95) and "NEAR CLONE" (>0.85).
+	cases := []struct {
+		score float64
+		want  string
+	}{
+		{0.97, "exact_clone"},
+		{0.95, "near_clone"}, // strict > 0.95
+		{0.90, "near_clone"},
+		{0.85, "strong_clone"}, // strict > 0.85
+		{0.80, "strong_clone"},
+		{0.65, "refactor_candidate"}, // strict > 0.65
+		{0.50, "refactor_candidate"},
+		{0.45, "weak_similarity"}, // strict > 0.45
+		{0.30, "weak_similarity"},
+	}
+	for _, c := range cases {
+		if got := jsonLabel(c.score); got != c.want {
+			t.Errorf("jsonLabel(%.2f) = %q; want %q", c.score, got, c.want)
+		}
+	}
+}
+
 func TestChunksNestedSameFile(t *testing.T) {
 	cases := []struct {
 		name string

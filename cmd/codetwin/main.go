@@ -554,10 +554,15 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 	enc.Encode(out)
 }
 
+// jsonLabel mirrors the terminal report's classify() bands. Keep these two
+// in sync — JSON consumers script against the label string, so adding a
+// tier to one place and not the other silently lies to downstream users.
 func jsonLabel(score float64) string {
 	switch {
-	case score > 0.85:
+	case score > 0.95:
 		return "exact_clone"
+	case score > 0.85:
+		return "near_clone"
 	case score > 0.65:
 		return "strong_clone"
 	case score > 0.45:
