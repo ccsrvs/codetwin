@@ -729,3 +729,57 @@ func TestSplit_PathPropagated(t *testing.T) {
 		}
 	}
 }
+
+func TestChunk_Name_WithSymbol(t *testing.T) {
+	got := Chunk{Path: "a.go", StartLine: 3, EndLine: 7, Symbol: "Run"}.Name()
+	want := "a.go:3-7 Run"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestChunk_Name_NoSymbolHasRange(t *testing.T) {
+	got := Chunk{Path: "a.go", StartLine: 10, EndLine: 12}.Name()
+	want := "a.go:10-12"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestChunk_Name_WholeFileFallback(t *testing.T) {
+	// No symbol AND starts at line 1 → whole-file fallback chunk; just the path.
+	got := Chunk{Path: "a.go", StartLine: 1, EndLine: 50}.Name()
+	if got != "a.go" {
+		t.Errorf("got %q, want %q", got, "a.go")
+	}
+}
+
+func TestChunk_Name_StartLine1WithSymbol(t *testing.T) {
+	// A real top-level def at line 1 must still get the range+symbol form.
+	got := Chunk{Path: "a.go", StartLine: 1, EndLine: 5, Symbol: "main"}.Name()
+	want := "a.go:1-5 main"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestCountNonBlankLines(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+		want int
+	}{
+		{"empty", "", 0},
+		{"all blank", "\n\n   \n\t\n", 0},
+		{"mixed", "a\n\nb\n   \nc", 3},
+		{"single", "hello", 1},
+		{"trailing newline", "a\n", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CountNonBlankLines(tc.code); got != tc.want {
+				t.Errorf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

@@ -27,6 +27,32 @@ type Chunk struct {
 	Code      string
 }
 
+// Name produces a unique, human-readable identifier for a chunk. The format
+// is "path:start-end Symbol" when the symbol is known, "path:start-end" when
+// it isn't, and just "path" for whole-file fallback chunks (those have no
+// symbol and start at line 1).
+func (c Chunk) Name() string {
+	if c.Symbol == "" && c.StartLine == 1 {
+		return c.Path
+	}
+	if c.Symbol != "" {
+		return fmt.Sprintf("%s:%d-%d %s", c.Path, c.StartLine, c.EndLine, c.Symbol)
+	}
+	return fmt.Sprintf("%s:%d-%d", c.Path, c.StartLine, c.EndLine)
+}
+
+// CountNonBlankLines reports how many newline-separated lines in code have
+// non-whitespace content. Used to gate display of tiny matches.
+func CountNonBlankLines(code string) int {
+	n := 0
+	for _, line := range strings.Split(code, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // Split breaks code into per-definition chunks. The returned slice always
 // contains at least one chunk: when no definitions are found the whole file
 // is returned as a single anonymous chunk.

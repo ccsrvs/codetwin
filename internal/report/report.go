@@ -36,6 +36,72 @@ type Preview struct {
 	Text      string
 }
 
+// ExtractPreview returns the first n lines of code as a single newline-joined
+// string. When n <= 0 the entire code is returned (unlimited mode). Line
+// numbers are preserved by the caller via the chunk's StartLine, so this
+// function does not skip leading blanks.
+func ExtractPreview(code string, n int) string {
+	lines := strings.Split(code, "\n")
+	if n <= 0 || n > len(lines) {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[:n], "\n")
+}
+
+// BuildMatchPreview returns a Preview focused on the line range covered by
+// [firstTok, lastTok], extending the last token by k-1 to cover the full
+// k-gram. Behavior by maxLines:
+//
+//	maxLines == 0:          show the whole chunk (unlimited)
+//	chunk lines <= maxLines: show the whole chunk (it fits)
+//	otherwise:              focus on the match range, taking up to maxLines
+//	                        lines starting at the first matching line
+func BuildMatchPreview(code string, tokenLines []int, chunkStartLine, firstTok, lastTok, k, maxLines int) Preview {
+	chunkLines := strings.Split(code, "\n")
+	if maxLines <= 0 || len(chunkLines) <= maxLines {
+		return Preview{
+			StartLine: chunkStartLine,
+			Text:      strings.Join(chunkLines, "\n"),
+		}
+	}
+
+	if firstTok < 0 || firstTok >= len(tokenLines) {
+		return Preview{
+			StartLine: chunkStartLine,
+			Text:      strings.Join(chunkLines[:maxLines], "\n"),
+		}
+	}
+	endTok := lastTok + k - 1
+	if endTok >= len(tokenLines) {
+		endTok = len(tokenLines) - 1
+	}
+	if endTok < firstTok {
+		endTok = firstTok
+	}
+
+	chunkFirstLine := tokenLines[firstTok]
+	chunkLastLine := tokenLines[endTok]
+	if chunkLastLine < chunkFirstLine {
+		chunkLastLine = chunkFirstLine
+	}
+	if chunkFirstLine > len(chunkLines) {
+		chunkFirstLine = len(chunkLines)
+	}
+	if chunkLastLine > len(chunkLines) {
+		chunkLastLine = len(chunkLines)
+	}
+
+	selected := chunkLines[chunkFirstLine-1 : chunkLastLine]
+	if len(selected) > maxLines {
+		selected = selected[:maxLines]
+	}
+
+	return Preview{
+		StartLine: chunkStartLine + chunkFirstLine - 1,
+		Text:      strings.Join(selected, "\n"),
+	}
+}
+
 // SortMode controls the ordering of pairs and clusters in the rendered
 // report. The same mode applies to both sections, with each section using
 // the natural interpretation: pair size = max(LinesA, LinesB), cluster size
