@@ -3,6 +3,7 @@
 package report
 
 import (
+	"cmp"
 	"container/heap"
 	"fmt"
 	"io"
@@ -248,67 +249,74 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	printSummary(w, visiblePairs, visibleClusters, opts)
 }
 
+// lessChain composes int-returning comparators into a less function. The
+// first non-zero comparator decides the ordering; ties fall through to
+// the next. Returns false on a full tie so sort.SliceStable preserves
+// the input order.
+func lessChain[T any](cmps ...func(a, b T) int) func(a, b T) bool {
+	return func(a, b T) bool {
+		for _, c := range cmps {
+			if r := c(a, b); r != 0 {
+				return r < 0
+			}
+		}
+		return false
+	}
+}
+
+// Pair comparators.
+func cmpPairScoreAsc(a, b Pair) int  { return cmp.Compare(a.Score, b.Score) }
+func cmpPairScoreDesc(a, b Pair) int { return cmp.Compare(b.Score, a.Score) }
+func cmpPairSizeDesc(a, b Pair) int  { return cmp.Compare(pairSize(b), pairSize(a)) }
+func cmpPairSizeAsc(a, b Pair) int   { return cmp.Compare(pairSize(a), pairSize(b)) }
+func cmpPairNameA(a, b Pair) int     { return cmp.Compare(a.NameA, b.NameA) }
+func cmpPairNameB(a, b Pair) int     { return cmp.Compare(a.NameB, b.NameB) }
+
+// Cluster comparators.
+func cmpClusterScoreAsc(a, b Cluster) int  { return cmp.Compare(a.Score, b.Score) }
+func cmpClusterScoreDesc(a, b Cluster) int { return cmp.Compare(b.Score, a.Score) }
+func cmpClusterSizeDesc(a, b Cluster) int  { return cmp.Compare(len(b.Members), len(a.Members)) }
+func cmpClusterSizeAsc(a, b Cluster) int   { return cmp.Compare(len(a.Members), len(b.Members)) }
+func cmpClusterID(a, b Cluster) int        { return cmp.Compare(a.ID, b.ID) }
+func cmpClusterFirstMember(a, b Cluster) int {
+	return cmp.Compare(firstMember(a), firstMember(b))
+}
+
 // pairLessFunc returns the value-based less function for the given sort
 // mode: less(a, b) is true when a should appear before b in the output.
 // Used by both the full sort path and the top-K heap path so the two
-// share a single source of truth for ordering.
+// share a single source of truth for ordering. Tied pairs rely on
+// sort.SliceStable to preserve input order.
 func pairLessFunc(mode SortMode) func(a, b Pair) bool {
 	switch mode {
 	case SortScoreAsc:
-		return func(a, b Pair) bool { return a.Score < b.Score }
+		return lessChain(cmpPairScoreAsc)
 	case SortSize:
-		return func(a, b Pair) bool { return pairSize(a) > pairSize(b) }
+		return lessChain(cmpPairSizeDesc)
 	case SortSizeAsc:
-		return func(a, b Pair) bool { return pairSize(a) < pairSize(b) }
+		return lessChain(cmpPairSizeAsc)
 	case SortName:
-		return func(a, b Pair) bool {
-			if a.NameA != b.NameA {
-				return a.NameA < b.NameA
-			}
-			return a.NameB < b.NameB
-		}
+		return lessChain(cmpPairNameA, cmpPairNameB)
 	default: // SortScore or empty
-		return func(a, b Pair) bool { return a.Score > b.Score }
+		return lessChain(cmpPairScoreDesc)
 	}
 }
 
 // clusterLessFunc returns the value-based less function for clusters.
-// Score sorts use ID as a stable tiebreaker so runs with identical input
-// produce identical output.
+// Score and Size sorts use ID as a stable tiebreaker so runs with
+// identical input produce identical output.
 func clusterLessFunc(mode SortMode) func(a, b Cluster) bool {
 	switch mode {
 	case SortScoreAsc:
-		return func(a, b Cluster) bool {
-			if a.Score != b.Score {
-				return a.Score < b.Score
-			}
-			return a.ID < b.ID
-		}
+		return lessChain(cmpClusterScoreAsc, cmpClusterID)
 	case SortSize:
-		return func(a, b Cluster) bool {
-			if len(a.Members) != len(b.Members) {
-				return len(a.Members) > len(b.Members)
-			}
-			return a.ID < b.ID
-		}
+		return lessChain(cmpClusterSizeDesc, cmpClusterID)
 	case SortSizeAsc:
-		return func(a, b Cluster) bool {
-			if len(a.Members) != len(b.Members) {
-				return len(a.Members) < len(b.Members)
-			}
-			return a.ID < b.ID
-		}
+		return lessChain(cmpClusterSizeAsc, cmpClusterID)
 	case SortName:
-		return func(a, b Cluster) bool {
-			return firstMember(a) < firstMember(b)
-		}
+		return lessChain(cmpClusterFirstMember)
 	default: // SortScore or empty
-		return func(a, b Cluster) bool {
-			if a.Score != b.Score {
-				return a.Score > b.Score
-			}
-			return a.ID < b.ID
-		}
+		return lessChain(cmpClusterScoreDesc, cmpClusterID)
 	}
 }
 
