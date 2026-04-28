@@ -405,15 +405,161 @@ impl Foo {
 	}
 }
 
-func TestSplit_JavaFallsBackToWholeFile(t *testing.T) {
+func TestSplit_JavaInterfaceStubsFallBackToWholeFile(t *testing.T) {
+	// An interface containing only abstract method stubs (no bodies) has
+	// no `{`-balanced chunks for splitJava to extract, so the splitter
+	// emits zero chunks and Split's outer fallback returns the whole
+	// file as one anonymous chunk.
 	code := `package com.foo;
-public class Foo {
-  void bar() {}
+public interface Foo {
+  void bar();
+  String baz(int n);
 }
 `
 	chunks := Split("Foo.java", code, tokenizer.Java)
 	if len(chunks) != 1 || chunks[0].Symbol != "" {
-		t.Errorf("Java should fall back to a single whole-file chunk, got %+v", chunks)
+		t.Errorf("Java interface stubs should fall back to a single whole-file chunk, got %+v", chunks)
+	}
+}
+
+func TestSplit_JavaMethodsBecomeChunks(t *testing.T) {
+	code := `package com.foo;
+public class Calculator {
+    public int add(int a, int b) {
+        return a + b;
+    }
+
+    private static String describe(int n) {
+        if (n < 0) {
+            return "negative";
+        }
+        return "positive";
+    }
+}
+`
+	chunks := Split("Calculator.java", code, tokenizer.Java)
+	got := make([]string, len(chunks))
+	for i, c := range chunks {
+		got[i] = c.Symbol
+	}
+	want := []string{"add", "describe"}
+	if len(got) != len(want) {
+		t.Fatalf("expected chunks %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chunk %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+	// The describe chunk must include its body — the inner `if (n < 0) {`
+	// shouldn't be misread as a method header by the keyword filter.
+	for _, c := range chunks {
+		if c.Symbol == "describe" && !strings.Contains(c.Code, `return "positive"`) {
+			t.Errorf("describe chunk missing body:\n%s", c.Code)
+		}
+	}
+}
+
+func TestSplit_JavaConstructorIsAChunk(t *testing.T) {
+	code := `package com.foo;
+public class Point {
+    private final int x;
+    private final int y;
+
+    public Point(int x, int y) {
+        this.x = x;
+        this.y = y;
+    }
+}
+`
+	chunks := Split("Point.java", code, tokenizer.Java)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk for the constructor, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Point" {
+		t.Errorf("expected constructor symbol 'Point', got %q", chunks[0].Symbol)
+	}
+}
+
+func TestSplit_JavaGenericMethodAndThrows(t *testing.T) {
+	code := `package com.foo;
+import java.io.IOException;
+import java.util.List;
+
+public class Util {
+    public <T> List<T> filter(List<T> input) throws IOException {
+        return input;
+    }
+
+    public Map<String, Integer> count(Collection<? extends Number> nums) {
+        return null;
+    }
+}
+`
+	chunks := Split("Util.java", code, tokenizer.Java)
+	got := make([]string, len(chunks))
+	for i, c := range chunks {
+		got[i] = c.Symbol
+	}
+	want := []string{"filter", "count"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chunk %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestSplit_JavaFieldsAndTypeDeclsNotMatched(t *testing.T) {
+	// Fields lack `(`; type declarations are filtered out before the
+	// method regex runs. Both kinds of non-method members should yield
+	// zero method-chunks here, so the file falls back to a whole-file
+	// chunk via Split's outer guard.
+	code := `package com.foo;
+public class Container {
+    private static final int CONSTANT = 42;
+    private String name = "default";
+    private List<String> items = new ArrayList<>();
+}
+`
+	chunks := Split("Container.java", code, tokenizer.Java)
+	if len(chunks) != 1 || chunks[0].Symbol != "" {
+		t.Errorf("class with only fields should fall back to whole-file chunk; got %+v", chunks)
+	}
+}
+
+func TestSplit_JavaControlFlowNotMisreadAsMethods(t *testing.T) {
+	// `if (cond) {` and friends have the same surface shape as a method
+	// header (name + parens + brace) and would falsely match without
+	// the keyword filter. Ensure the only chunk we emit is the
+	// enclosing method, not its inner control-flow blocks.
+	code := `package com.foo;
+public class Loops {
+    public void run(int n) {
+        if (n > 0) {
+            System.out.println("positive");
+        }
+        while (n > 0) {
+            n--;
+        }
+        for (int i = 0; i < n; i++) {
+            System.out.println(i);
+        }
+        switch (n) {
+            case 0:
+                break;
+        }
+    }
+}
+`
+	chunks := Split("Loops.java", code, tokenizer.Java)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk (just `run`), got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "run" {
+		t.Errorf("expected symbol 'run', got %q", chunks[0].Symbol)
 	}
 }
 

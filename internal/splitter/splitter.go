@@ -40,6 +40,8 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 		chunks = splitJavaScript(code)
 	case tokenizer.Rust:
 		chunks = splitBraceLang(code, rustFnRe)
+	case tokenizer.Java:
+		chunks = splitJava(code)
 	}
 	if len(chunks) == 0 {
 		lines := strings.Split(code, "\n")
@@ -316,6 +318,70 @@ func splitBraceLang(code string, headerRe *regexp.Regexp) []Chunk {
 		if !ok {
 			// No body braces (e.g. interface method stub) — skip without
 			// emitting a chunk.
+			i++
+			continue
+		}
+		chunks = append(chunks, Chunk{
+			StartLine: i + 1,
+			EndLine:   end + 1,
+			Symbol:    m[1],
+			Code:      strings.Join(lines[i:end+1], "\n"),
+		})
+		i = end + 1
+	}
+	return chunks
+}
+
+// ── Java ──────────────────────────────────────────────────────────────────────
+
+var (
+	// javaTypeDeclRe matches lines that declare a type (class/interface/enum/
+	// record). Methods inside these types are what we want to extract; the
+	// type header itself would otherwise pull in the entire class body as a
+	// single chunk and dominate the report.
+	javaTypeDeclRe = regexp.MustCompile(`^[ \t]*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*(?:class|interface|enum|record|@interface)\s+`)
+
+	// javaMethodRe matches plausible method or constructor headers. Allows
+	// any combination of access/non-access modifiers, an optional generic
+	// type parameter, an optional return type (constructors omit it), then
+	// `name(...)`. The trailing `\{?` is loose so we still match headers
+	// where `{` lives on the next line; findBraceEnd handles the body.
+	javaMethodRe = regexp.MustCompile(`^[ \t]*(?:(?:public|private|protected|static|final|synchronized|abstract|native|default|strictfp)\s+)*(?:<[^>]+>\s+)?(?:[\w<>\[\],\s\?\.\$]+?\s+)?(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s\.]+)?\s*\{?\s*$`)
+)
+
+// splitJava chunks a Java compilation unit into method- and constructor-
+// level chunks. Class/interface/enum/record headers are deliberately not
+// matched — they'd swallow the whole body. Interface method stubs (no
+// `{`) and field declarations both naturally fall out: the former because
+// findBraceEnd reports no body, the latter because the regex requires
+// `name(`.
+func splitJava(code string) []Chunk {
+	lines := strings.Split(code, "\n")
+	var chunks []Chunk
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		if javaTypeDeclRe.MatchString(line) {
+			i++
+			continue
+		}
+		m := javaMethodRe.FindStringSubmatch(line)
+		if m == nil {
+			i++
+			continue
+		}
+		// Skip Java keywords that the regex's permissive structure can
+		// otherwise capture — e.g. `if (cond) {`, `while (x) {`,
+		// `for (...) {`, `switch (x) {`. None of these introduce a
+		// definition we want to chunk.
+		switch m[1] {
+		case "if", "while", "for", "switch", "synchronized", "catch", "try", "do", "return":
+			i++
+			continue
+		}
+		end, ok := findBraceEnd(lines, i)
+		if !ok {
+			// Interface/abstract method stub with no body — skip.
 			i++
 			continue
 		}
