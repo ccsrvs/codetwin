@@ -161,11 +161,6 @@ func hashString(s string) uint32 {
 }
 
 func minHash(window []uint32) uint32 {
-	m := window[0]
-	for _, v := range window[1:] {
-		if v < m {
-			m = v
-		}
-	}
+	m, _ := minHashAt(window)
 	return m
 }
