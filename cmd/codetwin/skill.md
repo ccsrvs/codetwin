@@ -75,9 +75,12 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
 --skill                 print this skill guide and exit
+--guide                 print the report interpretation guide and exit
 ```
 
 `codetwin --help` prints the same flag list with one-line descriptions.
+`codetwin --guide` walks through the score bands, structural/semantic
+sub-scores, and pairs vs clusters in more depth.
 
 ### Sorting and limiting results
 
@@ -171,10 +174,14 @@ the matrix is computing. It's auto-suppressed when stderr isn't a TTY
 
 | Score | Label | What to do |
 |---|---|---|
-| > 85% | Exact clone | Extract shared utility, delete one immediately |
+| > 95% | Exact clone | Extract shared utility, delete one immediately |
+| > 85% | Near clone | Virtually identical with one or two token edits; treat as a clone unless the difference is intentional |
 | > 65% | Strong clone | Parameterize the differing parts |
 | > 45% | Refactor target | Evaluate whether a shared abstraction reduces duplication |
 | < 45% | Weak similarity | Probably coincidental — review before acting |
+
+For a fuller explanation of the score, the structural/semantic sub-scores,
+and how pairs differ from clusters, run `codetwin --guide`.
 
 ### Short-snippet confidence
 

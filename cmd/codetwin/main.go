@@ -47,6 +47,13 @@ import (
 //go:embed skill.md
 var skillBody string
 
+// guideBody is the interpretation guide printed by --guide. Distinct from
+// --skill: this is for humans reading the report (what scores mean, how
+// clusters differ from pairs), not agents running the tool.
+//
+//go:embed guide.md
+var guideBody string
+
 var supportedExts = map[string]bool{
 	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
@@ -90,11 +97,16 @@ func main() {
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
+	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
 	flag.Usage = usage
 	flag.Parse()
 
 	if *skill {
 		fmt.Print(skillBody)
+		return
+	}
+	if *guide {
+		fmt.Print(guideBody)
 		return
 	}
 
@@ -1138,6 +1150,7 @@ FLAGS:
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
   --debug              print phase checkpoints with elapsed time to stderr
   --skill              print the full skill guide and exit
+  --guide              print the report interpretation guide and exit
 
 EXAMPLES:
   codetwin ./src
@@ -1147,10 +1160,14 @@ EXAMPLES:
   codetwin ./utils/a.go ./utils/b.go
 
 SCORING:
-  > 85%%  Exact clone       — extract shared utility, delete one
+  > 95%%  Exact clone       — extract shared utility, delete one
+  > 85%%  Near clone        — virtually identical; treat as a clone unless intentional
   > 65%%  Strong clone      — parameterize differing parts
   > 45%%  Refactor target   — evaluate shared abstraction
   < 45%%  Weak similarity   — probably coincidental
+
+  Run 'codetwin --guide' for a full explanation of the score, the
+  structural/semantic split, and how clusters differ from pairs.
 
 `)
 }

@@ -181,7 +181,7 @@ func TestRender_SummaryReflectsThreshold(t *testing.T) {
 	// threshold filters it out — otherwise "Refactor targets" claims
 	// findings the user can't see.
 	pairs := []Pair{
-		{NameA: "high_a", NameB: "high_b", Score: 0.90, Structural: 0.9, Semantic: 0.9},
+		{NameA: "high_a", NameB: "high_b", Score: 0.97, Structural: 0.97, Semantic: 0.97},
 		{NameA: "mid_a", NameB: "mid_b", Score: 0.50, Structural: 0.5, Semantic: 0.5},
 	}
 	var buf strings.Builder
@@ -407,7 +407,8 @@ func TestRender_LabelsByScore(t *testing.T) {
 		score float64
 		want  string
 	}{
-		{0.95, "EXACT CLONE"},
+		{0.97, "EXACT CLONE"},
+		{0.90, "NEAR CLONE"},
 		{0.75, "STRONG CLONE"},
 		{0.55, "REFACTOR TARGET"},
 	}

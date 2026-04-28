@@ -388,14 +388,13 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	// pairs is already filtered+limited by Render, so each bucket count is a
 	// straightforward classification of what the reader sees.
-	exact := 0
-	strong := 0
-	candidates := 0
-	weak := 0
+	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
 	for _, p := range pairs {
 		switch {
-		case p.Score > 0.85:
+		case p.Score > 0.95:
 			exact++
+		case p.Score > 0.85:
+			near++
 		case p.Score > 0.65:
 			strong++
 		case p.Score > 0.45:
@@ -413,6 +412,8 @@ func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 		color(grey, opts), color(reset, opts), color(cyan, opts), len(pairs), color(reset, opts))
 	fmt.Fprintf(w, "  %sExact clones%s      %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(red, opts), exact, color(reset, opts))
+	fmt.Fprintf(w, "  %sNear clones%s       %s%d%s\n",
+		color(grey, opts), color(reset, opts), color(red, opts), near, color(reset, opts))
 	fmt.Fprintf(w, "  %sStrong clones%s     %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(orange, opts), strong, color(reset, opts))
 	fmt.Fprintf(w, "  %sRefactor targets%s  %s%d%s\n",
@@ -427,8 +428,10 @@ func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 
 func classify(score float64) (string, string) {
 	switch {
-	case score > 0.85:
+	case score > 0.95:
 		return "[EXACT CLONE     ]", red
+	case score > 0.85:
+		return "[NEAR CLONE      ]", red
 	case score > 0.65:
 		return "[STRONG CLONE    ]", orange
 	case score > 0.45:

@@ -24,6 +24,7 @@ small. Fetch it on demand instead of loading it up-front:
 ```bash
 codetwin --help     # one-line description of every flag
 codetwin --skill    # full skill guide: flags, recipes, scoring, troubleshooting
+codetwin --guide    # interpretation guide: what scores mean, pairs vs clusters
 ```
 
 Run those before you do anything non-trivial — they cover sorting, the

@@ -71,17 +71,22 @@ codetwin --verbose ./src
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
+| `--guide` | false | Print the report interpretation guide and exit |
 
 ## Scoring
 
 | Score | Label | Recommended action |
 |---|---|---|
-| > 85% | Exact clone | Extract shared utility, delete one |
+| > 95% | Exact clone | Extract shared utility, delete one |
+| > 85% | Near clone | Virtually identical; treat as a clone unless intentional |
 | > 65% | Strong clone | Parameterize differing parts |
 | > 45% | Refactor target | Evaluate shared abstraction |
 | < 45% | Weak similarity | Probably coincidental |
 
 Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF)`.
+For a longer walk-through of what the score means, what the
+`structural`/`semantic` sub-scores below each pair tell you, and how
+pairs differ from clusters, run `codetwin --guide`.
 
 ### Short-snippet confidence
 
