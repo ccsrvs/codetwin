@@ -126,6 +126,158 @@ func TestSplit_PythonMultiLineSignatureIncludesBody(t *testing.T) {
 	}
 }
 
+func TestSplit_PythonSingleLineDecoratorIncluded(t *testing.T) {
+	code := `@cached
+def fetch():
+    return 42
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	c := chunks[0]
+	if c.Symbol != "fetch" {
+		t.Errorf("expected symbol 'fetch', got %q", c.Symbol)
+	}
+	if c.StartLine != 1 {
+		t.Errorf("StartLine should point at the decorator (line 1), got %d", c.StartLine)
+	}
+	if !strings.Contains(c.Code, "@cached") {
+		t.Errorf("decorator missing from chunk Code:\n%s", c.Code)
+	}
+	if !strings.Contains(c.Code, "return 42") {
+		t.Errorf("body missing from chunk Code:\n%s", c.Code)
+	}
+}
+
+func TestSplit_PythonStackedDecoratorsIncluded(t *testing.T) {
+	code := `@cached
+@retry(3)
+@logged
+def handle(x):
+    return x
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	c := chunks[0]
+	if c.StartLine != 1 {
+		t.Errorf("StartLine should be 1 (the first decorator), got %d", c.StartLine)
+	}
+	for _, want := range []string{"@cached", "@retry(3)", "@logged", "def handle"} {
+		if !strings.Contains(c.Code, want) {
+			t.Errorf("expected %q in chunk Code:\n%s", want, c.Code)
+		}
+	}
+}
+
+func TestSplit_PythonMultiLineDecoratorIncluded(t *testing.T) {
+	code := `@retry(
+    attempts=3,
+    backoff=1.5,
+)
+async def fetch(url: str):
+    return await get(url)
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	c := chunks[0]
+	if c.StartLine != 1 {
+		t.Errorf("StartLine should point at @retry (line 1), got %d", c.StartLine)
+	}
+	for _, want := range []string{"@retry(", "attempts=3,", "backoff=1.5,", "async def fetch"} {
+		if !strings.Contains(c.Code, want) {
+			t.Errorf("expected %q in chunk Code:\n%s", want, c.Code)
+		}
+	}
+}
+
+func TestSplit_PythonDecoratorOnMethod(t *testing.T) {
+	code := `class Foo:
+    @property
+    def value(self):
+        return self._value
+
+    @staticmethod
+    def helper(x):
+        return x + 1
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "value" {
+		t.Errorf("first chunk should be 'value', got %q", chunks[0].Symbol)
+	}
+	if !strings.Contains(chunks[0].Code, "@property") {
+		t.Errorf("@property missing from value chunk:\n%s", chunks[0].Code)
+	}
+	if chunks[1].Symbol != "helper" {
+		t.Errorf("second chunk should be 'helper', got %q", chunks[1].Symbol)
+	}
+	if !strings.Contains(chunks[1].Code, "@staticmethod") {
+		t.Errorf("@staticmethod missing from helper chunk:\n%s", chunks[1].Code)
+	}
+	// The @property line shouldn't bleed into helper's chunk.
+	if strings.Contains(chunks[1].Code, "@property") {
+		t.Errorf("helper chunk should not contain @property:\n%s", chunks[1].Code)
+	}
+}
+
+func TestSplit_PythonDecoratorsDoNotLeakAcrossUnrelatedCode(t *testing.T) {
+	// A decorator followed by non-def, non-comment code is invalid Python,
+	// but we should be defensive: don't attach the orphaned decorator to
+	// the next def we encounter.
+	code := `@cached
+some_var = 1
+
+def foo():
+    return 1
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	c := chunks[0]
+	if c.Symbol != "foo" {
+		t.Errorf("expected symbol 'foo', got %q", c.Symbol)
+	}
+	if strings.Contains(c.Code, "@cached") {
+		t.Errorf("orphaned @cached should not attach to foo:\n%s", c.Code)
+	}
+	if c.StartLine == 1 {
+		t.Errorf("StartLine should not be the decorator line; got %d", c.StartLine)
+	}
+}
+
+func TestSplit_PythonDecoratorAffectsSimilarityTokens(t *testing.T) {
+	// Two functions with identical bodies but different decorators must
+	// produce different token streams now that decorators are in Code.
+	withProperty := `class A:
+    @property
+    def x(self):
+        return self._x
+`
+	withoutProperty := `class B:
+    def x(self):
+        return self._x
+`
+	a := Split("a.py", withProperty, tokenizer.Python)[0]
+	b := Split("b.py", withoutProperty, tokenizer.Python)[0]
+	if a.Code == b.Code {
+		t.Errorf("decorator should be reflected in chunk Code; got identical:\n%s", a.Code)
+	}
+	if !strings.Contains(a.Code, "@property") {
+		t.Errorf("decorator missing from a.Code:\n%s", a.Code)
+	}
+	if strings.Contains(b.Code, "@property") {
+		t.Errorf("b should not contain @property:\n%s", b.Code)
+	}
+}
+
 func TestSplit_PythonStringsDontFoolSignatureScanner(t *testing.T) {
 	// Parens / colons inside string literals or comments must not confuse
 	// the multi-line-signature detector into ending the signature early
