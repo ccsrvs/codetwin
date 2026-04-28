@@ -36,9 +36,8 @@ import (
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
 	"github.com/ccsrvs/codetwin/internal/report"
+	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
-	"github.com/ccsrvs/codetwin/internal/splitter"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // skillBody is the full skill guide printed by --skill. It mirrors the
@@ -65,22 +64,6 @@ var supportedExts = map[string]bool{
 // DBSCAN clustering is unaffected; this only bounds the memory footprint
 // of `pairs` on big repos. 0.05 is well below any user-visible threshold.
 const pairNoiseFloor = 0.05
-
-// snippet is one analyzable unit (typically a function- or class-level
-// chunk produced by splitter.Split). Moved to package scope so concurrent
-// helpers can take []snippet without relying on closures over a local type.
-type snippet struct {
-	name       string
-	path       string // absolute file path, used for same-file containment checks
-	lang       tokenizer.Language
-	code       string
-	startLine  int
-	endLine    int
-	nonBlankLn int
-	tokens     []string
-	lines      []int // parallel to tokens; 1-based source line of each token
-	fps        fingerprint.PositionalSet
-}
 
 func main() {
 	threshold := flag.Float64("threshold", 0.30, "minimum similarity score to report (0.0–1.0)")
@@ -194,16 +177,30 @@ func main() {
 	patternsHash := cache.PatternsHash(stripPatternStrings(cfg))
 	debugf("cache loaded: %d entries", len(cacheState.Entries))
 
-	snippets, fileWarnings := processFilesParallel(
-		files, *minLines, stripPatterns, cacheState, patternsHash, showProgress,
+	var done atomic.Int64
+	totalFiles := int64(len(files))
+	var progStop chan struct{}
+	var progWg sync.WaitGroup
+	if showProgress && totalFiles > 0 {
+		progStop = make(chan struct{})
+		progWg.Add(1)
+		go reportProgress(&done, totalFiles, progStop, &progWg, "processing files")
+	}
+	snippets, fileWarnings := scan.ProcessFiles(
+		files, *minLines, stripPatterns, cacheState, patternsHash,
+		func() { done.Add(1) },
 	)
-	debugf("processFilesParallel: %d snippets from %d files (%d warnings)",
+	if progStop != nil {
+		close(progStop)
+		progWg.Wait()
+	}
+	debugf("scan.ProcessFiles: %d snippets from %d files (%d warnings)",
 		len(snippets), len(files), len(fileWarnings))
 	// Workers complete in nondeterministic order; sort by name so snippet
 	// indices (and therefore pair construction order, cluster IDs, and any
 	// equal-score tie ordering) are stable across runs.
 	sort.Slice(snippets, func(i, j int) bool {
-		return snippets[i].name < snippets[j].name
+		return snippets[i].Name < snippets[j].Name
 	})
 	for _, w := range fileWarnings {
 		fmt.Fprintln(os.Stderr, "warning:", w)
@@ -238,7 +235,7 @@ func main() {
 
 	tokenStreams := make([][]string, len(snippets))
 	for i, s := range snippets {
-		tokenStreams[i] = s.tokens
+		tokenStreams[i] = s.Tokens
 	}
 	corpus := similarity.NewCorpus(tokenStreams)
 	debugf("corpus built")
@@ -247,7 +244,7 @@ func main() {
 	// cosine is just one dot-product map-walk plus a divide.
 	vectors := make([]similarity.NormalizedVector, len(snippets))
 	for i, s := range snippets {
-		vectors[i] = similarity.Normalize(corpus.Vectorize(s.tokens))
+		vectors[i] = similarity.Normalize(corpus.Vectorize(s.Tokens))
 	}
 	debugf("vectorized %d snippets", len(vectors))
 
@@ -283,7 +280,7 @@ func main() {
 	for id, members := range groups {
 		names := make([]string, len(members))
 		for k, idx := range members {
-			names[k] = snippets[idx].name
+			names[k] = snippets[idx].Name
 		}
 		// Average internal pair score: mean of matrix[a][b] for every distinct
 		// member pair. Single-member clusters (which DBSCAN won't produce, but
@@ -354,12 +351,12 @@ func main() {
 func buildPreviews(
 	visiblePairs []report.Pair,
 	visibleClusters []report.Cluster,
-	snippets []snippet,
+	snippets []scan.Snippet,
 	previewLines int,
 ) map[string]report.Preview {
 	nameIdx := make(map[string]int, len(snippets))
 	for i, s := range snippets {
-		nameIdx[s.name] = i
+		nameIdx[s.Name] = i
 	}
 
 	visible := make(map[int]struct{})
@@ -386,7 +383,7 @@ func buildPreviews(
 			if i == j {
 				continue
 			}
-			f, l := fingerprint.MatchRange(snippets[i].fps, snippets[j].fps)
+			f, l := fingerprint.MatchRange(snippets[i].Fps, snippets[j].Fps)
 			if f < 0 {
 				continue
 			}
@@ -409,11 +406,11 @@ func buildPreviews(
 	for i := range visible {
 		s := snippets[i]
 		if r, ok := ranges[i]; ok {
-			previews[s.name] = report.BuildMatchPreview(s.code, s.lines, s.startLine, r.first, r.last, s.fps.K, previewLines)
+			previews[s.Name] = report.BuildMatchPreview(s.Code, s.Lines, s.StartLine, r.first, r.last, s.Fps.K, previewLines)
 		} else {
-			previews[s.name] = report.Preview{
-				StartLine: s.startLine,
-				Text:      report.ExtractPreview(s.code, previewLines),
+			previews[s.Name] = report.Preview{
+				StartLine: s.StartLine,
+				Text:      report.ExtractPreview(s.Code, previewLines),
 			}
 		}
 	}
@@ -520,17 +517,6 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error
 	return files, nil
 }
 
-// positionalFromCache reconstructs a fingerprint.PositionalSet from a
-// cached chunk. The Set is rebuilt from the flat hash list; Positions and
-// K survive serialization unchanged.
-func positionalFromCache(c cache.Chunk) fingerprint.PositionalSet {
-	set := make(fingerprint.Set, len(c.Hashes))
-	for _, h := range c.Hashes {
-		set[h] = struct{}{}
-	}
-	return fingerprint.PositionalSet{Set: set, Positions: c.Positions, K: c.K}
-}
-
 // stripPatternStrings extracts the raw ignore_patterns strings (not the
 // compiled regexes) from cfg, for cache key derivation. Hashing the raw
 // strings means a config edit that changes a pattern invalidates only the
@@ -547,10 +533,10 @@ func stripPatternStrings(cfg *config.Config) []string {
 // Jaccard computation for snippet pairs that share zero fingerprints
 // (those structural scores would be 0 anyway, and on a typical big repo
 // most pairs fall into that bucket).
-func buildHashIndex(snippets []snippet) map[uint32][]int {
+func buildHashIndex(snippets []scan.Snippet) map[uint32][]int {
 	idx := make(map[uint32][]int)
 	for i, s := range snippets {
-		for h := range s.fps.Set {
+		for h := range s.Fps.Set {
 			idx[h] = append(idx[h], i)
 		}
 	}
@@ -562,12 +548,12 @@ func buildHashIndex(snippets []snippet) map[uint32][]int {
 // Function-level chunks of an outer function and a closure defined inside
 // it are necessarily token-overlapping; reporting them as a "100% match"
 // is noise — they're not duplicates, the outer just contains the inner.
-func chunksNestedSameFile(a, b snippet) bool {
-	if a.path == "" || b.path == "" || a.path != b.path {
+func chunksNestedSameFile(a, b scan.Snippet) bool {
+	if a.Path == "" || b.Path == "" || a.Path != b.Path {
 		return false
 	}
-	aContainsB := a.startLine <= b.startLine && a.endLine >= b.endLine
-	bContainsA := b.startLine <= a.startLine && b.endLine >= a.endLine
+	aContainsB := a.StartLine <= b.StartLine && a.EndLine >= b.EndLine
+	bContainsA := b.StartLine <= a.StartLine && b.EndLine >= a.EndLine
 	return aContainsB || bContainsA
 }
 
@@ -583,7 +569,7 @@ func chunksNestedSameFile(a, b snippet) bool {
 // receives the true value so DBSCAN sees the full topology.
 func computeSimilarityMatrix(
 	matrix [][]float64,
-	snippets []snippet,
+	snippets []scan.Snippet,
 	vectors []similarity.NormalizedVector,
 	hashIndex map[uint32][]int,
 	showProgress bool,
@@ -623,7 +609,7 @@ func computeSimilarityMatrix(
 				// a Jaccard call. We still compute cosine for every pair so
 				// cross-language semantic-only matches still surface.
 				cands := make(map[int]struct{})
-				for h := range snippets[i].fps.Set {
+				for h := range snippets[i].Fps.Set {
 					for _, k := range hashIndex[h] {
 						if k > i {
 							cands[k] = struct{}{}
@@ -644,7 +630,7 @@ func computeSimilarityMatrix(
 
 					var structural float64
 					if _, ok := cands[j]; ok {
-						structural = fingerprint.Jaccard(snippets[i].fps.Set, snippets[j].fps.Set)
+						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
 					}
 					semantic := similarity.CosineFromNormalized(vectors[i], vectors[j])
 					combined := similarity.Combined(structural, semantic, 0.5)
@@ -655,7 +641,7 @@ func computeSimilarityMatrix(
 					// adjusted, since that's what feeds clustering and
 					// thresholding.
 					combined = similarity.LengthDampen(
-						combined, snippets[i].nonBlankLn, snippets[j].nonBlankLn, minConfLines)
+						combined, snippets[i].NonBlankLn, snippets[j].NonBlankLn, minConfLines)
 					matrix[i][j] = combined
 					matrix[j][i] = combined
 
@@ -664,13 +650,13 @@ func computeSimilarityMatrix(
 						continue
 					}
 					local = append(local, report.Pair{
-						NameA:      snippets[i].name,
-						NameB:      snippets[j].name,
+						NameA:      snippets[i].Name,
+						NameB:      snippets[j].Name,
 						Structural: structural,
 						Semantic:   semantic,
 						Score:      combined,
-						LinesA:     snippets[i].nonBlankLn,
-						LinesB:     snippets[j].nonBlankLn,
+						LinesA:     snippets[i].NonBlankLn,
+						LinesB:     snippets[j].NonBlankLn,
 					})
 				}
 				// Flush progress in batches per row to avoid hammering the
@@ -720,184 +706,6 @@ func reportProgress(done *atomic.Int64, total int64, stop <-chan struct{}, wg *s
 			fmt.Fprintf(os.Stderr, "\r%s: %d/%d (%.1f%%)", label, d, total, pct)
 		}
 	}
-}
-
-// processFilesParallel runs the per-file split → tokenize → fingerprint
-// pipeline across runtime.NumCPU() goroutines. Each worker pulls from a
-// channel of file paths and accumulates snippets into a per-worker buffer
-// to avoid lock contention on a shared slice. Cache.Get/Put are already
-// internally synchronized so the cache is shared safely.
-//
-// Errors per file (e.g. a file we can't read) are collected as warnings
-// and returned alongside the snippet list, rather than printed inline,
-// so they don't tear the progress indicator. main() prints them after.
-func processFilesParallel(
-	files []string,
-	minLines int,
-	stripPatterns []*regexp.Regexp,
-	cacheState *cache.Cache,
-	patternsHash string,
-	showProgress bool,
-) ([]snippet, []string) {
-	n := len(files)
-	if n == 0 {
-		return nil, nil
-	}
-	workers := runtime.NumCPU()
-	if workers > n {
-		workers = n
-	}
-	if workers < 1 {
-		workers = 1
-	}
-
-	var done atomic.Int64
-	var progStop chan struct{}
-	var progWg sync.WaitGroup
-	if showProgress {
-		progStop = make(chan struct{})
-		progWg.Add(1)
-		go reportProgress(&done, int64(n), progStop, &progWg, "processing files")
-	}
-
-	workCh := make(chan string, n)
-	for _, p := range files {
-		workCh <- p
-	}
-	close(workCh)
-
-	type result struct {
-		snippets []snippet
-		warnings []string
-	}
-	resultsCh := make(chan result, workers)
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			var local result
-			for path := range workCh {
-				snips, warn := processOneFile(path, minLines, stripPatterns, cacheState, patternsHash)
-				local.snippets = append(local.snippets, snips...)
-				if warn != "" {
-					local.warnings = append(local.warnings, warn)
-				}
-				done.Add(1)
-			}
-			resultsCh <- local
-		}()
-	}
-	wg.Wait()
-	close(resultsCh)
-
-	if progStop != nil {
-		close(progStop)
-		progWg.Wait()
-	}
-
-	var allSnippets []snippet
-	var allWarnings []string
-	for r := range resultsCh {
-		allSnippets = append(allSnippets, r.snippets...)
-		allWarnings = append(allWarnings, r.warnings...)
-	}
-	return allSnippets, allWarnings
-}
-
-// processOneFile is the per-file pipeline (cache lookup, splitter, tokenizer,
-// fingerprint), pulled out of main() so it's safe to call concurrently.
-// Returns the snippets that survive --min-lines plus an optional warning
-// string for read errors. Cache state is shared and thread-safe via its
-// internal mutex.
-func processOneFile(
-	path string,
-	minLines int,
-	stripPatterns []*regexp.Regexp,
-	cacheState *cache.Cache,
-	patternsHash string,
-) ([]snippet, string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Sprintf("could not read %s: %v", path, err)
-	}
-
-	absPath, _ := filepath.Abs(path)
-	contentHash := cache.HashContent(data)
-	key := cache.Key(absPath, contentHash, patternsHash)
-
-	if entry, ok := cacheState.Get(key); ok {
-		var out []snippet
-		for _, c := range entry.Chunks {
-			if c.NonBlankLn < minLines {
-				continue
-			}
-			out = append(out, snippet{
-				name:       c.Name,
-				path:       absPath,
-				lang:       tokenizer.Language(c.Lang),
-				code:       c.Code,
-				startLine:  c.StartLine,
-				endLine:    c.EndLine,
-				nonBlankLn: c.NonBlankLn,
-				tokens:     c.Tokens,
-				lines:      c.Lines,
-				fps:        positionalFromCache(c),
-			})
-		}
-		return out, ""
-	}
-
-	code := string(data)
-	lang := tokenizer.Detect(path, code)
-	var out []snippet
-	var entryChunks []cache.Chunk
-	for _, ch := range splitter.Split(path, code, lang) {
-		tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang,
-			tokenizer.WithStripPatterns(stripPatterns))
-		if len(tokens) == 0 {
-			continue
-		}
-		nonBlank := splitter.CountNonBlankLines(ch.Code)
-		ps := fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW)
-		name := ch.Name()
-
-		entryChunks = append(entryChunks, cache.Chunk{
-			Name:       name,
-			Lang:       string(lang),
-			StartLine:  ch.StartLine,
-			EndLine:    ch.EndLine,
-			Code:       ch.Code,
-			Tokens:     tokens,
-			Lines:      lines,
-			NonBlankLn: nonBlank,
-			Hashes:     fingerprint.Hashes(ps.Set),
-			Positions:  ps.Positions,
-			K:          ps.K,
-		})
-
-		if nonBlank < minLines {
-			continue
-		}
-		out = append(out, snippet{
-			name:       name,
-			path:       absPath,
-			lang:       lang,
-			code:       ch.Code,
-			startLine:  ch.StartLine,
-			endLine:    ch.EndLine,
-			nonBlankLn: nonBlank,
-			tokens:     tokens,
-			lines:      lines,
-			fps:        ps,
-		})
-	}
-
-	cacheState.Put(key, cache.Entry{
-		ContentHash: contentHash,
-		Chunks:      entryChunks,
-	})
-	return out, ""
 }
 
 // stderrIsTTY reports whether stderr is connected to a terminal. Used to
