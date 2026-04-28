@@ -95,11 +95,14 @@ snippets that do the same both score 100%, but the first is much weaker
 evidence — short snippets are forced into a shared shape by their API
 surface (e.g. test scaffolding that has to call one function and assert
 on the result). `--min-confidence-lines N` opts into a length-aware
-dampener: a pair's score is multiplied by `0.5 + 0.5 · min(LinesA, LinesB) / N`
+dampener: the combined score is multiplied by `0.5 + 0.5 · min(LinesA, LinesB) / N`
 (capped at 1.0), so matches under N non-blank lines lose proportional
-score. A common starting point is `--min-confidence-lines 20` — enough to
-push test boilerplate out of the "exact clone" bucket while leaving real
-multi-line refactor targets unaffected.
+score. The dampener is applied once at the scoring layer, so it also
+affects DBSCAN cluster boundaries — short-snippet matches that drop
+below the eps threshold don't cluster. A common starting point is
+`--min-confidence-lines 20` — enough to push test boilerplate out of
+the "exact clone" bucket while leaving real multi-line refactor
+targets unaffected.
 
 ## Sorting
 

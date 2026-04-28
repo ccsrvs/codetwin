@@ -58,15 +58,6 @@ type Options struct {
 	Sort      SortMode // ordering for pairs and clusters; "" = SortScore
 	Limit     int      // cap pairs and clusters at N items each (0 = no limit)
 
-	// MinConfidenceLines, when > 0, dampens pair scores for short matches.
-	// A perfect token-level overlap of two 5-line snippets carries less
-	// evidence than the same overlap on two 25-line snippets, because tiny
-	// snippets are forced into a shared shape by their API surface. Scores
-	// for pairs where min(LinesA, LinesB) < N are scaled by a multiplier
-	// that ramps linearly from 0.5 at 0 lines to 1.0 at N lines. Pairs at
-	// or above N lines are unaffected. 0 (the default) disables dampening.
-	MinConfidenceLines int
-
 	// Previews, when non-nil, maps a snippet name to a code excerpt with its
 	// originating start line. Entries with empty Text are skipped.
 	Previews map[string]Preview
@@ -100,53 +91,18 @@ const (
 // always reflect the same set of findings.
 func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster) {
 	visiblePairs := pairs
-	if opts.MinConfidenceLines > 0 {
-		// Copy first so we don't mutate the caller's slice when only damping.
-		visiblePairs = make([]Pair, len(pairs))
-		copy(visiblePairs, pairs)
-		for i := range visiblePairs {
-			visiblePairs[i].Score = lengthDampen(
-				visiblePairs[i].Score,
-				visiblePairs[i].LinesA, visiblePairs[i].LinesB,
-				opts.MinConfidenceLines)
-		}
-	}
 	if !opts.Verbose {
-		filtered := make([]Pair, 0, len(visiblePairs))
-		for _, p := range visiblePairs {
+		visiblePairs = make([]Pair, 0, len(pairs))
+		for _, p := range pairs {
 			if p.Score >= opts.Threshold {
-				filtered = append(filtered, p)
+				visiblePairs = append(visiblePairs, p)
 			}
 		}
-		visiblePairs = filtered
 	}
 
 	visiblePairs = sortAndLimit(visiblePairs, pairLessFunc(opts.Sort), opts.Limit)
 	visibleClusters := sortAndLimit(clusters, clusterLessFunc(opts.Sort), opts.Limit)
 	return visiblePairs, visibleClusters
-}
-
-// lengthDampen scales a pair score down when the smaller snippet has fewer
-// than `threshold` non-blank lines. The multiplier ramps linearly from 0.5
-// at 0 lines to 1.0 at `threshold` lines, then stays at 1.0. Returns score
-// unchanged when threshold <= 0 or both line counts are unknown (<= 0).
-func lengthDampen(score float64, linesA, linesB, threshold int) float64 {
-	if threshold <= 0 {
-		return score
-	}
-	minLn := linesA
-	if linesB < minLn {
-		minLn = linesB
-	}
-	if minLn <= 0 {
-		// Line counts unavailable — don't penalise.
-		return score
-	}
-	if minLn >= threshold {
-		return score
-	}
-	mult := 0.5 + 0.5*float64(minLn)/float64(threshold)
-	return score * mult
 }
 
 // sortAndLimit returns up to `limit` items in the order defined by `less`

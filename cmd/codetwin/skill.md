@@ -189,10 +189,12 @@ Two 5-line snippets with identical token shape and two 25-line snippets
 with identical token shape both score 100%, but the first is much weaker
 evidence — short snippets are forced into shared shapes by their API
 surface (test scaffolding, trivial wrappers). `--min-confidence-lines N`
-opts into a length-aware dampener: pair scores are scaled by
-`0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0), so matches under
-N non-blank lines lose proportional score. Off by default. A typical
-starting value is `--min-confidence-lines 20`.
+opts into a length-aware dampener: the combined score is scaled by
+`0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0). The dampener is
+applied once at the scoring layer, so it also affects DBSCAN cluster
+boundaries — setting it dissolves clusters built on tiny-snippet noise,
+not just demoting individual pairs. Off by default. A typical starting
+value is `--min-confidence-lines 20`.
 
 ### Clusters vs pairs
 

@@ -65,7 +65,20 @@ is an isolated duplicate that doesn't generalize beyond two callers.
 ## What moves the labels
 
 - `--threshold N` filters which pairs are *reported*. Doesn't change the math, just hides anything below.
-- `--min-confidence-lines N` dampens the displayed Score for short snippets (multiplier ramps from 0.5× at 0 lines to 1.0× at N lines). Two 5-line snippets that appear identical earn 60-65% instead of 100%, reflecting how little evidence five lines of overlap actually carry. The `structural` and `semantic` numbers stay raw — only the headline label moves.
+- `--min-confidence-lines N` dampens the combined `Score` for short
+  snippets (multiplier ramps linearly from 0.5× at 0 lines to 1.0× at
+  N lines). The dampener is applied **once, at the scoring layer** —
+  before the score reaches the matrix that DBSCAN clusters from and
+  before the threshold filter. Practical consequences:
+  - Two 5-line snippets that look identical earn ~60-65% instead of 100%,
+    reflecting how little evidence five lines of overlap actually carries.
+  - **Cluster membership respects the dampener too.** A short-snippet
+    match that drops below the eps boundary doesn't get clustered. So
+    setting `--min-confidence-lines 20` doesn't just demote tiny pairs
+    in the report — it dissolves clusters built on tiny-snippet noise.
+  - The `structural` and `semantic` sub-scores stay raw. Only the
+    combined `Score` (and the matrix DBSCAN sees) is adjusted.
+  - `min(LinesA, LinesB) ≥ N` snippets are unaffected (multiplier 1.0×).
 - `--verbose` includes weak similarities in addition to the labelled tiers.
 - `--eps` only affects clusters. Stricter eps means tighter clusters with fewer members each.
 

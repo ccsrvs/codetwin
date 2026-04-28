@@ -116,3 +116,45 @@ func TestCombined_WeightedAverage(t *testing.T) {
 		t.Errorf("Combined(0.8, 0.4, 0.0) = %v; want 0.4 (all semantic)", got)
 	}
 }
+func TestLengthDampen_OffWhenThresholdZero(t *testing.T) {
+	if got := LengthDampen(0.95, 5, 5, 0); got != 0.95 {
+		t.Errorf("threshold=0 should pass score through; got %v", got)
+	}
+	if got := LengthDampen(0.95, 5, 5, -1); got != 0.95 {
+		t.Errorf("negative threshold should pass score through; got %v", got)
+	}
+}
+
+func TestLengthDampen_LongSnippetsUnchanged(t *testing.T) {
+	if got := LengthDampen(1.0, 25, 30, 20); got != 1.0 {
+		t.Errorf("min(25,30)=25 >= 20: should be unchanged; got %v", got)
+	}
+	if got := LengthDampen(0.7, 20, 100, 20); got != 0.7 {
+		t.Errorf("min=threshold should be unchanged; got %v", got)
+	}
+}
+
+func TestLengthDampen_ShortSnippetsScaled(t *testing.T) {
+	// min=5, threshold=20: multiplier = 0.5 + 0.5*(5/20) = 0.625
+	if got := LengthDampen(1.0, 5, 5, 20); math.Abs(got-0.625) > 1e-9 {
+		t.Errorf("got %v; want 0.625", got)
+	}
+	// min=10, threshold=20: multiplier = 0.5 + 0.5*(10/20) = 0.75
+	if got := LengthDampen(1.0, 10, 30, 20); math.Abs(got-0.75) > 1e-9 {
+		t.Errorf("got %v; want 0.75 (uses min line count)", got)
+	}
+	// min=2, threshold=10: multiplier = 0.5 + 0.5*(2/10) = 0.6
+	if got := LengthDampen(0.5, 2, 100, 10); math.Abs(got-0.30) > 1e-9 {
+		t.Errorf("got %v; want 0.30 (multiplier 0.6 on score 0.5)", got)
+	}
+}
+
+func TestLengthDampen_GuardsAgainstBadInput(t *testing.T) {
+	// Missing line counts (0 or negative) should leave the score alone.
+	if got := LengthDampen(0.9, 0, 5, 20); got != 0.9 {
+		t.Errorf("linesA=0: should pass through; got %v", got)
+	}
+	if got := LengthDampen(0.9, -3, 5, 20); got != 0.9 {
+		t.Errorf("linesA<0: should pass through; got %v", got)
+	}
+}

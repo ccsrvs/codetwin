@@ -146,3 +146,32 @@ func Combined(structural, semantic, structuralWeight float64) float64 {
 	semanticWeight := 1.0 - structuralWeight
 	return structural*structuralWeight + semantic*semanticWeight
 }
+
+// LengthDampen scales a similarity score down when the smaller snippet
+// has fewer than `threshold` non-blank lines. The multiplier ramps
+// linearly from 0.5 at 0 lines to 1.0 at `threshold` lines, then stays
+// at 1.0. A `threshold` of 0 (or non-positive line counts) returns the
+// score unchanged.
+//
+// Rationale: short snippets share their entire shape by necessity (API
+// surface, language grammar). A 100% match on two 5-line functions
+// carries less evidence than the same match on two 25-line functions;
+// the dampener encodes that confidence into the score so downstream
+// consumers (the report, DBSCAN clustering) see a consistent view.
+func LengthDampen(score float64, linesA, linesB, threshold int) float64 {
+	if threshold <= 0 {
+		return score
+	}
+	minLn := linesA
+	if linesB < minLn {
+		minLn = linesB
+	}
+	if minLn <= 0 {
+		return score
+	}
+	if minLn >= threshold {
+		return score
+	}
+	mult := 0.5 + 0.5*float64(minLn)/float64(threshold)
+	return score * mult
+}

@@ -269,7 +269,7 @@ func main() {
 
 	debugf("comparing %d × %d = %d pairs", n, n, int64(n)*int64(n-1)/2)
 	pairs := computeSimilarityMatrix(
-		matrix, snippets, vectors, hashIndex, showProgress,
+		matrix, snippets, vectors, hashIndex, showProgress, *minConfLines,
 	)
 	debugf("computeSimilarityMatrix: %d pairs above noise floor", len(pairs))
 
@@ -304,12 +304,11 @@ func main() {
 	debugf("clusters built: %d", len(clusters))
 
 	opts := report.Options{
-		Plain:              *plain,
-		Threshold:          *threshold,
-		Verbose:            *verbose,
-		Sort:               report.SortMode(*sortMode),
-		Limit:              *limit,
-		MinConfidenceLines: *minConfLines,
+		Plain:     *plain,
+		Threshold: *threshold,
+		Verbose:   *verbose,
+		Sort:      report.SortMode(*sortMode),
+		Limit:     *limit,
 	}
 
 	// Sort + threshold filter + limit ONCE here in main.go, then build
@@ -690,6 +689,7 @@ func computeSimilarityMatrix(
 	vectors []similarity.NormalizedVector,
 	hashIndex map[uint32][]int,
 	showProgress bool,
+	minConfLines int,
 ) []report.Pair {
 	n := len(snippets)
 	workers := runtime.NumCPU()
@@ -750,6 +750,14 @@ func computeSimilarityMatrix(
 					}
 					semantic := similarity.CosineFromNormalized(vectors[i], vectors[j])
 					combined := similarity.Combined(structural, semantic, 0.5)
+					// Length-aware confidence: dampen short-snippet matches
+					// before they reach the matrix so DBSCAN sees the same
+					// view of the world the report does. structural and
+					// semantic stay raw — only the combined `Score` is
+					// adjusted, since that's what feeds clustering and
+					// thresholding.
+					combined = similarity.LengthDampen(
+						combined, snippets[i].nonBlankLn, snippets[j].nonBlankLn, minConfLines)
 					matrix[i][j] = combined
 					matrix[j][i] = combined
 
