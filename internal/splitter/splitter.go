@@ -10,6 +10,7 @@
 package splitter
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -26,6 +27,32 @@ type Chunk struct {
 	Code      string
 }
 
+// Name produces a unique, human-readable identifier for a chunk. The format
+// is "path:start-end Symbol" when the symbol is known, "path:start-end" when
+// it isn't, and just "path" for whole-file fallback chunks (those have no
+// symbol and start at line 1).
+func (c Chunk) Name() string {
+	if c.Symbol == "" && c.StartLine == 1 {
+		return c.Path
+	}
+	if c.Symbol != "" {
+		return fmt.Sprintf("%s:%d-%d %s", c.Path, c.StartLine, c.EndLine, c.Symbol)
+	}
+	return fmt.Sprintf("%s:%d-%d", c.Path, c.StartLine, c.EndLine)
+}
+
+// CountNonBlankLines reports how many newline-separated lines in code have
+// non-whitespace content. Used to gate display of tiny matches.
+func CountNonBlankLines(code string) int {
+	n := 0
+	for _, line := range strings.Split(code, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
 // Split breaks code into per-definition chunks. The returned slice always
 // contains at least one chunk: when no definitions are found the whole file
 // is returned as a single anonymous chunk.
@@ -35,7 +62,7 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 	case tokenizer.Python:
 		chunks = splitPython(code)
 	case tokenizer.Go:
-		chunks = splitBraceLang(code, goFuncRe)
+		chunks = splitGo(code)
 	case tokenizer.JavaScript:
 		chunks = splitJavaScript(code)
 	case tokenizer.Rust:
@@ -300,7 +327,57 @@ func indentLen(s string) int {
 var (
 	goFuncRe = regexp.MustCompile(`^func\s+(?:\([^)]*\)\s+)?(\w+)`)
 	rustFnRe = regexp.MustCompile(`^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)`)
+
+	// Anonymous-func forms in Go. Together with goFuncRe these let splitGo
+	// emit closures, goroutines, and defers as their own chunks; the
+	// downstream nested-pair filter (chunksNestedSameFile) suppresses
+	// outer/inner overlap so emitting nested chunks is safe.
+	goAssignFuncRe = regexp.MustCompile(`^[ \t]*(\w+)\s*(?::=|=)\s*func\s*\(`)
+	goVarFuncRe    = regexp.MustCompile(`^[ \t]*var\s+(\w+)\b[^=]*=\s*func\s*\(`)
+	goGoroutineRe  = regexp.MustCompile(`^[ \t]*go\s+func\s*\(`)
+	goDeferFuncRe  = regexp.MustCompile(`^[ \t]*defer\s+func\s*\(`)
+	goBareFuncRe   = regexp.MustCompile(`^[ \t]*func\s*\(`)
 )
+
+// splitGo extracts top-level named funcs/methods plus anonymous closures
+// (assignment, var, goroutine, defer, bare/IIFE). The loop advances by one
+// line per iteration — not past the matched body — so anonymous funcs
+// nested inside an outer function body are also visited and emitted.
+func splitGo(code string) []Chunk {
+	lines := strings.Split(code, "\n")
+	var chunks []Chunk
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		var symbol string
+		switch {
+		case goFuncRe.MatchString(line):
+			symbol = goFuncRe.FindStringSubmatch(line)[1]
+		case goGoroutineRe.MatchString(line):
+			symbol = fmt.Sprintf("goroutine@L%d", i+1)
+		case goDeferFuncRe.MatchString(line):
+			symbol = fmt.Sprintf("defer@L%d", i+1)
+		case goVarFuncRe.MatchString(line):
+			symbol = goVarFuncRe.FindStringSubmatch(line)[1]
+		case goAssignFuncRe.MatchString(line):
+			symbol = goAssignFuncRe.FindStringSubmatch(line)[1]
+		case goBareFuncRe.MatchString(line):
+			symbol = fmt.Sprintf("anonymous@L%d", i+1)
+		default:
+			continue
+		}
+		end, ok := findBraceEnd(lines, i)
+		if !ok {
+			continue
+		}
+		chunks = append(chunks, Chunk{
+			StartLine: i + 1,
+			EndLine:   end + 1,
+			Symbol:    symbol,
+			Code:      strings.Join(lines[i:end+1], "\n"),
+		})
+	}
+	return chunks
+}
 
 // splitBraceLang chunks code using a "find a definition header, then
 // brace-balance to its closer" strategy. Works for Go and Rust.

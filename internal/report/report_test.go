@@ -392,3 +392,99 @@ func TestRender_LabelsByScore(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractPreview_UnlimitedReturnsWhole(t *testing.T) {
+	code := "a\nb\nc"
+	if got := ExtractPreview(code, 0); got != code {
+		t.Errorf("n=0: got %q, want %q", got, code)
+	}
+	if got := ExtractPreview(code, -1); got != code {
+		t.Errorf("n<0: got %q, want %q", got, code)
+	}
+}
+
+func TestExtractPreview_NLargerThanInput(t *testing.T) {
+	code := "a\nb"
+	if got := ExtractPreview(code, 10); got != code {
+		t.Errorf("got %q, want %q", got, code)
+	}
+}
+
+func TestExtractPreview_TakesFirstN(t *testing.T) {
+	code := "line1\nline2\nline3\nline4"
+	got := ExtractPreview(code, 2)
+	want := "line1\nline2"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestBuildMatchPreview_FitsReturnsWhole(t *testing.T) {
+	code := "a\nb\nc"
+	p := BuildMatchPreview(code, []int{1, 2, 3}, 10, 0, 2, 1, 5)
+	if p.StartLine != 10 || p.Text != code {
+		t.Errorf("expected whole chunk preserved, got %+v", p)
+	}
+}
+
+func TestBuildMatchPreview_UnlimitedMaxLinesShowsWhole(t *testing.T) {
+	code := "a\nb\nc\nd\ne"
+	p := BuildMatchPreview(code, []int{1, 2, 3, 4, 5}, 1, 0, 0, 1, 0)
+	if p.Text != code {
+		t.Errorf("maxLines=0 should show whole chunk, got %q", p.Text)
+	}
+}
+
+func TestBuildMatchPreview_FocusesOnMatchRange(t *testing.T) {
+	// 6-line chunk, maxLines=2, match starts at line 4 (token index 3).
+	code := "l1\nl2\nl3\nl4\nl5\nl6"
+	tokenLines := []int{1, 2, 3, 4, 5, 6}
+	p := BuildMatchPreview(code, tokenLines, 100, 3, 4, 1, 2)
+	// chunkStartLine=100, match begins at chunkLine 4 → absolute line 103.
+	if p.StartLine != 103 {
+		t.Errorf("StartLine: got %d, want 103", p.StartLine)
+	}
+	if p.Text != "l4\nl5" {
+		t.Errorf("Text: got %q, want %q", p.Text, "l4\nl5")
+	}
+}
+
+func TestBuildMatchPreview_KExtendsLastToken(t *testing.T) {
+	// 8-line chunk, maxLines=10 (>8) so the whole chunk is returned —
+	// exercises the "fits" path even when k extension would otherwise push
+	// endTok out of range.
+	code := "1\n2\n3\n4\n5\n6\n7\n8"
+	tokenLines := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	p := BuildMatchPreview(code, tokenLines, 1, 0, 6, 5, 10)
+	if p.Text != code {
+		t.Errorf("expected whole chunk, got %q", p.Text)
+	}
+}
+
+func TestBuildMatchPreview_TruncatesToMaxLines(t *testing.T) {
+	// 10-line chunk; match spans 7 lines but maxLines=3, so the selection is
+	// clamped. Exercises the `len(selected) > maxLines` branch.
+	code := "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10"
+	tokenLines := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	p := BuildMatchPreview(code, tokenLines, 1, 0, 4, 3, 3)
+	if p.StartLine != 1 {
+		t.Errorf("StartLine: got %d, want 1", p.StartLine)
+	}
+	got := strings.Split(p.Text, "\n")
+	if len(got) != 3 {
+		t.Errorf("expected 3 lines after truncation, got %d: %v", len(got), got)
+	}
+}
+
+func TestBuildMatchPreview_OutOfRangeFirstTokFallsBack(t *testing.T) {
+	// firstTok beyond tokenLines bounds → fall back to first maxLines lines.
+	code := "a\nb\nc\nd"
+	p := BuildMatchPreview(code, []int{1, 2}, 5, 99, 99, 1, 2)
+	if p.StartLine != 5 {
+		t.Errorf("StartLine: got %d, want 5", p.StartLine)
+	}
+	if p.Text != "a\nb" {
+		t.Errorf("Text: got %q, want %q", p.Text, "a\nb")
+	}
+}
+

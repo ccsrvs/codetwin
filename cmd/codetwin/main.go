@@ -34,6 +34,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/pathutil"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/similarity"
 	"github.com/ccsrvs/codetwin/internal/splitter"
@@ -408,95 +409,15 @@ func buildPreviews(
 	for i := range visible {
 		s := snippets[i]
 		if r, ok := ranges[i]; ok {
-			previews[s.name] = buildMatchPreview(s.code, s.lines, s.startLine, r.first, r.last, s.fps.K, previewLines)
+			previews[s.name] = report.BuildMatchPreview(s.code, s.lines, s.startLine, r.first, r.last, s.fps.K, previewLines)
 		} else {
 			previews[s.name] = report.Preview{
 				StartLine: s.startLine,
-				Text:      extractPreview(s.code, previewLines),
+				Text:      report.ExtractPreview(s.code, previewLines),
 			}
 		}
 	}
 	return previews
-}
-
-// chunkName produces a unique, human-readable identifier for a chunk. The
-// format is "path:start-end Symbol" when the symbol is known, "path:start-end"
-// when it isn't, and just "path" for whole-file fallback chunks (those have
-// no symbol and start at line 1).
-func chunkName(ch splitter.Chunk) string {
-	if ch.Symbol == "" && ch.StartLine == 1 {
-		return ch.Path
-	}
-	if ch.Symbol != "" {
-		return fmt.Sprintf("%s:%d-%d %s", ch.Path, ch.StartLine, ch.EndLine, ch.Symbol)
-	}
-	return fmt.Sprintf("%s:%d-%d", ch.Path, ch.StartLine, ch.EndLine)
-}
-
-// extractPreview returns the first n lines of code as a single newline-joined
-// string. When n <= 0 the entire code is returned (unlimited mode). Line
-// numbers are preserved by the caller via the chunk's StartLine, so this
-// function does not skip leading blanks.
-func extractPreview(code string, n int) string {
-	lines := strings.Split(code, "\n")
-	if n <= 0 || n > len(lines) {
-		return strings.Join(lines, "\n")
-	}
-	return strings.Join(lines[:n], "\n")
-}
-
-// buildMatchPreview returns a Preview focused on the line range covered by
-// [firstTok, lastTok], extending the last token by k-1 to cover the full
-// k-gram. Behavior by maxLines:
-//
-//	maxLines == 0:          show the whole chunk (unlimited)
-//	chunk lines <= maxLines: show the whole chunk (it fits)
-//	otherwise:              focus on the match range, taking up to maxLines
-//	                        lines starting at the first matching line
-func buildMatchPreview(code string, tokenLines []int, chunkStartLine, firstTok, lastTok, k, maxLines int) report.Preview {
-	chunkLines := strings.Split(code, "\n")
-	if maxLines <= 0 || len(chunkLines) <= maxLines {
-		return report.Preview{
-			StartLine: chunkStartLine,
-			Text:      strings.Join(chunkLines, "\n"),
-		}
-	}
-
-	if firstTok < 0 || firstTok >= len(tokenLines) {
-		return report.Preview{
-			StartLine: chunkStartLine,
-			Text:      strings.Join(chunkLines[:maxLines], "\n"),
-		}
-	}
-	endTok := lastTok + k - 1
-	if endTok >= len(tokenLines) {
-		endTok = len(tokenLines) - 1
-	}
-	if endTok < firstTok {
-		endTok = firstTok
-	}
-
-	chunkFirstLine := tokenLines[firstTok]
-	chunkLastLine := tokenLines[endTok]
-	if chunkLastLine < chunkFirstLine {
-		chunkLastLine = chunkFirstLine
-	}
-	if chunkFirstLine > len(chunkLines) {
-		chunkFirstLine = len(chunkLines)
-	}
-	if chunkLastLine > len(chunkLines) {
-		chunkLastLine = len(chunkLines)
-	}
-
-	selected := chunkLines[chunkFirstLine-1 : chunkLastLine]
-	if len(selected) > maxLines {
-		selected = selected[:maxLines]
-	}
-
-	return report.Preview{
-		StartLine: chunkStartLine + chunkFirstLine - 1,
-		Text:      strings.Join(selected, "\n"),
-	}
 }
 
 // ── JSON output ───────────────────────────────────────────────────────────────
@@ -557,7 +478,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 // ── File collection ───────────────────────────────────────────────────────────
 
 func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error) {
-	deduped, err := dedupePaths(paths)
+	deduped, err := pathutil.Dedupe(paths)
 	if err != nil {
 		return nil, err
 	}
@@ -597,16 +518,6 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error
 		}
 	}
 	return files, nil
-}
-
-// setToHashes flattens a fingerprint Set to a slice for cache storage.
-// Order doesn't matter for correctness; the receiver rebuilds the Set.
-func setToHashes(s fingerprint.Set) []uint32 {
-	out := make([]uint32, 0, len(s))
-	for h := range s {
-		out = append(out, h)
-	}
-	return out
 }
 
 // positionalFromCache reconstructs a fingerprint.PositionalSet from a
@@ -947,9 +858,9 @@ func processOneFile(
 		if len(tokens) == 0 {
 			continue
 		}
-		nonBlank := countLines(ch.Code)
+		nonBlank := splitter.CountNonBlankLines(ch.Code)
 		ps := fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW)
-		name := chunkName(ch)
+		name := ch.Name()
 
 		entryChunks = append(entryChunks, cache.Chunk{
 			Name:       name,
@@ -960,7 +871,7 @@ func processOneFile(
 			Tokens:     tokens,
 			Lines:      lines,
 			NonBlankLn: nonBlank,
-			Hashes:     setToHashes(ps.Set),
+			Hashes:     fingerprint.Hashes(ps.Set),
 			Positions:  ps.Positions,
 			K:          ps.K,
 		})
@@ -998,52 +909,6 @@ func stderrIsTTY() bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
-}
-
-// dedupePaths removes duplicate inputs and inputs that are contained within
-// another input on the list. Given ./src and ./src/utils, only ./src is
-// returned because walking it will already cover ./src/utils. Identical
-// paths (after canonicalization) are also collapsed.
-//
-// Order from the input slice is preserved for the survivors so users see
-// their first-mentioned form in error messages and progress.
-func dedupePaths(paths []string) ([]string, error) {
-	type entry struct {
-		original string
-		abs      string
-	}
-	var entries []entry
-	seen := make(map[string]bool, len(paths))
-	for _, p := range paths {
-		abs, err := filepath.Abs(p)
-		if err != nil {
-			return nil, err
-		}
-		abs = filepath.Clean(abs)
-		if seen[abs] {
-			continue
-		}
-		seen[abs] = true
-		entries = append(entries, entry{original: p, abs: abs})
-	}
-
-	out := make([]string, 0, len(entries))
-	for _, ai := range entries {
-		contained := false
-		for _, aj := range entries {
-			if aj.abs == ai.abs {
-				continue
-			}
-			if pathContains(aj.abs, ai.abs) {
-				contained = true
-				break
-			}
-		}
-		if !contained {
-			out = append(out, ai.original)
-		}
-	}
-	return out, nil
 }
 
 // flagsExplicitlySet returns the set of flag names that were passed on the
@@ -1122,29 +987,6 @@ func compileStripPatterns(cfg *config.Config) ([]*regexp.Regexp, error) {
 		return nil, nil
 	}
 	return config.CompileIgnorePatterns(cfg.IgnorePatterns)
-}
-
-// pathContains reports whether `child` lives inside the directory tree
-// rooted at `parent`. Both paths must be absolute and clean. The check is
-// purely lexical (no filesystem access): parent must be a strict prefix of
-// child with the next character being a separator, so /foo does not match
-// /foobar.
-func pathContains(parent, child string) bool {
-	if !strings.HasPrefix(child, parent) {
-		return false
-	}
-	rest := child[len(parent):]
-	return len(rest) > 0 && rest[0] == filepath.Separator
-}
-
-func countLines(code string) int {
-	n := 0
-	for _, line := range strings.Split(code, "\n") {
-		if strings.TrimSpace(line) != "" {
-			n++
-		}
-	}
-	return n
 }
 
 func usage() {

@@ -130,6 +130,17 @@ func Jaccard(a, b Set) float64 {
 	return float64(intersection) / float64(union)
 }
 
+// Hashes flattens a Set into a slice of its hash values. Iteration order is
+// unspecified — callers that round-trip through cache storage rebuild the
+// Set from this slice, so order doesn't matter.
+func Hashes(s Set) []uint32 {
+	out := make([]uint32, 0, len(s))
+	for h := range s {
+		out = append(out, h)
+	}
+	return out
+}
+
 // kgrams produces all consecutive k-grams from the token slice as joined strings.
 func kgrams(tokens []string, k int) []string {
 	if len(tokens) < k {

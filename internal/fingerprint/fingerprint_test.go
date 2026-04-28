@@ -1,6 +1,9 @@
 package fingerprint
 
-import "testing"
+import (
+	"sort"
+	"testing"
+)
 
 func TestGenerate_BasicTokens(t *testing.T) {
 	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
@@ -142,5 +145,46 @@ func TestMatchRange_IdenticalInputsCoverFullStream(t *testing.T) {
 	maxStart := len(tokens) - DefaultK
 	if last > maxStart {
 		t.Errorf("last position %d exceeds max k-gram start %d", last, maxStart)
+	}
+}
+
+func TestHashes_FlattensAllElements(t *testing.T) {
+	s := Set{1: {}, 2: {}, 3: {}}
+	got := Hashes(s)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 hashes, got %d", len(got))
+	}
+	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
+	want := []uint32{1, 2, 3}
+	for i, h := range want {
+		if got[i] != h {
+			t.Errorf("hashes[%d]: got %d, want %d", i, got[i], h)
+		}
+	}
+}
+
+func TestHashes_EmptySetReturnsEmpty(t *testing.T) {
+	got := Hashes(Set{})
+	if len(got) != 0 {
+		t.Errorf("expected empty slice, got %v", got)
+	}
+}
+
+func TestHashes_NilSetReturnsEmpty(t *testing.T) {
+	got := Hashes(nil)
+	if len(got) != 0 {
+		t.Errorf("expected empty slice for nil set, got %v", got)
+	}
+}
+
+func TestHashes_RoundTripPreservesMembership(t *testing.T) {
+	original := Set{42: {}, 99: {}, 7: {}}
+	flat := Hashes(original)
+	rebuilt := make(Set, len(flat))
+	for _, h := range flat {
+		rebuilt[h] = struct{}{}
+	}
+	if Jaccard(original, rebuilt) != 1.0 {
+		t.Errorf("round trip lost membership: original=%v rebuilt=%v", original, rebuilt)
 	}
 }
