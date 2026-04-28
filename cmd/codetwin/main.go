@@ -70,9 +70,11 @@ const pairNoiseFloor = 0.05
 // helpers can take []snippet without relying on closures over a local type.
 type snippet struct {
 	name       string
+	path       string // absolute file path, used for same-file containment checks
 	lang       tokenizer.Language
 	code       string
 	startLine  int
+	endLine    int
 	nonBlankLn int
 	tokens     []string
 	lines      []int // parallel to tokens; 1-based source line of each token
@@ -658,6 +660,20 @@ func buildHashIndex(snippets []snippet) map[uint32][]int {
 	return idx
 }
 
+// chunksNestedSameFile reports whether two snippets come from the same
+// file and one's [StartLine, EndLine] range fully contains the other's.
+// Function-level chunks of an outer function and a closure defined inside
+// it are necessarily token-overlapping; reporting them as a "100% match"
+// is noise — they're not duplicates, the outer just contains the inner.
+func chunksNestedSameFile(a, b snippet) bool {
+	if a.path == "" || b.path == "" || a.path != b.path {
+		return false
+	}
+	aContainsB := a.startLine <= b.startLine && a.endLine >= b.endLine
+	bContainsA := b.startLine <= a.startLine && b.endLine >= a.endLine
+	return aContainsB || bContainsA
+}
+
 // computeSimilarityMatrix populates `matrix` and returns the materialized
 // pair list. Work is sharded across runtime.NumCPU() goroutines using a
 // stripe partition (worker w handles rows where i % numWorkers == w),
@@ -718,6 +734,16 @@ func computeSimilarityMatrix(
 				}
 
 				for j := i + 1; j < n; j++ {
+					// Suppress nesting false positives: an outer function that
+					// happens to contain a closure / inner def is not a
+					// duplicate of that closure, even though their tokens
+					// overlap heavily by construction. Leaving the matrix at
+					// 0 also keeps DBSCAN from clustering them.
+					if chunksNestedSameFile(snippets[i], snippets[j]) {
+						batchProgress++
+						continue
+					}
+
 					var structural float64
 					if _, ok := cands[j]; ok {
 						structural = fingerprint.Jaccard(snippets[i].fps.Set, snippets[j].fps.Set)
@@ -902,9 +928,11 @@ func processOneFile(
 			}
 			out = append(out, snippet{
 				name:       c.Name,
+				path:       absPath,
 				lang:       tokenizer.Language(c.Lang),
 				code:       c.Code,
 				startLine:  c.StartLine,
+				endLine:    c.EndLine,
 				nonBlankLn: c.NonBlankLn,
 				tokens:     c.Tokens,
 				lines:      c.Lines,
@@ -947,9 +975,11 @@ func processOneFile(
 		}
 		out = append(out, snippet{
 			name:       name,
+			path:       absPath,
 			lang:       lang,
 			code:       ch.Code,
 			startLine:  ch.StartLine,
+			endLine:    ch.EndLine,
 			nonBlankLn: nonBlank,
 			tokens:     tokens,
 			lines:      lines,
