@@ -382,20 +382,40 @@ func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 		color(grey, opts), color(reset, opts), color(green, opts), len(clusters), color(reset, opts))
 }
 
-func classify(score float64) (string, string) {
-	switch {
-	case score > 0.95:
-		return "[EXACT CLONE     ]", red
-	case score > 0.85:
-		return "[NEAR CLONE      ]", red
-	case score > 0.65:
-		return "[STRONG CLONE    ]", orange
-	case score > 0.45:
-		return "[REFACTOR TARGET ]", yellow
-	default:
-		return "[WEAK SIMILARITY ]", grey
-	}
+// tier groups the per-band facts (boundary, terminal label, color, JSON
+// label) so all surfaces draw from the same source — adding or moving a
+// band is a single-line edit.
+type tier struct {
+	above float64
+	label string
+	color string
+	json  string
 }
+
+var tiers = []tier{
+	{0.95, "[EXACT CLONE     ]", red, "exact_clone"},
+	{0.85, "[NEAR CLONE      ]", red, "near_clone"},
+	{0.65, "[STRONG CLONE    ]", orange, "strong_clone"},
+	{0.45, "[REFACTOR TARGET ]", yellow, "refactor_candidate"},
+	{-1, "[WEAK SIMILARITY ]", grey, "weak_similarity"},
+}
+
+func tierFor(score float64) tier {
+	for _, t := range tiers {
+		if score > t.above {
+			return t
+		}
+	}
+	return tiers[len(tiers)-1]
+}
+
+func classify(score float64) (string, string) {
+	t := tierFor(score)
+	return t.label, t.color
+}
+
+// JSONLabel returns the snake-case classification name used in JSON output.
+func JSONLabel(score float64) string { return tierFor(score).json }
 
 func color(code string, opts Options) string {
 	if opts.Plain {

@@ -351,6 +351,28 @@ func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
 	}
 }
 
+func TestJSONLabel_BoundariesAreStrict(t *testing.T) {
+	cases := []struct {
+		score float64
+		want  string
+	}{
+		{0.97, "exact_clone"},
+		{0.95, "near_clone"},
+		{0.90, "near_clone"},
+		{0.85, "strong_clone"},
+		{0.80, "strong_clone"},
+		{0.65, "refactor_candidate"},
+		{0.50, "refactor_candidate"},
+		{0.45, "weak_similarity"},
+		{0.30, "weak_similarity"},
+	}
+	for _, c := range cases {
+		if got := JSONLabel(c.score); got != c.want {
+			t.Errorf("JSONLabel(%.2f) = %q; want %q", c.score, got, c.want)
+		}
+	}
+}
+
 func TestRender_LabelsByScore(t *testing.T) {
 	cases := []struct {
 		score float64

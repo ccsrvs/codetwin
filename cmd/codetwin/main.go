@@ -543,7 +543,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 		out.Pairs = append(out.Pairs, jsonPair{
 			FileA: p.NameA, FileB: p.NameB,
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
-			Label: jsonLabel(p.Score),
+			Label: report.JSONLabel(p.Score),
 		})
 	}
 	for _, c := range clusters {
@@ -552,24 +552,6 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	enc.Encode(out)
-}
-
-// jsonLabel mirrors the terminal report's classify() bands. Keep these two
-// in sync — JSON consumers script against the label string, so adding a
-// tier to one place and not the other silently lies to downstream users.
-func jsonLabel(score float64) string {
-	switch {
-	case score > 0.95:
-		return "exact_clone"
-	case score > 0.85:
-		return "near_clone"
-	case score > 0.65:
-		return "strong_clone"
-	case score > 0.45:
-		return "refactor_candidate"
-	default:
-		return "weak_similarity"
-	}
 }
 
 // ── File collection ───────────────────────────────────────────────────────────
