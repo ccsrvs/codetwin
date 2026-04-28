@@ -79,7 +79,11 @@ func splitPython(code string) []Chunk {
 	var chunks []Chunk
 	for _, d := range defs {
 		end := len(lines) - 1
-		for j := d.line + 1; j < len(lines); j++ {
+		// Skip past a multi-line signature so the closing `):` (which sits
+		// at the def line's indent and would otherwise look like the end of
+		// the function) doesn't fool the indent-based termination below.
+		sigEnd := pythonSignatureEndLine(lines, d.line)
+		for j := sigEnd + 1; j < len(lines); j++ {
 			line := lines[j]
 			if strings.TrimSpace(line) == "" {
 				continue
@@ -97,6 +101,101 @@ func splitPython(code string) []Chunk {
 		})
 	}
 	return chunks
+}
+
+// pythonSignatureEndLine returns the 0-based index of the line containing
+// the `:` that closes a Python def's signature, starting from defLine. A
+// single-line signature like `def foo(x):` returns defLine itself.
+//
+// The scanner is string- and comment-aware so that parens inside string
+// literals or `#` comments don't throw off the depth count, and tracks
+// triple-quoted strings across lines. Without this, a signature like
+//
+//	async def f(
+//	    x,
+//	    y,
+//	):
+//	    body
+//
+// gets mis-chunked: the closing `):` sits at the def's indent, so the
+// indent-based body-end heuristic fires *before* the body is captured.
+//
+// On malformed input (no closing `:` ever found) returns the last line
+// index, which causes the caller to emit an empty body — preferable to
+// reading past EOF.
+func pythonSignatureEndLine(lines []string, defLine int) int {
+	const (
+		stCode = iota
+		stSingle
+		stDouble
+		stTripleSingle
+		stTripleDouble
+	)
+	state := stCode
+	depth := 0
+	for i := defLine; i < len(lines); i++ {
+		line := lines[i]
+		sigDone := false
+		commentHit := false
+		for k := 0; k < len(line) && !commentHit; k++ {
+			c := line[k]
+			switch state {
+			case stCode:
+				switch {
+				case c == '#':
+					commentHit = true
+				case c == '"' && k+2 < len(line) && line[k+1] == '"' && line[k+2] == '"':
+					state = stTripleDouble
+					k += 2
+				case c == '\'' && k+2 < len(line) && line[k+1] == '\'' && line[k+2] == '\'':
+					state = stTripleSingle
+					k += 2
+				case c == '"':
+					state = stDouble
+				case c == '\'':
+					state = stSingle
+				case c == '(', c == '[', c == '{':
+					depth++
+				case c == ')', c == ']', c == '}':
+					depth--
+				case c == ':' && depth == 0:
+					sigDone = true
+				}
+			case stSingle:
+				if c == '\\' {
+					k++ // skip escaped next char
+				} else if c == '\'' {
+					state = stCode
+				}
+			case stDouble:
+				if c == '\\' {
+					k++
+				} else if c == '"' {
+					state = stCode
+				}
+			case stTripleSingle:
+				if c == '\'' && k+2 < len(line) && line[k+1] == '\'' && line[k+2] == '\'' {
+					state = stCode
+					k += 2
+				}
+			case stTripleDouble:
+				if c == '"' && k+2 < len(line) && line[k+1] == '"' && line[k+2] == '"' {
+					state = stCode
+					k += 2
+				}
+			}
+		}
+		// Single-line strings can't span newlines in Python; reset their
+		// state at line boundaries so an unterminated quote doesn't
+		// poison subsequent lines.
+		if state == stSingle || state == stDouble {
+			state = stCode
+		}
+		if sigDone {
+			return i
+		}
+	}
+	return len(lines) - 1
 }
 
 // indentLen returns the visual indent width of leading whitespace, treating

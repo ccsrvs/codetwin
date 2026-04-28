@@ -87,6 +87,67 @@ func TestSplit_PythonAsyncDef(t *testing.T) {
 	}
 }
 
+func TestSplit_PythonMultiLineSignatureIncludesBody(t *testing.T) {
+	// A Black-formatted multi-line signature puts the closing `):` at the
+	// same indent as the def line. The indent-based body-end heuristic used
+	// to fire on that line and drop the entire body from the chunk.
+	code := `class Foo:
+    async def handle(
+        self,
+        msg: str,
+        ctx: dict = {"k": "v"},
+    ):
+        if msg:
+            return ctx[msg]
+        return None
+
+    def other(self):
+        pass
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	var handle *Chunk
+	for i := range chunks {
+		if chunks[i].Symbol == "handle" {
+			handle = &chunks[i]
+			break
+		}
+	}
+	if handle == nil {
+		t.Fatalf("expected a chunk named 'handle', got %+v", chunks)
+	}
+	for _, want := range []string{"if msg:", "return ctx[msg]", "return None"} {
+		if !strings.Contains(handle.Code, want) {
+			t.Errorf("body line %q missing from handle chunk:\n%s", want, handle.Code)
+		}
+	}
+	// And the chunk must not bleed into the next method.
+	if strings.Contains(handle.Code, "def other") {
+		t.Errorf("handle chunk should stop before 'def other':\n%s", handle.Code)
+	}
+}
+
+func TestSplit_PythonStringsDontFoolSignatureScanner(t *testing.T) {
+	// Parens / colons inside string literals or comments must not confuse
+	// the multi-line-signature detector into ending the signature early
+	// (or running past it into the body).
+	code := `def foo(
+    s: str = "hello: ((world))",  # default with parens
+    t: str = '):',
+):
+    return (s, t)
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "foo" {
+		t.Errorf("expected symbol 'foo', got %q", chunks[0].Symbol)
+	}
+	if !strings.Contains(chunks[0].Code, "return (s, t)") {
+		t.Errorf("body missing from chunk:\n%s", chunks[0].Code)
+	}
+}
+
 func TestSplit_GoTopLevelFunctions(t *testing.T) {
 	code := `package main
 
