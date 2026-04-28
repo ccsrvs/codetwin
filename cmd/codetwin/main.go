@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -58,12 +57,6 @@ var supportedExts = map[string]bool{
 	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
 }
-
-// pairNoiseFloor is the minimum combined score below which we drop pairs
-// from the materialized list. The matrix still records the true value so
-// DBSCAN clustering is unaffected; this only bounds the memory footprint
-// of `pairs` on big repos. 0.05 is well below any user-visible threshold.
-const pairNoiseFloor = 0.05
 
 func main() {
 	threshold := flag.Float64("threshold", 0.30, "minimum similarity score to report (0.0–1.0)")
@@ -251,25 +244,27 @@ func main() {
 	n := len(snippets)
 	matrixBytes := int64(n) * int64(n) * 8
 	debugf("allocating matrix: %d × %d (%d MB)", n, n, matrixBytes/(1024*1024))
-	matrix := make([][]float64, n)
-	for i := range matrix {
-		matrix[i] = make([]float64, n)
-		matrix[i][i] = 1.0
+
+	totalPairs := int64(n) * int64(n-1) / 2
+	debugf("comparing %d × %d = %d pairs", n, n, totalPairs)
+
+	var matrixDone atomic.Int64
+	var matrixProgStop chan struct{}
+	var matrixProgWg sync.WaitGroup
+	if showProgress && totalPairs > 0 {
+		matrixProgStop = make(chan struct{})
+		matrixProgWg.Add(1)
+		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
-	debugf("matrix allocated")
-
-	// Inverted index from fingerprint hash → snippet indices that selected
-	// it. Lets us skip Jaccard work for snippet pairs that share no
-	// fingerprints — those will score 0 anyway, and on a typical big repo
-	// most pairs fall into this bucket.
-	hashIndex := buildHashIndex(snippets)
-	debugf("hash index built: %d unique fingerprints", len(hashIndex))
-
-	debugf("comparing %d × %d = %d pairs", n, n, int64(n)*int64(n-1)/2)
-	pairs := computeSimilarityMatrix(
-		matrix, snippets, vectors, hashIndex, showProgress, *minConfLines,
+	matrix, pairs := similarity.BuildMatrix(
+		snippets, vectors, *minConfLines,
+		func(d, _ int64) { matrixDone.Store(d) },
 	)
-	debugf("computeSimilarityMatrix: %d pairs above noise floor", len(pairs))
+	if matrixProgStop != nil {
+		close(matrixProgStop)
+		matrixProgWg.Wait()
+	}
+	debugf("similarity.BuildMatrix: %d pairs above noise floor", len(pairs))
 
 	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
 	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
@@ -526,165 +521,6 @@ func stripPatternStrings(cfg *config.Config) []string {
 		return nil
 	}
 	return cfg.IgnorePatterns
-}
-
-// buildHashIndex builds an inverted index from fingerprint hash → snippet
-// indices that selected that hash. Used by computeSimilarityMatrix to skip
-// Jaccard computation for snippet pairs that share zero fingerprints
-// (those structural scores would be 0 anyway, and on a typical big repo
-// most pairs fall into that bucket).
-func buildHashIndex(snippets []scan.Snippet) map[uint32][]int {
-	idx := make(map[uint32][]int)
-	for i, s := range snippets {
-		for h := range s.Fps.Set {
-			idx[h] = append(idx[h], i)
-		}
-	}
-	return idx
-}
-
-// chunksNestedSameFile reports whether two snippets come from the same
-// file and one's [StartLine, EndLine] range fully contains the other's.
-// Function-level chunks of an outer function and a closure defined inside
-// it are necessarily token-overlapping; reporting them as a "100% match"
-// is noise — they're not duplicates, the outer just contains the inner.
-func chunksNestedSameFile(a, b scan.Snippet) bool {
-	if a.Path == "" || b.Path == "" || a.Path != b.Path {
-		return false
-	}
-	aContainsB := a.StartLine <= b.StartLine && a.EndLine >= b.EndLine
-	bContainsA := b.StartLine <= a.StartLine && b.EndLine >= a.EndLine
-	return aContainsB || bContainsA
-}
-
-// computeSimilarityMatrix populates `matrix` and returns the materialized
-// pair list. Work is sharded across runtime.NumCPU() goroutines using a
-// stripe partition (worker w handles rows where i % numWorkers == w),
-// which balances small-row and big-row work. Each worker writes to its
-// own pair buffer and to disjoint matrix cells, so no synchronization is
-// needed beyond the final WaitGroup join.
-//
-// Pairs scoring below pairNoiseFloor are excluded from the returned slice
-// to keep the materialized list bounded on big repos. The matrix still
-// receives the true value so DBSCAN sees the full topology.
-func computeSimilarityMatrix(
-	matrix [][]float64,
-	snippets []scan.Snippet,
-	vectors []similarity.NormalizedVector,
-	hashIndex map[uint32][]int,
-	showProgress bool,
-	minConfLines int,
-) []report.Pair {
-	n := len(snippets)
-	workers := runtime.NumCPU()
-	if workers > n {
-		workers = n
-	}
-	if workers < 1 {
-		workers = 1
-	}
-
-	totalPairs := int64(n) * int64(n-1) / 2
-	var done atomic.Int64
-
-	var progStop chan struct{}
-	var progWg sync.WaitGroup
-	if showProgress && totalPairs > 0 {
-		progStop = make(chan struct{})
-		progWg.Add(1)
-		go reportProgress(&done, totalPairs, progStop, &progWg, "comparing snippets")
-	}
-
-	pairsByWorker := make([][]report.Pair, workers)
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			var local []report.Pair
-			batchProgress := int64(0)
-			for i := workerID; i < n; i += workers {
-				// Candidates: any j > i that shares a fingerprint with i.
-				// Pairs not in this set get structural=0 without paying for
-				// a Jaccard call. We still compute cosine for every pair so
-				// cross-language semantic-only matches still surface.
-				cands := make(map[int]struct{})
-				for h := range snippets[i].Fps.Set {
-					for _, k := range hashIndex[h] {
-						if k > i {
-							cands[k] = struct{}{}
-						}
-					}
-				}
-
-				for j := i + 1; j < n; j++ {
-					// Suppress nesting false positives: an outer function that
-					// happens to contain a closure / inner def is not a
-					// duplicate of that closure, even though their tokens
-					// overlap heavily by construction. Leaving the matrix at
-					// 0 also keeps DBSCAN from clustering them.
-					if chunksNestedSameFile(snippets[i], snippets[j]) {
-						batchProgress++
-						continue
-					}
-
-					var structural float64
-					if _, ok := cands[j]; ok {
-						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
-					}
-					semantic := similarity.CosineFromNormalized(vectors[i], vectors[j])
-					combined := similarity.Combined(structural, semantic, 0.5)
-					// Length-aware confidence: dampen short-snippet matches
-					// before they reach the matrix so DBSCAN sees the same
-					// view of the world the report does. structural and
-					// semantic stay raw — only the combined `Score` is
-					// adjusted, since that's what feeds clustering and
-					// thresholding.
-					combined = similarity.LengthDampen(
-						combined, snippets[i].NonBlankLn, snippets[j].NonBlankLn, minConfLines)
-					matrix[i][j] = combined
-					matrix[j][i] = combined
-
-					batchProgress++
-					if combined < pairNoiseFloor {
-						continue
-					}
-					local = append(local, report.Pair{
-						NameA:      snippets[i].Name,
-						NameB:      snippets[j].Name,
-						Structural: structural,
-						Semantic:   semantic,
-						Score:      combined,
-						LinesA:     snippets[i].NonBlankLn,
-						LinesB:     snippets[j].NonBlankLn,
-					})
-				}
-				// Flush progress in batches per row to avoid hammering the
-				// atomic counter per inner-loop iteration.
-				if batchProgress > 0 {
-					done.Add(batchProgress)
-					batchProgress = 0
-				}
-			}
-			pairsByWorker[workerID] = local
-		}(w)
-	}
-	wg.Wait()
-
-	if progStop != nil {
-		close(progStop)
-		progWg.Wait()
-	}
-
-	total := 0
-	for _, p := range pairsByWorker {
-		total += len(p)
-	}
-	pairs := make([]report.Pair, 0, total)
-	for _, p := range pairsByWorker {
-		pairs = append(pairs, p...)
-	}
-	return pairs
 }
 
 // reportProgress prints a one-line progress indicator to stderr until stop
