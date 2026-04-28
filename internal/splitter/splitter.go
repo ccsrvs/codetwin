@@ -379,34 +379,61 @@ func splitGo(code string) []Chunk {
 	return chunks
 }
 
-// splitBraceLang chunks code using a "find a definition header, then
-// brace-balance to its closer" strategy. Works for Go and Rust.
-func splitBraceLang(code string, headerRe *regexp.Regexp) []Chunk {
+// braceMatcher inspects a single header line and reports whether it opens a
+// chunkable definition. Returns the symbol name when ok=true; the symbol is
+// ignored when ok=false. Per-language adapters (Java type-decl skipping,
+// JS multi-regex try-each) are encapsulated inside the matcher.
+type braceMatcher func(line string) (symbol string, ok bool)
+
+// splitBraceBased drives the shared "match header, brace-balance to closer,
+// emit chunk, jump past body" loop used by Go/Rust, Java, and JS/TS. The
+// matcher decides what counts as a header; emitBodyless controls whether a
+// matched header without a `{...}` block becomes a single-line chunk
+// (true for JS arrow shorthands) or is skipped (false for everything else).
+func splitBraceBased(code string, match braceMatcher, emitBodyless bool) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
 	i := 0
 	for i < len(lines) {
-		m := headerRe.FindStringSubmatch(lines[i])
-		if m == nil {
+		symbol, ok := match(lines[i])
+		if !ok {
 			i++
 			continue
 		}
-		end, ok := findBraceEnd(lines, i)
-		if !ok {
-			// No body braces (e.g. interface method stub) — skip without
-			// emitting a chunk.
+		end, hasBody := findBraceEnd(lines, i)
+		if !hasBody {
+			if emitBodyless {
+				chunks = append(chunks, Chunk{
+					StartLine: i + 1,
+					EndLine:   i + 1,
+					Symbol:    symbol,
+					Code:      lines[i],
+				})
+			}
 			i++
 			continue
 		}
 		chunks = append(chunks, Chunk{
 			StartLine: i + 1,
 			EndLine:   end + 1,
-			Symbol:    m[1],
+			Symbol:    symbol,
 			Code:      strings.Join(lines[i:end+1], "\n"),
 		})
 		i = end + 1
 	}
 	return chunks
+}
+
+// splitBraceLang chunks code using a "find a definition header, then
+// brace-balance to its closer" strategy. Works for Go and Rust.
+func splitBraceLang(code string, headerRe *regexp.Regexp) []Chunk {
+	return splitBraceBased(code, func(line string) (string, bool) {
+		m := headerRe.FindStringSubmatch(line)
+		if m == nil {
+			return "", false
+		}
+		return m[1], true
+	}, false)
 }
 
 // ── Java ──────────────────────────────────────────────────────────────────────
@@ -433,44 +460,25 @@ var (
 // findBraceEnd reports no body, the latter because the regex requires
 // `name(`.
 func splitJava(code string) []Chunk {
-	lines := strings.Split(code, "\n")
-	var chunks []Chunk
-	i := 0
-	for i < len(lines) {
-		line := lines[i]
-		if javaTypeDeclRe.MatchString(line) {
-			i++
-			continue
-		}
-		m := javaMethodRe.FindStringSubmatch(line)
-		if m == nil {
-			i++
-			continue
-		}
-		// Skip Java keywords that the regex's permissive structure can
-		// otherwise capture — e.g. `if (cond) {`, `while (x) {`,
-		// `for (...) {`, `switch (x) {`. None of these introduce a
-		// definition we want to chunk.
-		switch m[1] {
-		case "if", "while", "for", "switch", "synchronized", "catch", "try", "do", "return":
-			i++
-			continue
-		}
-		end, ok := findBraceEnd(lines, i)
-		if !ok {
-			// Interface/abstract method stub with no body — skip.
-			i++
-			continue
-		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    m[1],
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
-		i = end + 1
+	return splitBraceBased(code, javaHeaderMatch, false)
+}
+
+// javaHeaderMatch reports whether a line opens a method or constructor
+// definition. Type declarations and Java keywords with method-like
+// shape (`if (...) {`, `while (...) {`, etc.) are explicitly rejected.
+func javaHeaderMatch(line string) (string, bool) {
+	if javaTypeDeclRe.MatchString(line) {
+		return "", false
 	}
-	return chunks
+	m := javaMethodRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	switch m[1] {
+	case "if", "while", "for", "switch", "synchronized", "catch", "try", "do", "return":
+		return "", false
+	}
+	return m[1], true
 }
 
 // findBraceEnd scans from the start line until the first time the running
@@ -506,40 +514,18 @@ var (
 )
 
 func splitJavaScript(code string) []Chunk {
-	lines := strings.Split(code, "\n")
-	var chunks []Chunk
-	i := 0
-	for i < len(lines) {
-		var symbol string
-		for _, re := range []*regexp.Regexp{jsFuncRe, jsArrowRe, jsClassRe} {
-			if m := re.FindStringSubmatch(lines[i]); m != nil {
-				symbol = m[1]
-				break
-			}
+	return splitBraceBased(code, jsHeaderMatch, true)
+}
+
+// jsHeaderMatch tries each JavaScript/TypeScript header pattern in order
+// (named function, arrow assigned to const/let/var, class) and returns the
+// first symbol found. emitBodyless=true at the splitBraceBased call site
+// captures single-expression arrow shorthands that have no `{...}` body.
+func jsHeaderMatch(line string) (string, bool) {
+	for _, re := range []*regexp.Regexp{jsFuncRe, jsArrowRe, jsClassRe} {
+		if m := re.FindStringSubmatch(line); m != nil {
+			return m[1], true
 		}
-		if symbol == "" {
-			i++
-			continue
-		}
-		end, ok := findBraceEnd(lines, i)
-		if !ok {
-			// Body-less arrow (single-expression) — emit just that line.
-			chunks = append(chunks, Chunk{
-				StartLine: i + 1,
-				EndLine:   i + 1,
-				Symbol:    symbol,
-				Code:      lines[i],
-			})
-			i++
-			continue
-		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    symbol,
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
-		i = end + 1
 	}
-	return chunks
+	return "", false
 }
