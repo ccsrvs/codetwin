@@ -67,16 +67,39 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --min-pts int           DBSCAN min cluster size (default 2)
 --preview               show a short code excerpt for each finding
 --preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
---sort string           result ordering: score | score-asc | size | size-asc | name (default score)
+--sort string           result ordering: score | score-asc | size | size-asc | name | age | age-asc
+                        (default score; age modes require --blame)
 --limit int             show only the top N pairs and N clusters (0 = no limit)
 --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off);
                             multiplier ramps from 0.5× at 0 lines to 1.0× at N
+--cross-lang-only       report only pairs whose two snippets are in different languages
+                        (e.g. duplicate logic across a Go service and a TS dashboard)
+--since string          PR-delta mode: keep only findings where ≥1 endpoint overlaps
+                        lines changed since <ref> (e.g. main, HEAD~5, abc123)
+--blame                 annotate findings with git provenance (when introduced, by whom,
+                        last touched). Pairs --sort=age for "newest clones first".
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
 --skill                 print this skill guide and exit
 --guide                 print the report interpretation guide and exit
 ```
+
+### Git-aware modes
+
+`--since`, `--blame`, and `--sort=age` all require git on `PATH` and a
+git repository in the working directory. If either condition isn't met,
+codetwin exits 1 with a clear error — there is no silent degradation,
+because the user explicitly opted in. Without these flags codetwin
+works the same in a non-git directory as it does in one.
+
+| Goal | Command |
+|---|---|
+| CI gate: fail only on duplication this PR introduces | `codetwin --since main --threshold 0.85 --json <path>` |
+| Find duplicate logic across languages in a polyglot repo | `codetwin --cross-lang-only --threshold 0.50 <path>` |
+| Show the freshest clones (newest endpoint first) | `codetwin --blame --sort age --limit 10 <path>` |
+| Annotate every match with origin metadata | `codetwin --blame --preview <path>` |
+| Triage who introduced this clone | `codetwin --blame --json <path> \| jq '.pairs[] \| {a:.file_a,b:.file_b,intro_a:.provenance_a.first_date,intro_b:.provenance_b.first_date}'` |
 
 `codetwin --help` prints the same flag list with one-line descriptions.
 `codetwin --guide` walks through the score bands, structural/semantic
@@ -94,6 +117,13 @@ section using its natural interpretation:
 | `size`       | biggest snippets first           | most members first ("biggest bang")   |
 | `size-asc`   | smallest snippets first          | smallest clusters first ("quick wins")|
 | `name`       | alphabetical by file path        | alphabetical by first member          |
+| `age`        | newest pair first (when introduced) | (clusters fall back to score)      |
+| `age-asc`    | oldest pair first                | (clusters fall back to score)         |
+
+`age` and `age-asc` use git blame to determine when each pair was
+introduced (= the later FirstTime of its two endpoints). They require
+`--blame` and silently fall back to score sort for pairs without
+provenance.
 
 `--limit N` caps **each** section at N items independently (top N pairs and
 top N clusters), applied after sort and threshold filtering. Use it together
@@ -303,4 +333,7 @@ codetwin --preview --threshold 0.40 ./testdata
 | Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
 | One specific pair is a confirmed false positive | Add `ignore_pairs` (keeps both files scannable against everything else) |
 | 100% scores on tiny snippets that aren't real duplicates | Add `--min-confidence-lines 20` — short matches lose proportional score |
+| `--since/--blame requires the git binary on PATH` | Install git, or drop the flag |
+| `--since/--blame requires running inside a git repository` | `cd` into the repo, or run `git init` if the directory should be one |
+| `--since <ref>` returns nothing | Confirm the ref exists (`git rev-parse <ref>`) and that the diff is non-empty (`git diff --stat <ref>`) |
 | Build errors | Run `go test ./...` first to isolate the broken package |

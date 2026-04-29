@@ -101,6 +101,31 @@ scores reflect intentional duplication that you should NOT refactor:
 The judgment of "is this duplication worth removing?" is yours; the
 tool's job is to surface candidates.
 
+## Git-aware modes
+
+Three optional flags layer git context on top of the report:
+
+- **`--cross-lang-only`** — drops same-language pairs. The semantic
+  scorer already pairs across languages (a Python loop and a Go loop
+  with the same vocabulary will match), but most reports are dominated
+  by within-language clones. Use this in polyglot repos to surface logic
+  duplicated between, say, a Go service and its TypeScript dashboard.
+- **`--since <ref>`** — keeps only pairs and clusters where ≥1 endpoint
+  overlaps lines changed since `<ref>` (committed or unstaged).
+  Designed as a CI ratchet: a team with existing duplication can adopt
+  `codetwin --since main --threshold 0.85` as a gate and only fail
+  builds that introduce *new* duplication. Requires git on PATH.
+- **`--blame`** — calls `git blame` per snippet and attaches an
+  "introduced YYYY-MM-DD by Author (sha)" line under each match (and
+  `provenance_a` / `provenance_b` blocks in JSON). Pair with
+  `--sort age` to surface the freshest clones first ("which duplication
+  did we add this quarter?"). Requires git on PATH.
+
+If `--since` or `--blame` is set in a directory that isn't a git repo,
+or on a system without git installed, codetwin exits 1 with a clear
+error rather than silently degrading — the user explicitly opted in to
+a git-dependent feature, so silent fallback would hide the real problem.
+
 ## A note on config
 
 Some `.codetwin.json` knobs change what the tool *sees* before it
