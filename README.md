@@ -20,6 +20,24 @@ make build          # produces ./codetwin binary
 make test           # run all unit + integration tests
 ```
 
+### Install as a Claude Code skill
+
+`codetwin-SKILL.md` at the repo root is a Claude Code skill manifest that
+tells Claude when and how to invoke the CLI (find duplicate code, detect
+clones, scan for refactor targets). To make it discoverable in your Claude
+sessions, drop it into your user-level skills folder as `SKILL.md`:
+
+```bash
+mkdir -p ~/.claude/skills/codetwin
+cp codetwin-SKILL.md ~/.claude/skills/codetwin/SKILL.md
+```
+
+The skill assumes `codetwin` is on `PATH`. The bundled
+`./build_and_cp_cli.sh` builds the binary and copies it to `~/.local/bin`,
+which is one easy way to satisfy that. Once both are in place, Claude can
+locate the binary via `which codetwin` and run `codetwin --skill` /
+`codetwin --guide` for the full guides embedded in the binary.
+
 ## Usage
 
 ```bash
@@ -70,6 +88,7 @@ codetwin --verbose ./src
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
+| `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
 | `--guide` | false | Print the report interpretation guide and exit |
 
@@ -236,7 +255,9 @@ codetwin/
     ├── cluster/                 # DBSCAN clustering
     ├── report/                  # ANSI terminal + plain text rendering
     ├── config/                  # .codetwin.json loading + ignore matching
-    └── cache/                   # .codetwin-cache.bin persistence
+    ├── cache/                   # .codetwin-cache.bin persistence
+    ├── scan/                    # Per-file pipeline + parallel orchestrator (split → tokenize → fingerprint)
+    └── pathutil/                # Lexical path helpers (Dedupe, Contains)
 ```
 
 ### How each layer works
@@ -253,11 +274,11 @@ duplicated lines.
 
 **Splitter** (`internal/splitter`)
 Breaks each file into per-definition chunks: every Python `def`, Go `func`,
-JS `function` / `const arrow` / `class`, Rust `fn`. Each chunk is then
-compared independently. A 500-line module with one duplicated 20-line helper
-now scores high on that helper instead of being washed out by 480 lines of
-unrelated code. Java and Elixir fall back to whole-file chunks (they need a
-language-specific splitter; PRs welcome).
+JS / TS / JSX / TSX `function` / `const arrow` / `class`, Rust `fn`, and Java
+method. Each chunk is then compared independently. A 500-line module with
+one duplicated 20-line helper now scores high on that helper instead of being
+washed out by 480 lines of unrelated code. Elixir falls back to whole-file
+chunks (it needs a language-specific splitter; PRs welcome).
 
 **Fingerprint** (`internal/fingerprint`)
 Implements the Winnowing algorithm. Slides a window over k-gram hashes and
@@ -288,6 +309,19 @@ Loads `.codetwin.json` from the working directory. Compiles `ignore_paths`
 into a glob/component matcher, `ignore_patterns` into regexes consumed by
 the tokenizer, and `ignore_pairs` into a post-similarity matcher applied
 between BuildMatrix and DBSCAN.
+
+**Scan** (`internal/scan`)
+Per-file pipeline that turns a source file into one or more `Snippet`s
+(split → tokenize → fingerprint) plus the parallel orchestrator that runs it
+across the file set. Sits between `cmd/codetwin/main.go` and the
+splitter/tokenizer/fingerprint packages, and consults `internal/cache` so
+unchanged files skip the work.
+
+**Pathutil** (`internal/pathutil`)
+Pure lexical path helpers. `Dedupe` collapses duplicate input paths and drops
+inputs already covered by another (e.g. `./src/utils` is dropped when `./src`
+is also passed); `Contains` does an absolute-path containment check that
+respects separator boundaries so `/foo` doesn't match `/foobar`.
 
 ## Adding a new language
 
