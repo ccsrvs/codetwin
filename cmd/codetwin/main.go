@@ -131,6 +131,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning in ignore_patterns: %v\n", err)
 		// Continue with whatever patterns compiled successfully.
 	}
+	pairIgnoreMatcher, err := compilePairIgnoreMatcher(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error in ignore_pairs: %v\n", err)
+		os.Exit(1)
+	}
 
 	paths := flag.Args()
 	if len(paths) == 0 {
@@ -265,6 +270,12 @@ func main() {
 		matrixProgWg.Wait()
 	}
 	debugf("similarity.BuildMatrix: %d pairs above noise floor", len(pairs))
+
+	if pairIgnoreMatcher != nil {
+		var ignored int
+		pairs, ignored = applyPairIgnores(pairs, matrix, snippets, pairIgnoreMatcher)
+		debugf("ignore_pairs: dropped %d pairs", ignored)
+	}
 
 	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
 	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
@@ -631,6 +642,52 @@ func compileStripPatterns(cfg *config.Config) ([]*regexp.Regexp, error) {
 		return nil, nil
 	}
 	return config.CompileIgnorePatterns(cfg.IgnorePatterns)
+}
+
+// compilePairIgnoreMatcher returns a matcher built from cfg.IgnorePairs.
+// nil-safe: a nil cfg or empty list yields a nil matcher whose Match is a
+// no-op, so callers can plumb the result through without nil checks.
+func compilePairIgnoreMatcher(cfg *config.Config) (*config.PairIgnoreMatcher, error) {
+	if cfg == nil || len(cfg.IgnorePairs) == 0 {
+		return nil, nil
+	}
+	return config.CompileIgnorePairs(cfg.IgnorePairs)
+}
+
+// applyPairIgnores drops pairs that match the user's ignore_pairs and zeros
+// the corresponding matrix entries so DBSCAN sees the two snippets as
+// maximally distant and won't co-cluster them. Returns the surviving pairs
+// (a fresh slice — input is not mutated beyond the matrix) and the count of
+// ignored pairs. A nil matcher or empty pair list short-circuits.
+func applyPairIgnores(
+	pairs []report.Pair,
+	matrix [][]float64,
+	snippets []scan.Snippet,
+	matcher *config.PairIgnoreMatcher,
+) ([]report.Pair, int) {
+	if matcher == nil || len(pairs) == 0 {
+		return pairs, 0
+	}
+	nameIdx := make(map[string]int, len(snippets))
+	for i, s := range snippets {
+		nameIdx[s.Name] = i
+	}
+	kept := make([]report.Pair, 0, len(pairs))
+	ignored := 0
+	for _, p := range pairs {
+		if matcher.Match(p.NameA, p.NameB) {
+			ignored++
+			i, okA := nameIdx[p.NameA]
+			j, okB := nameIdx[p.NameB]
+			if okA && okB {
+				matrix[i][j] = 0
+				matrix[j][i] = 0
+			}
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return kept, ignored
 }
 
 func usage() {

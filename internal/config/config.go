@@ -1,14 +1,18 @@
 // Package config loads optional .codetwin.json from the working directory.
 // The file lets users override built-in flag defaults, ignore specific files
-// or directories from the scan, and strip lines matching regex patterns
-// before tokenization.
+// or directories from the scan, strip lines matching regex patterns before
+// tokenization, and silence individual false-positive pairs.
 //
 // Schema (all fields optional):
 //
 //	{
 //	  "defaults": { "threshold": 0.5, "preview": true, ... },
 //	  "ignore_paths":    ["vendor/**", "*_test.go", "migrations/"],
-//	  "ignore_patterns": ["^\\s*log\\.(info|debug)\\("]
+//	  "ignore_patterns": ["^\\s*log\\.(info|debug)\\("],
+//	  "ignore_pairs": [
+//	    {"a": "auth/handler.go parseRequest",
+//	     "b": "api/middleware.go parseRequest"}
+//	  ]
 //	}
 //
 // CLI flags always win over `defaults`. Path globs use the small subset of
@@ -32,9 +36,10 @@ const Filename = ".codetwin.json"
 // Config mirrors the on-disk JSON schema. All fields are optional; nil
 // pointers in Defaults distinguish "not specified" from "set to zero".
 type Config struct {
-	Defaults       *Defaults `json:"defaults,omitempty"`
-	IgnorePaths    []string  `json:"ignore_paths,omitempty"`
-	IgnorePatterns []string  `json:"ignore_patterns,omitempty"`
+	Defaults       *Defaults    `json:"defaults,omitempty"`
+	IgnorePaths    []string     `json:"ignore_paths,omitempty"`
+	IgnorePatterns []string     `json:"ignore_patterns,omitempty"`
+	IgnorePairs    []IgnorePair `json:"ignore_pairs,omitempty"`
 }
 
 // Defaults overrides built-in flag defaults. Using pointers so the absence

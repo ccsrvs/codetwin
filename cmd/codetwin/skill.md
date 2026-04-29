@@ -103,8 +103,9 @@ five biggest refactor opportunities.
 ### Configuration file (`.codetwin.json`)
 
 If a `.codetwin.json` exists in the current working directory, codetwin
-reads it for default flag overrides, files to ignore, and lines/regexes to
-strip before tokenization. CLI flags always win over the `defaults` block.
+reads it for default flag overrides, files to ignore, lines/regexes to
+strip before tokenization, and individual false-positive pairs to silence.
+CLI flags always win over the `defaults` block.
 
 ```json
 {
@@ -124,6 +125,10 @@ strip before tokenization. CLI flags always win over the `defaults` block.
   "ignore_patterns": [
     "^\\s*log\\.(info|debug|warn|error)\\(",
     "^\\s*println!\\("
+  ],
+  "ignore_pairs": [
+    {"a": "auth/handler.go parseRequest",
+     "b": "api/middleware.go parseRequest"}
   ]
 }
 ```
@@ -141,6 +146,21 @@ strip before tokenization. CLI flags always win over the `defaults` block.
 Lines matching any pattern are stripped before tokenization, like comments.
 Useful for filtering out logging boilerplate that would otherwise inflate
 similarity scores.
+
+**`ignore_pairs`** — silence one specific pair as a confirmed false positive
+while keeping both files scannable against the rest of the corpus. Each
+entry has two endpoints; a pair is dropped (from both pair output AND
+clustering) when its two snippets match the endpoints in either order.
+
+- `"path/to/file.go"` — any chunk in that file (path uses the same globs as `ignore_paths`)
+- `"path/to/file.go Func"` — only chunks where the splitter detected symbol `Func`
+- `"**/*_generated.go"` — any chunk in any generated file
+
+Do NOT include line ranges (`:15-30`) — codetwin strips them before
+matching so entries survive routine edits that shift line numbers.
+Reach for `ignore_pairs` when `ignore_paths` is too coarse (the file has
+legitimate matches against other files) and `ignore_patterns` doesn't
+help (the noise isn't a per-line shape).
 
 When you scan multiple paths and one is nested inside another (e.g.
 `./src ./src/utils`), only the outer path is walked — no double-counting.
@@ -281,5 +301,6 @@ codetwin --preview --threshold 0.40 ./testdata
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |
 | Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
 | Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
+| One specific pair is a confirmed false positive | Add `ignore_pairs` (keeps both files scannable against everything else) |
 | 100% scores on tiny snippets that aren't real duplicates | Add `--min-confidence-lines 20` — short matches lose proportional score |
 | Build errors | Run `go test ./...` first to isolate the broken package |

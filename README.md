@@ -124,8 +124,8 @@ items per section.
 ## Configuration
 
 Drop a `.codetwin.json` file in the directory you run codetwin from to set
-defaults, ignore files, or strip lines before tokenization. CLI flags
-always win over config defaults.
+defaults, ignore files, strip lines before tokenization, or silence
+individual false-positive pairs. CLI flags always win over config defaults.
 
 ```json
 {
@@ -145,6 +145,10 @@ always win over config defaults.
   "ignore_patterns": [
     "^\\s*log\\.(info|debug|warn|error)\\(",
     "^\\s*println!\\("
+  ],
+  "ignore_pairs": [
+    {"a": "internal/foo/util.go",         "b": "internal/bar/util.go"},
+    {"a": "auth/handler.go parseRequest", "b": "api/middleware.go parseRequest"}
   ]
 }
 ```
@@ -172,7 +176,23 @@ Useful for filtering out boilerplate that would otherwise inflate scores
 expressions with `(?m)` multi-line mode automatically applied so `^` and
 `$` anchor on each line.
 
-## Performance
+### Pair ignores (`ignore_pairs`)
+
+Use this when a specific match is a confirmed false positive but you still
+want both files scanned against everything else. Each entry names two
+endpoints; a pair is suppressed when its two snippets match the endpoints
+in either order. Suppression also prevents DBSCAN from grouping the two
+snippets in a cluster.
+
+| Endpoint               | Matches                                                       |
+|------------------------|---------------------------------------------------------------|
+| `path/to/file.go`      | any chunk in that file (path uses the same globs as `ignore_paths`) |
+| `path/to/file.go Func` | only chunks where the splitter detected symbol `Func`         |
+| `**/*_generated.go`    | any chunk in any generated file (glob on the path side)       |
+
+**Do not include line ranges** (`:15-30`). Codetwin strips the line range
+from snippet names before matching so your entries survive routine edits
+that shift line numbers.
 
 codetwin is designed to handle large repositories. A few mechanisms in
 play:
@@ -265,8 +285,9 @@ colour for CI pipelines. `--json` emits machine-readable output.
 
 **Config** (`internal/config`)
 Loads `.codetwin.json` from the working directory. Compiles `ignore_paths`
-into a glob/component matcher and `ignore_patterns` into regexes consumed by
-the tokenizer.
+into a glob/component matcher, `ignore_patterns` into regexes consumed by
+the tokenizer, and `ignore_pairs` into a post-similarity matcher applied
+between BuildMatrix and DBSCAN.
 
 ## Adding a new language
 

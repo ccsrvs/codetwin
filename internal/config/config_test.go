@@ -81,6 +81,32 @@ func TestLoad_ZeroDistinctFromMissing(t *testing.T) {
 	}
 }
 
+func TestLoad_GivenIgnorePairs_WhenParsed_ThenPopulatesField(t *testing.T) {
+	dir := t.TempDir()
+	body := `{
+		"ignore_pairs": [
+			{"a": "internal/foo/util.go", "b": "internal/bar/util.go"},
+			{"a": "auth/handler.go parseRequest", "b": "api/middleware.go parseRequest"}
+		]
+	}`
+	if err := os.WriteFile(filepath.Join(dir, Filename), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(c.IgnorePairs) != 2 {
+		t.Fatalf("ignore_pairs: got %d entries, want 2", len(c.IgnorePairs))
+	}
+	if c.IgnorePairs[0].A != "internal/foo/util.go" || c.IgnorePairs[0].B != "internal/bar/util.go" {
+		t.Errorf("entry[0]: got %+v", c.IgnorePairs[0])
+	}
+	if c.IgnorePairs[1].A != "auth/handler.go parseRequest" {
+		t.Errorf("entry[1].A: got %q", c.IgnorePairs[1].A)
+	}
+}
+
 func TestLoad_BadJSONErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, Filename), []byte("not valid json"), 0o644); err != nil {
