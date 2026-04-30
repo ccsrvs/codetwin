@@ -485,6 +485,83 @@ func TestJavaRebodyAsHelper_NoBrace(t *testing.T) {
 	}
 }
 
+// TestSynthesizeJava_ConfidenceWithBLongerThanA covers the
+// `bLines > maxLines` branch in synthesizeJava — when B is the longer
+// snippet, B's line count drives the denominator.
+func TestSynthesizeJava_ConfidenceWithBLongerThanA(t *testing.T) {
+	a := scan.Snippet{
+		Name: "X.java:1-3 foo", Lang: tokenizer.Java,
+		Code: "    public void foo() {\n        a();\n    }",
+	}
+	b := scan.Snippet{
+		Name: "Y.java:1-5 bar", Lang: tokenizer.Java,
+		Code: "    public void bar() {\n        a();\n        b();\n        c();\n    }",
+	}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line; alignment found none")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	// B has 5 lines, A has 3. If A's 3 lines drove the denominator,
+	// confidence would be CommonLines/3, much higher than CommonLines/5.
+	if s.Confidence >= 0.7 {
+		t.Errorf("Confidence = %v; expected B's line count (5) to drive denominator", s.Confidence)
+	}
+}
+
+// TestJavaHelperHeader_WhitespaceBetweenNameAndParen covers the
+// `for nameEnd > 0 && (... ' ' || '\t' ...)` walk-back-over-space loop
+// (lines 284-286): an unusual `methodName ()` with whitespace before
+// the parameter list still gets the name token replaced cleanly.
+func TestJavaHelperHeader_WhitespaceBetweenNameAndParen(t *testing.T) {
+	got, ok := javaHelperHeader("    public void foo  () {\n        a();\n    }", "extracted_h")
+	if !ok {
+		t.Fatal("javaHelperHeader returned ok=false")
+	}
+	if !strings.Contains(got, "extracted_h  ()") {
+		t.Errorf("whitespace before paren not preserved or name not replaced: %q", got)
+	}
+	if strings.Contains(got, "foo  ()") {
+		t.Errorf("original method name not replaced: %q", got)
+	}
+}
+
+// TestJavaHelperHeader_ParenWithoutPrecedingIdent covers the
+// `nameStart == nameEnd` rejection branch (lines 291-293): when the
+// `(` isn't preceded by an identifier (e.g. `)(`, `}(`).
+func TestJavaHelperHeader_ParenWithoutPrecedingIdent(t *testing.T) {
+	if _, ok := javaHelperHeader("    )(args)", "extracted_h"); ok {
+		t.Error("expected ok=false when no identifier precedes `(`")
+	}
+}
+
+// TestJavaRebodyAsHelper_LeadingBlankLineSkipped exercises the
+// `TrimSpace(l) == ""` continue inside the header-indent detection
+// loop (lines 310-311): a leading blank line shouldn't be mistaken
+// for the header.
+func TestJavaRebodyAsHelper_LeadingBlankLineSkipped(t *testing.T) {
+	input := "\n    public void foo() {\n        a();\n    }"
+	got := javaRebodyAsHelper(input)
+	if !strings.Contains(got, "    a();\n") {
+		t.Errorf("body line `a();` not dedented to 4-space indent. Got:\n%s", got)
+	}
+}
+
+// TestJavaRebodyAsHelper_BraceOnHeaderLineWithTrailingContent covers
+// the `afterBrace != ""` branch (lines 335-337): when the opening `{`
+// shares a line with body content (`void foo() { a();`), that
+// trailing content becomes the first body line.
+func TestJavaRebodyAsHelper_BraceOnHeaderLineWithTrailingContent(t *testing.T) {
+	input := "    public void foo() { a();\n        b();\n    }"
+	got := javaRebodyAsHelper(input)
+	if !strings.HasPrefix(got, "a();\n") {
+		t.Errorf("post-brace content should be the first body line. Got:\n%s", got)
+	}
+}
+
 // TestSynthesize_JavaCrossLanguage_Rejected verifies the upstream
 // cross-language guard fires before reaching synthesizeJava.
 func TestSynthesize_JavaCrossLanguage_Rejected(t *testing.T) {

@@ -166,3 +166,60 @@ func TestBlame_TimeIsParsedAsUnix(t *testing.T) {
 		t.Errorf("FirstTime %v looks suspiciously old (test only just ran)", br.FirstTime)
 	}
 }
+
+// TestUpdateRange_DirectBranchCoverage exercises every branch of
+// updateRange directly: zero-time skip, first-record bootstrap,
+// earlier-than-first ("before") replacement, later-than-last
+// ("after") replacement, and the no-op middle case.
+func TestUpdateRange_DirectBranchCoverage(t *testing.T) {
+	t1, _ := time.Parse(time.RFC3339, "2024-01-01T00:00:00Z")
+	t2, _ := time.Parse(time.RFC3339, "2024-06-01T00:00:00Z")
+	t3, _ := time.Parse(time.RFC3339, "2024-12-01T00:00:00Z")
+
+	t.Run("zero time is skipped", func(t *testing.T) {
+		var br BlameRange
+		have := false
+		updateRange(&br, &have, "abc", "alice", time.Time{})
+		if have {
+			t.Errorf("zero-time record should not have set have=true")
+		}
+	})
+
+	t.Run("first record bootstraps both first and last", func(t *testing.T) {
+		var br BlameRange
+		have := false
+		updateRange(&br, &have, "sha1", "alice", t2)
+		if !have {
+			t.Fatal("expected have=true after first record")
+		}
+		if br.FirstCommit != "sha1" || br.LastCommit != "sha1" {
+			t.Errorf("first record should set both First and Last; got %+v", br)
+		}
+	})
+
+	t.Run("earlier record replaces First, leaves Last", func(t *testing.T) {
+		var br BlameRange
+		have := false
+		updateRange(&br, &have, "sha2", "bob", t2)   // bootstrap
+		updateRange(&br, &have, "sha1", "alice", t1) // earlier
+		if br.FirstCommit != "sha1" {
+			t.Errorf("earlier time should replace First, got FirstCommit=%q", br.FirstCommit)
+		}
+		if br.LastCommit != "sha2" {
+			t.Errorf("Last should be unchanged, got LastCommit=%q", br.LastCommit)
+		}
+	})
+
+	t.Run("later record replaces Last, leaves First", func(t *testing.T) {
+		var br BlameRange
+		have := false
+		updateRange(&br, &have, "sha2", "bob", t2)     // bootstrap
+		updateRange(&br, &have, "sha3", "carol", t3)   // later
+		if br.LastCommit != "sha3" {
+			t.Errorf("later time should replace Last, got LastCommit=%q", br.LastCommit)
+		}
+		if br.FirstCommit != "sha2" {
+			t.Errorf("First should be unchanged, got FirstCommit=%q", br.FirstCommit)
+		}
+	})
+}
