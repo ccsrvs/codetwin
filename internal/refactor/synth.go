@@ -32,9 +32,11 @@ func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 	switch a.Lang {
 	case tokenizer.Go:
 		return synthesizeGo(a, b, pairID, al)
+	case tokenizer.Python:
+		return synthesizePython(a, b, pairID, al)
 	default:
 		return Suggestion{Note: fmt.Sprintf(
-			"unsupported language: %s (Go is the only supported emitter in v1)", a.Lang)}
+			"unsupported language: %s (v1 supports Go and Python)", a.Lang)}
 	}
 }
 
@@ -80,7 +82,7 @@ func synthesizeGo(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 	helperName := goHelperName(a, pairID)
 	header := goHelperHeader(a.Code, helperName)
 	body := goRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes)
+	divergence := formatDivergenceComment(al.Holes, "//")
 
 	src := strings.Builder{}
 	src.WriteString("// codetwin: starter helper extracted from " +
@@ -112,6 +114,170 @@ func synthesizeGo(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		HelperSrc:  src.String(),
 		Confidence: confidence,
 	}
+}
+
+// synthesizePython produces a starter helper for two Python
+// function-level snippets. Modelled on synthesizeGo, adapted for
+// Python's indentation-based structure.
+//
+// Rejection rules:
+//   - Alignment must have at least one common span.
+//   - Holes must agree on `return`/`break`/`continue`/`raise`/`yield`
+//     presence — control-flow asymmetry signals the snippets do
+//     meaningfully different things and a starter helper would mislead.
+//
+// The Python splitter only emits named `def`s (no analogue of Go's
+// goroutine/defer chunks), so anonymous-chunk rejection is unnecessary.
+// Class methods and free functions are treated uniformly: the helper
+// is always emitted as a top-level function, with `self`/`cls` carried
+// through as ordinary parameters when the source was a method. The
+// human (or Claude skill) decides whether to lift the helper to a
+// shared module.
+func synthesizePython(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between snippets"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
+		[]string{"return", "break", "continue", "raise", "yield"}); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
+	header, ok := pythonHelperHeader(a.Code, helperName)
+	if !ok {
+		return Suggestion{Note: "rejected: snippet has no recognisable `def` line"}
+	}
+	body := pythonRebodyAsHelper(a.Code)
+	divergence := formatDivergenceComment(al.Holes, "#")
+
+	src := strings.Builder{}
+	src.WriteString("# codetwin: starter helper extracted from " +
+		nonEmpty(SymbolForSnippet(a), "<anon>") +
+		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
+		" (pair " + pairID + ").\n")
+	src.WriteString("# This is a literal copy of the first snippet's body. Review the\n")
+	src.WriteString("# divergences below and parameterize as needed before relying on it.\n")
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(header)
+	src.WriteString("\n")
+	src.WriteString(body)
+
+	confidence := 0.0
+	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	maxLines := aLines
+	if bLines > maxLines {
+		maxLines = bLines
+	}
+	if maxLines > 0 {
+		confidence = float64(al.CommonLines()) / float64(maxLines)
+	}
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: confidence,
+	}
+}
+
+// pythonHelperHeader builds the helper's `def` line by finding the
+// first non-blank/non-comment/non-decorator line of snippet A,
+// stripping its leading whitespace, and replacing the function name
+// with helperName. Preserves `async def`. Returns ok=false when no
+// recognisable def line is found.
+//
+// TODO: multi-line `def name(\n    a, b,\n):` signatures aren't
+// exercised by v1 fixtures; revisit when one shows up. The single-line
+// case is enough for the simple/medium/advanced tiers.
+func pythonHelperHeader(aCode, helperName string) (string, bool) {
+	for _, l := range strings.Split(aCode, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
+			continue
+		}
+		rest := t
+		prefix := ""
+		if strings.HasPrefix(rest, "async ") {
+			prefix = "async "
+			rest = strings.TrimSpace(rest[len("async "):])
+		}
+		if !strings.HasPrefix(rest, "def ") {
+			return "", false
+		}
+		afterDef := rest[len("def "):]
+		nameEnd := 0
+		for nameEnd < len(afterDef) && isIdentByte(afterDef[nameEnd]) {
+			nameEnd++
+		}
+		return prefix + "def " + helperName + afterDef[nameEnd:], true
+	}
+	return "", false
+}
+
+// pythonRebodyAsHelper returns snippet A's body re-indented for a
+// top-level helper: the body's minimum non-blank indent is stripped
+// and each non-blank line is re-indented at 4 spaces. Decorators on
+// the original chunk are dropped — the helper does not carry
+// user-defined decorators forward (they may be undefined at the
+// helper's scope).
+func pythonRebodyAsHelper(aCode string) string {
+	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
+
+	defIdx := -1
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
+			continue
+		}
+		if strings.HasPrefix(t, "def ") || strings.HasPrefix(t, "async def ") {
+			defIdx = i
+			break
+		}
+		break
+	}
+	if defIdx < 0 || defIdx == len(lines)-1 {
+		return ""
+	}
+	body := lines[defIdx+1:]
+
+	minIndent := -1
+	for _, l := range body {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		ind := 0
+		for ind < len(l) && (l[ind] == ' ' || l[ind] == '\t') {
+			ind++
+		}
+		if minIndent == -1 || ind < minIndent {
+			minIndent = ind
+		}
+	}
+	if minIndent < 0 {
+		minIndent = 0
+	}
+
+	out := strings.Builder{}
+	for _, l := range body {
+		if strings.TrimSpace(l) == "" {
+			out.WriteString("\n")
+			continue
+		}
+		stripped := l
+		for i := 0; i < minIndent && len(stripped) > 0; i++ {
+			if stripped[0] == ' ' || stripped[0] == '\t' {
+				stripped = stripped[1:]
+			} else {
+				break
+			}
+		}
+		out.WriteString("    ")
+		out.WriteString(stripped)
+		out.WriteString("\n")
+	}
+	return out.String()
 }
 
 // rejectAnonymousChunk fires when either snippet's chunk symbol is one
@@ -176,7 +342,13 @@ func goReceiverType(code string) string {
 // Holes where both sides share the same control-flow keyword are
 // allowed — the divergence is in the surrounding expression.
 func rejectControlFlowAsymmetry(holes []Hole) (string, bool) {
-	keywords := []string{"return", "break", "continue"}
+	return rejectControlFlowAsymmetryWithKeywords(holes, []string{"return", "break", "continue"})
+}
+
+// rejectControlFlowAsymmetryWithKeywords is the language-parameterised
+// form: callers pick the keyword set that's meaningful for their
+// language (Python adds `raise`/`yield`, etc.).
+func rejectControlFlowAsymmetryWithKeywords(holes []Hole, keywords []string) (string, bool) {
 	for _, h := range holes {
 		for _, kw := range keywords {
 			aHas := containsKeyword(h.AText, kw)
@@ -222,12 +394,19 @@ func isIdentByte(b byte) bool {
 // reject anonymous chunks, but the sanitisation keeps the name safe
 // regardless).
 func goHelperName(a scan.Snippet, pairID string) string {
-	sym := SymbolForSnippet(a)
-	if sym == "" {
-		sym = "fn"
+	return sanitizeHelperName(SymbolForSnippet(a), pairID)
+}
+
+// sanitizeHelperName composes `extracted_<symbol>_<pairID>`, replacing
+// any non-identifier byte with `_`. Used by every per-language emitter
+// (Go, Python, …) since both languages share the same identifier
+// alphabet for our purposes.
+func sanitizeHelperName(symbol, pairID string) string {
+	if symbol == "" {
+		symbol = "fn"
 	}
 	out := strings.Builder{}
-	for _, r := range sym {
+	for _, r := range symbol {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
 			out.WriteRune(r)
@@ -287,18 +466,19 @@ func goRebodyAsHelper(aCode string) string {
 	return strings.Join(body, "\n") + "\n"
 }
 
-// formatDivergenceComment produces a `//` comment block summarising
-// the holes. Each entry shows A's text and B's text on adjacent lines
-// so the reviewer can see the divergence at a glance.
-func formatDivergenceComment(holes []Hole) string {
+// formatDivergenceComment produces a comment block summarising the
+// holes, using the caller's line-comment prefix (e.g. `//` for Go,
+// `#` for Python). Each entry shows A's text and B's text on adjacent
+// lines so the reviewer can see the divergence at a glance.
+func formatDivergenceComment(holes []Hole, commentPrefix string) string {
 	if len(holes) == 0 {
 		return ""
 	}
 	out := strings.Builder{}
-	out.WriteString("// Divergences (B vs A):\n")
+	out.WriteString(commentPrefix + " Divergences (B vs A):\n")
 	for i, h := range holes {
-		out.WriteString(fmt.Sprintf("//   #%d  A[L%d-%d]: %s\n", i+1, h.AStart, h.AEnd-1, oneLine(h.AText)))
-		out.WriteString(fmt.Sprintf("//        B[L%d-%d]: %s\n", h.BStart, h.BEnd-1, oneLine(h.BText)))
+		out.WriteString(fmt.Sprintf("%s   #%d  A[L%d-%d]: %s\n", commentPrefix, i+1, h.AStart, h.AEnd-1, oneLine(h.AText)))
+		out.WriteString(fmt.Sprintf("%s        B[L%d-%d]: %s\n", commentPrefix, h.BStart, h.BEnd-1, oneLine(h.BText)))
 	}
 	return out.String()
 }

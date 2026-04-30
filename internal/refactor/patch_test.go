@@ -71,6 +71,61 @@ func TestBuildPatch_GoSimple_AppliesClean(t *testing.T) {
 	}
 }
 
+// TestBuildPatch_PythonSimple_AppliesClean is the Python round-trip:
+// synthesize the helper for the simple Python fixture, build the
+// diff against a temp git repo, and confirm `git apply` accepts it
+// and produces a file containing the new `def extracted_…` helper.
+func TestBuildPatch_PythonSimple_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippets(t, "../../testdata/refactor/python/simple")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/python/simple/a.py")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.py")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.py: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.py", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s",
+			err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	if !strings.Contains(string(patched), "def extracted_price_with_tax_a_deadbeef") {
+		t.Errorf("patched file missing Python helper. Content:\n%s", patched)
+	}
+	if !strings.Contains(string(patched), "# Divergences (B vs A):") {
+		t.Errorf("patched file missing `#`-style divergence block")
+	}
+}
+
 func TestBuildPatch_EmptySuggestion_ReturnsEmpty(t *testing.T) {
 	out, err := BuildPatch("/nonexistent/path", Suggestion{Note: "rejected: ..."})
 	if err != nil {

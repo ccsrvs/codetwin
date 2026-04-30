@@ -149,9 +149,105 @@ func TestRejectControlFlowAsymmetry_BothSidesHaveReturn(t *testing.T) {
 	}
 }
 
+// TestRejectControlFlowAsymmetry_PythonKeywords covers the Python
+// emitter's extended keyword set: `raise` and `yield` count as
+// control-flow asymmetry the same way `return`/`break`/`continue` do.
+func TestRejectControlFlowAsymmetry_PythonKeywords(t *testing.T) {
+	pyKeywords := []string{"return", "break", "continue", "raise", "yield"}
+	cases := []struct {
+		name string
+		hole Hole
+		want bool // true = rejected
+	}{
+		{"raise asymmetric", Hole{AText: "raise ValueError(\"x\")", BText: "log.error(\"x\")"}, true},
+		{"yield asymmetric", Hole{AText: "yield row", BText: "rows.append(row)"}, true},
+		{"raise symmetric", Hole{AText: "raise A()", BText: "raise B()"}, false},
+		{"yield symmetric", Hole{AText: "yield a", BText: "yield b"}, false},
+		{"unrelated", Hole{AText: "x = 1", BText: "x = 2"}, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := rejectControlFlowAsymmetryWithKeywords([]Hole{c.hole}, pyKeywords)
+			rejected := !ok
+			if rejected != c.want {
+				t.Errorf("rejected=%v, want %v", rejected, c.want)
+			}
+		})
+	}
+}
+
+// TestSynthesize_PythonAcceptTiers covers the simple/medium/advanced
+// Python fixtures. Mirrors TestSynthesize_GoAcceptTiers but checks the
+// `#`-comment block and the dedented helper body that drops out of
+// pythonRebodyAsHelper.
+func TestSynthesize_PythonAcceptTiers(t *testing.T) {
+	cases := []struct {
+		dir           string
+		expectInSrc   []string
+		minConfidence float64
+	}{
+		{
+			dir: "../../testdata/refactor/python/simple",
+			expectInSrc: []string{
+				"def extracted_price_with_tax_a_",
+				"# Divergences (B vs A):",
+				"0.07",
+				"0.085",
+			},
+			minConfidence: 0.5,
+		},
+		{
+			dir: "../../testdata/refactor/python/medium",
+			expectInSrc: []string{
+				"def extracted_format_user_a_",
+				`"user:"`,
+				`"admin:"`,
+				`"(active)"`,
+				`"(privileged)"`,
+			},
+			minConfidence: 0.4,
+		},
+		{
+			dir: "../../testdata/refactor/python/advanced",
+			expectInSrc: []string{
+				"def extracted_fetch_a_",
+				`"/v1"`,
+				`"/v2"`,
+			},
+			minConfidence: 0.4,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.dir, func(t *testing.T) {
+			a, b := loadSnippets(t, c.dir)
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if s.HelperSrc == "" {
+				t.Fatal("HelperSrc empty")
+			}
+			if s.Confidence < c.minConfidence {
+				t.Errorf("Confidence = %.2f, want >= %.2f", s.Confidence, c.minConfidence)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+			if !validGoIdent(s.HelperName) {
+				t.Errorf("HelperName %q is not a valid identifier", s.HelperName)
+			}
+		})
+	}
+}
+
 func TestSynthesize_NonGoFixtures_Unsupported(t *testing.T) {
 	cases := []string{
-		"../../testdata/refactor/python/simple",
 		"../../testdata/refactor/js/simple",
 		"../../testdata/refactor/rust/simple",
 		"../../testdata/refactor/java/simple",

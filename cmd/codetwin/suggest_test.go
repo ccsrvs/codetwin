@@ -165,7 +165,7 @@ func TestBuildSuggestionMap_GoFixture_PopulatesPatch(t *testing.T) {
 	}
 }
 
-func TestBuildSuggestionMap_PythonFixture_PopulatesNote(t *testing.T) {
+func TestBuildSuggestionMap_PythonFixture_PopulatesPatch(t *testing.T) {
 	snips := loadFixtureSnippets(t,
 		"../../testdata/refactor/python/simple/a.py",
 		"../../testdata/refactor/python/simple/b.py",
@@ -174,6 +174,38 @@ func TestBuildSuggestionMap_PythonFixture_PopulatesNote(t *testing.T) {
 		ID: report.PairID(snips[0].Name, snips[1].Name),
 		NameA: snips[0].Name, NameB: snips[1].Name,
 		LangA: "python", LangB: "python",
+	}
+	out := buildSuggestionMap([]report.Pair{pair}, snips)
+	patch, ok := out[pair.ID]
+	if !ok {
+		t.Fatalf("no patch produced for pair %s", pair.ID)
+	}
+	if patch.UnifiedDiff == "" {
+		t.Errorf("expected UnifiedDiff to be set; Note=%q", patch.Note)
+	}
+	if !strings.Contains(patch.UnifiedDiff, "def extracted_price_with_tax_a_") {
+		t.Errorf("expected Python helper def in UnifiedDiff. Got:\n%s", patch.UnifiedDiff)
+	}
+	if !strings.Contains(patch.UnifiedDiff, "# Divergences (B vs A):") {
+		t.Errorf("expected Python-style `#` divergence header. Got:\n%s", patch.UnifiedDiff)
+	}
+	if patch.HelperName == "" || !strings.HasPrefix(patch.HelperName, "extracted_") {
+		t.Errorf("HelperName = %q, want extracted_… prefix", patch.HelperName)
+	}
+	if patch.Confidence <= 0 {
+		t.Errorf("Confidence = %v, want > 0", patch.Confidence)
+	}
+}
+
+func TestBuildSuggestionMap_JSFixture_PopulatesNote(t *testing.T) {
+	snips := loadFixtureSnippets(t,
+		"../../testdata/refactor/js/simple/a.js",
+		"../../testdata/refactor/js/simple/b.js",
+	)
+	pair := report.Pair{
+		ID: report.PairID(snips[0].Name, snips[1].Name),
+		NameA: snips[0].Name, NameB: snips[1].Name,
+		LangA: "javascript", LangB: "javascript",
 	}
 	out := buildSuggestionMap([]report.Pair{pair}, snips)
 	patch, ok := out[pair.ID]

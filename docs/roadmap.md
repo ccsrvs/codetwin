@@ -21,7 +21,7 @@ commits `159a298`, `59fe97f`, `f53a739` on
 | Language | Synthesizer | Notes |
 |---|---|---|
 | Go | **Shipped** | Starter helper + divergence comment block. |
-| Python | Fixture in place | Returns `unsupported language: python` until an emitter ships. |
+| Python | **Shipped** | Starter helper with `#`-comment divergence block; class methods carried through as top-level helpers with `self`/`cls` as ordinary parameters. |
 | JavaScript / TypeScript | Fixture in place | Returns `unsupported language: javascript`. |
 | Rust | Fixture in place | Returns `unsupported language: rust`. |
 | Java | Fixture in place | Returns `unsupported language: java`. |
@@ -222,12 +222,13 @@ The original recommendation was **1 + 2 + 3** as the headline narrative:
 history, and only complains about the duplication you just introduced."*
 **That triad is now shipped.**
 
-Bet **4** (refactor patches) shipped as a Go-only v1 — codetwin now
+Bet **4** (refactor patches) shipped Go in v1 and now Python — codetwin
 goes from reporter to *starter generator*: it emits a unified diff
 that adds a helper extracted from a clone pair, with a comment block
-listing every divergence. Per-language emitters for Python/JS/TS/
-Rust/Java/Elixir are the natural follow-up commits; fixtures and
-"unsupported language" CLI contracts are already in place.
+listing every divergence. Per-language emitters for JS/TS/Rust/Java
+are the natural next commits (Elixir additionally needs a function-
+level splitter); fixtures and "unsupported language" CLI contracts
+are already in place.
 
 The next bet to consider is **5** (clone watchlist + drift alerts) or
 **6** (cross-repo / org-level scanning), depending on whether the
