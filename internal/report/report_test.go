@@ -689,3 +689,194 @@ func TestPairID_Distinct(t *testing.T) {
 	}
 }
 
+
+// ── Sort-comparator coverage gaps ────────────────────────────────────────────
+//
+// These tests target the 0%-covered comparators (cmpPairNameB,
+// cmpClusterScoreAsc, cmpClusterSizeAsc, cmpClusterFirstMember,
+// firstMember) and the BuildMatchPreview / tierFor / printPreview /
+// sortAndLimit branches the existing Prepare/Render tests don't hit.
+
+// TestPrepare_SortByName_PairsTieBreakOnNameB drives the cmpPairNameB
+// tiebreaker: when two pairs share NameA, ordering must fall through
+// to NameB (alphabetical).
+func TestPrepare_SortByName_PairsTieBreakOnNameB(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "alpha", NameB: "delta", Score: 0.5},
+		{NameA: "alpha", NameB: "beta", Score: 0.5},
+		{NameA: "alpha", NameB: "gamma", Score: 0.5},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
+	wantNameB := []string{"beta", "delta", "gamma"}
+	for i, w := range wantNameB {
+		if out[i].NameB != w {
+			t.Errorf("position %d: got NameB=%q, want %q", i, out[i].NameB, w)
+		}
+	}
+}
+
+// TestPrepare_ClustersSortByScoreAsc covers cmpClusterScoreAsc.
+func TestPrepare_ClustersSortByScoreAsc(t *testing.T) {
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"a"}, Score: 0.9},
+		{ID: 1, Members: []string{"b"}, Score: 0.3},
+		{ID: 2, Members: []string{"c"}, Score: 0.6},
+	}
+	_, out := Prepare(nil, clusters, Options{Sort: SortScoreAsc})
+	wantIDs := []int{1, 2, 0}
+	for i, id := range wantIDs {
+		if out[i].ID != id {
+			t.Errorf("position %d: got ID=%d, want %d", i, out[i].ID, id)
+		}
+	}
+}
+
+// TestPrepare_ClustersSortBySizeAsc covers cmpClusterSizeAsc.
+func TestPrepare_ClustersSortBySizeAsc(t *testing.T) {
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"a", "b", "c"}},
+		{ID: 1, Members: []string{"d"}},
+		{ID: 2, Members: []string{"e", "f"}},
+	}
+	_, out := Prepare(nil, clusters, Options{Sort: SortSizeAsc})
+	wantIDs := []int{1, 2, 0}
+	for i, id := range wantIDs {
+		if out[i].ID != id {
+			t.Errorf("position %d: got ID=%d, want %d", i, out[i].ID, id)
+		}
+	}
+}
+
+// TestPrepare_ClustersSortByName covers cmpClusterFirstMember and the
+// firstMember helper. Clusters with no members must not panic and
+// should sort to the front (firstMember returns "").
+func TestPrepare_ClustersSortByName(t *testing.T) {
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"zeta", "y"}},
+		{ID: 1, Members: []string{"alpha", "x"}},
+		{ID: 2, Members: []string{"mu", "w"}},
+		{ID: 3, Members: nil}, // exercises firstMember's empty-slice branch
+	}
+	_, out := Prepare(nil, clusters, Options{Sort: SortName})
+	// Empty-members cluster (firstMember == "") sorts first, then alphabetical.
+	wantIDs := []int{3, 1, 2, 0}
+	for i, id := range wantIDs {
+		if out[i].ID != id {
+			t.Errorf("position %d: got ID=%d, want %d", i, out[i].ID, id)
+		}
+	}
+}
+
+// TestFirstMember_DirectlyCoversBothBranches calls the helper with
+// both an empty Members slice and a populated one to lock in the
+// contract (and cover both branches even if no Sort path exercises
+// them).
+func TestFirstMember_DirectlyCoversBothBranches(t *testing.T) {
+	if got := firstMember(Cluster{}); got != "" {
+		t.Errorf("firstMember on empty = %q, want \"\"", got)
+	}
+	if got := firstMember(Cluster{Members: []string{"first", "second"}}); got != "first" {
+		t.Errorf("firstMember on populated = %q, want \"first\"", got)
+	}
+}
+
+// TestPrepare_LimitTriggersTopKHeap sets a limit smaller than the
+// pair count so sortAndLimit's heap-eviction branch fires (the
+// `else if less(items[i], h.items[0])` arm).
+func TestPrepare_LimitTriggersTopKHeap(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "a", Score: 0.1},
+		{NameA: "b", Score: 0.9},
+		{NameA: "c", Score: 0.2},
+		{NameA: "d", Score: 0.8},
+		{NameA: "e", Score: 0.3},
+		{NameA: "f", Score: 0.7},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortScore, Limit: 2, Threshold: 0})
+	if len(out) != 2 {
+		t.Fatalf("limit=2 should yield 2 pairs, got %d", len(out))
+	}
+	// Best two by score-desc are b (0.9) and d (0.8).
+	wantNames := []string{"b", "d"}
+	for i, w := range wantNames {
+		if out[i].NameA != w {
+			t.Errorf("position %d: got NameA=%q, want %q", i, out[i].NameA, w)
+		}
+	}
+}
+
+// TestTierFor_BoundariesAndFallback covers each tier band plus the
+// final-tier fallback (the `return tiers[len(tiers)-1]` line).
+func TestTierFor_BoundariesAndFallback(t *testing.T) {
+	cases := []struct {
+		score float64
+		want  string
+	}{
+		{0.99, "exact_clone"},
+		{0.95, "near_clone"}, // boundary: > 0.95 is exact, == 0.95 falls to next
+		{0.86, "near_clone"},
+		{0.85, "strong_clone"},
+		{0.66, "strong_clone"},
+		{0.65, "refactor_candidate"},
+		{0.46, "refactor_candidate"},
+		{0.45, "weak_similarity"},
+		{0.0, "weak_similarity"},
+		{-1.0, "weak_similarity"}, // below -1 above-threshold → fallback path
+	}
+	for _, c := range cases {
+		if got := tierFor(c.score).json; got != c.want {
+			t.Errorf("tierFor(%v).json = %q, want %q", c.score, got, c.want)
+		}
+	}
+}
+
+// TestBuildMatchPreview_FirstTokOutOfRange covers the
+// `firstTok < 0 || firstTok >= len(tokenLines)` defensive branch.
+func TestBuildMatchPreview_FirstTokOutOfRange(t *testing.T) {
+	code := strings.Repeat("line\n", 20) // 20-line chunk, exceeds maxLines
+	tokenLines := []int{1, 2, 3}         // few tokens
+	pv := BuildMatchPreview(code, tokenLines, 100, 999, 999, 5, 5)
+	if pv.StartLine != 100 {
+		t.Errorf("StartLine = %d, want chunkStartLine=100", pv.StartLine)
+	}
+	if got := strings.Count(pv.Text, "\n"); got != 4 {
+		t.Errorf("expected 5 lines (4 newlines), got %d. Text:\n%s", got, pv.Text)
+	}
+}
+
+// TestBuildMatchPreview_EndTokClampedAndLineRangeClamped exercises
+// the endTok-overshoot, endTok<firstTok, and chunkLastLine>len(chunkLines)
+// clamps inside BuildMatchPreview.
+func TestBuildMatchPreview_EndTokClampedAndLineRangeClamped(t *testing.T) {
+	code := "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n" // 10 lines
+	tokenLines := []int{1, 2, 3, 4}            // 4 tokens
+	// firstTok=3 (last valid token), lastTok=2 (smaller than firstTok)
+	// so the endTok = lastTok+k-1 path runs and the endTok<firstTok clamp fires.
+	// k=10 forces endTok past len(tokenLines), exercising the
+	// `endTok = len(tokenLines) - 1` clamp.
+	pv := BuildMatchPreview(code, tokenLines, 1, 3, 2, 10, 4)
+	if pv.Text == "" {
+		t.Errorf("expected non-empty preview, got empty")
+	}
+}
+
+// TestPrintPreview_ZeroStartLineClampsToOne covers the
+// `if start < 1 { start = 1 }` branch in printPreview.
+func TestPrintPreview_ZeroStartLineClampsToOne(t *testing.T) {
+	var buf strings.Builder
+	opts := Options{
+		Plain: true,
+		Previews: map[string]Preview{
+			"name": {StartLine: 0, Text: "first\nsecond"},
+		},
+	}
+	printPreview(&buf, "name", opts)
+	out := buf.String()
+	// First line should render with line number "   1", not "   0".
+	if !strings.Contains(out, "   1 │") {
+		t.Errorf("expected line number 1 after zero clamp, got:\n%s", out)
+	}
+	if strings.Contains(out, "   0 │") {
+		t.Errorf("zero-clamp branch did not fire, got:\n%s", out)
+	}
+}

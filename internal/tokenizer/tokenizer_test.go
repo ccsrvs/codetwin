@@ -27,14 +27,37 @@ func TestDetect_FromExtension(t *testing.T) {
 }
 
 func TestDetect_FromHeuristic(t *testing.T) {
-	if got := Detect("noext", "package main\nfunc x() {}"); got != Go {
-		t.Errorf("expected Go from heuristic, got %v", got)
+	cases := []struct {
+		name string
+		code string
+		want Language
+	}{
+		{"go via package main", "package main\nfunc x() {}", Go},
+		{"elixir defmodule", "defmodule Foo do\n  def bar, do: 1\nend", Elixir},
+		{"java public class", "public class Foo { System.out.println(\"hi\"); }", Java},
+		{"rust fn + let mut", "fn main() {\n    let mut x = 1;\n}", Rust},
+		{"python def with colon", "def foo(x):\n    return x", Python},
+		{"javascript function keyword", "function foo() { return 1; }", JavaScript},
+		{"javascript const + arrow", "const f = () => 1;", JavaScript},
+		{"unknown short text", "hello world", Unknown},
 	}
-	if got := Detect("noext", "defmodule Foo do\n  def bar, do: 1\nend"); got != Elixir {
-		t.Errorf("expected Elixir from heuristic, got %v", got)
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			if got := Detect("noext", c.code); got != c.want {
+				t.Errorf("Detect(%q) = %v, want %v", c.code, got, c.want)
+			}
+		})
 	}
-	if got := Detect("noext", "public class Foo { System.out.println(\"hi\"); }"); got != Java {
-		t.Errorf("expected Java from heuristic, got %v", got)
+}
+
+// TestTokenizeWithLines_UnknownLangFallsBackToJSPattern covers the
+// `if !ok { p = patterns[JavaScript] }` fallback inside
+// TokenizeWithLines (line 285) when an unknown language is requested.
+func TestTokenizeWithLines_UnknownLangFallsBackToJSPattern(t *testing.T) {
+	tokens, _ := TokenizeWithLines("const x = 1;", Unknown)
+	if len(tokens) == 0 {
+		t.Errorf("expected JS-pattern tokenization on Unknown lang, got 0 tokens")
 	}
 }
 

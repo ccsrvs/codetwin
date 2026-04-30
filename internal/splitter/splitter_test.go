@@ -783,3 +783,126 @@ func TestCountNonBlankLines(t *testing.T) {
 		})
 	}
 }
+
+// ── pythonScanLine direct coverage ─────────────────────────────────────────
+//
+// pythonScanLine is reachable through pythonSignatureEndLine and
+// pythonDecoratorEndLine, but most of its string-state branches
+// (triple-quote open/close, escape handling inside single/double
+// strings, end-of-line single-line-string reset) are hard to drive
+// from real fixtures. Test directly.
+
+func TestPythonScanLine_TripleDoubleOpenAndClose(t *testing.T) {
+	state := pyStCode
+	depth := 0
+	pythonScanLine(`x = """hello`, &state, &depth)
+	if state != pyStTripleDouble {
+		t.Errorf("after open: state = %v, want pyStTripleDouble", state)
+	}
+	pythonScanLine(`continued`, &state, &depth)
+	if state != pyStTripleDouble {
+		t.Errorf("mid-string state must persist across lines, got %v", state)
+	}
+	pythonScanLine(`done"""`, &state, &depth)
+	if state != pyStCode {
+		t.Errorf("after triple-double close: state = %v, want pyStCode", state)
+	}
+}
+
+func TestPythonScanLine_TripleSingleOpenAndClose(t *testing.T) {
+	state := pyStCode
+	depth := 0
+	pythonScanLine(`x = '''hello`, &state, &depth)
+	if state != pyStTripleSingle {
+		t.Errorf("after open: state = %v, want pyStTripleSingle", state)
+	}
+	pythonScanLine(`done'''`, &state, &depth)
+	if state != pyStCode {
+		t.Errorf("after triple-single close: state = %v, want pyStCode", state)
+	}
+}
+
+func TestPythonScanLine_BackslashEscapeInsideSingleQuotedString(t *testing.T) {
+	state := pyStCode
+	depth := 0
+	// Single quoted string with an escaped quote followed by the closing quote.
+	pythonScanLine(`x = 'it\'s ok' # trailing`, &state, &depth)
+	if state != pyStCode {
+		t.Errorf("string should have closed and returned to code, state = %v", state)
+	}
+}
+
+func TestPythonScanLine_BackslashEscapeInsideDoubleQuotedString(t *testing.T) {
+	state := pyStCode
+	depth := 0
+	pythonScanLine(`x = "she said \"hi\"" # trailing`, &state, &depth)
+	if state != pyStCode {
+		t.Errorf("string should have closed and returned to code, state = %v", state)
+	}
+}
+
+func TestPythonScanLine_SingleLineStringResetsAtNewline(t *testing.T) {
+	// An unterminated single-quote shouldn't poison the next line; the
+	// reset-on-newline branch (lines 253-255) flips state back to code.
+	state := pyStCode
+	depth := 0
+	pythonScanLine(`x = "unterminated`, &state, &depth)
+	if state != pyStCode {
+		t.Errorf("single-line string state should reset at newline, got %v", state)
+	}
+}
+
+func TestPythonScanLine_TopLevelColonReportedOnlyAtDepthZero(t *testing.T) {
+	state := pyStCode
+	depth := 0
+	if !pythonScanLine(`def foo(x):`, &state, &depth) {
+		t.Error("expected sawColonAtZero=true on a simple def header")
+	}
+	// `:` inside a paren stays inside (depth>0) so should NOT be reported.
+	if pythonScanLine(`def foo(x: int):`, &state, &depth) != true {
+		t.Error("the trailing `):` is at depth 0 and should be reported")
+	}
+}
+
+// TestPythonSignatureEndLine_NoColonReturnsLastIndex covers the
+// end-of-input fallback in pythonSignatureEndLine (line 285).
+func TestPythonSignatureEndLine_NoColonReturnsLastIndex(t *testing.T) {
+	lines := []string{"def foo(", "    x,"}
+	got := pythonSignatureEndLine(lines, 0)
+	if got != len(lines)-1 {
+		t.Errorf("want %d (last index), got %d", len(lines)-1, got)
+	}
+}
+
+// TestPythonDecoratorEndLine_NoCloseReturnsLastIndex covers the
+// end-of-input fallback in pythonDecoratorEndLine (line 305).
+func TestPythonDecoratorEndLine_NoCloseReturnsLastIndex(t *testing.T) {
+	// `@retry(` opens a paren that never closes — bottom of the slice
+	// is returned.
+	lines := []string{"@retry(", "    attempts=3,"}
+	got := pythonDecoratorEndLine(lines, 0)
+	if got != len(lines)-1 {
+		t.Errorf("want %d (last index), got %d", len(lines)-1, got)
+	}
+}
+
+// TestIndentLen_NonWhitespaceImmediatelyReturns covers the default
+// branch (line 316-317) where a non-space/non-tab byte is encountered.
+func TestIndentLen_NonWhitespaceImmediatelyReturns(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"no indent", 0},
+		{"  two spaces", 2},
+		{"\ttab", 4},
+		{" \tmix", 5},
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			if got := indentLen(c.in); got != c.want {
+				t.Errorf("indentLen(%q) = %d, want %d", c.in, got, c.want)
+			}
+		})
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -159,6 +160,72 @@ func TestKey_DistinctForDifferentInputs(t *testing.T) {
 		if c.different && c.a == c.b {
 			t.Errorf("%s: keys should differ but match: %q", c.name, c.a)
 		}
+	}
+}
+
+func TestHashContent_IsStableHexEncoded(t *testing.T) {
+	got := HashContent([]byte("hello world"))
+	// SHA-256 of "hello world", well-known.
+	want := "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+	if got != want {
+		t.Errorf("HashContent(\"hello world\") = %q, want %q", got, want)
+	}
+	if HashContent([]byte("hello world")) != got {
+		t.Error("HashContent must be deterministic")
+	}
+	if HashContent([]byte("hello world!")) == got {
+		t.Error("HashContent must differ for different inputs")
+	}
+	// Empty input should still produce a 64-char hex string (SHA-256 of "").
+	if got := HashContent(nil); len(got) != 64 {
+		t.Errorf("empty input should produce 64-hex string, got %d chars: %q", len(got), got)
+	}
+}
+
+// TestNilCache_GetPutSaveAreNoops covers the early-return guards on
+// every public method when called against a nil receiver — handy for
+// callers that pass a possibly-uninitialised cache without a guard.
+func TestNilCache_GetPutSaveAreNoops(t *testing.T) {
+	var c *Cache
+	if e, ok := c.Get("any"); ok || e.ContentHash != "" || e.Chunks != nil {
+		t.Errorf("nil.Get should return zero entry + false, got %+v ok=%v", e, ok)
+	}
+	c.Put("any", Entry{ContentHash: "x"})
+	if err := c.Save(t.TempDir()); err != nil {
+		t.Errorf("nil.Save should be a no-op, got error: %v", err)
+	}
+}
+
+// TestSave_CreateFails_ReturnsWrappedError covers the os.Create error
+// branch in Save by pointing at a directory that doesn't exist (so the
+// .tmp file cannot be created).
+func TestSave_CreateFails_ReturnsWrappedError(t *testing.T) {
+	c := New()
+	c.Put("k", Entry{ContentHash: "x"})
+	err := c.Save("/nonexistent/codetwin/should/not/exist")
+	if err == nil {
+		t.Fatal("expected error when target dir does not exist")
+	}
+	if !strings.Contains(err.Error(), "cache create:") {
+		t.Errorf("error %q lacks the `cache create:` prefix", err)
+	}
+}
+
+// TestLoad_OpenError_ReturnsWrappedError covers the non-IsNotExist
+// branch of os.Open's error. We point Load at a "directory" that's
+// actually a regular file, so joining `Filename` onto it causes
+// os.Open to fail with ENOTDIR — distinct from ENOENT and so distinct
+// from the "missing → empty cache" path. Works even as root.
+func TestLoad_OpenError_ReturnsWrappedError(t *testing.T) {
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(notADir, []byte("file, not dir"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := Load(notADir); err == nil {
+		t.Fatal("expected open error when dir argument is actually a file")
+	} else if !strings.Contains(err.Error(), "cache open:") {
+		t.Errorf("error %q lacks the `cache open:` prefix", err)
 	}
 }
 
