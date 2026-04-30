@@ -138,6 +138,12 @@ on every divergence.
 
 A few things worth knowing:
 
+- **Applying the diff.** `--suggest` writes to stdout and never touches
+  your files — the contract is "emit, don't apply" because the primary
+  consumer is an LLM agent that decides how to land the change. If you
+  trust the diff yourself, pipe it: `codetwin --suggest <id> | git
+  apply`. Use `git apply --check` first for a dry-run that exits
+  non-zero if the hunk won't land cleanly.
 - **Confidence** is `commonLines / max(linesA, linesB)`. A 1.0
   confidence means every line of A is shared with B (literal
   duplication); 0.5 means about half overlap. v1 doesn't gate on
