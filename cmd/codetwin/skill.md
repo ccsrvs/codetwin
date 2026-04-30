@@ -82,7 +82,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         last touched). Pairs --sort=age for "newest clones first".
 --suggest string        print a unified diff that adds a starter helper extracted from the
                         matching pair (look up the 8-char pair ID in --json output). v1
-                        supports Go and Python; other languages print a 'note' explaining why.
+                        supports Go, Python, and Java; other languages print a 'note'
+                        explaining why.
 --suggest-all           with --json: populate `suggested_patch` on every visible pair
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
@@ -140,11 +141,19 @@ Rejection cases (printed as a `note:` line on stderr; exit 1):
 - Methods on different receiver types (Go)
 - Anonymous/goroutine/defer chunks (Go)
 - Cross-language pairs (v1 doesn't transpile)
-- Unsupported language (v1 supports Go and Python; JS/TS/Rust/Java/Elixir
+- Unsupported language (v1 supports Go, Python, and Java; JS/TS/Rust/Elixir
   return a clear note so a follow-up emitter has a known contract)
 - Holes where one side has a control-flow keyword (`return`/`break`/
-  `continue`, plus `raise`/`yield` for Python) and the other doesn't —
-  that asymmetry signals semantically different snippets
+  `continue`, plus `raise`/`yield` for Python and `throw`/`yield` for
+  Java) and the other doesn't — that asymmetry signals semantically
+  different snippets
+
+For Java specifically, the helper is appended at file scope (after the
+wrapping class's closing `}`) so the diff applies cleanly via `git
+apply`, but the file won't compile until a human moves the helper
+inside an appropriate class. The helper carries a leading `// NOTE:
+appended at file scope; move it into the appropriate Java class…`
+comment to flag the placement step.
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
 pair, so a single run produces machine-readable suggestions across the

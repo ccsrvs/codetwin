@@ -22,9 +22,9 @@ type Suggestion struct {
 	Note       string  // populated when synthesis cannot proceed; HelperSrc is "" in that case
 }
 
-// Synthesize dispatches by language. v1 ships a Go emitter; every
-// other language returns a structured "unsupported" Note so the CLI
-// can surface a clear message without crashing.
+// Synthesize dispatches by language. v1 ships Go, Python, and Java
+// emitters; every other language returns a structured "unsupported"
+// Note so the CLI can surface a clear message without crashing.
 func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 	if a.Lang != b.Lang {
 		return Suggestion{Note: "rejected: cross-language extraction not supported in v1"}
@@ -34,9 +34,11 @@ func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		return synthesizeGo(a, b, pairID, al)
 	case tokenizer.Python:
 		return synthesizePython(a, b, pairID, al)
+	case tokenizer.Java:
+		return synthesizeJava(a, b, pairID, al)
 	default:
 		return Suggestion{Note: fmt.Sprintf(
-			"unsupported language: %s (v1 supports Go and Python)", a.Lang)}
+			"unsupported language: %s (v1 supports Go, Python, Java)", a.Lang)}
 	}
 }
 
@@ -180,6 +182,163 @@ func synthesizePython(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 		HelperSrc:  src.String(),
 		Confidence: confidence,
 	}
+}
+
+// synthesizeJava produces a starter helper for two Java method-level
+// snippets. Java has no top-level functions: the helper is appended at
+// the end of A's file (matching Go/Python convention) but lands after
+// the wrapping class's closing `}`, so the file won't compile until a
+// human moves the helper inside the appropriate class. The helper
+// header carries a `// NOTE:` comment flagging this. This is the v1
+// "starter, human finishes" contract.
+//
+// Rejection rules (Java splitter only emits methods/constructors, so no
+// anonymous-chunk handling is needed):
+//   - Alignment must have at least one common span.
+//   - Holes must agree on `return`/`break`/`continue`/`throw`/`yield`
+//     presence — control-flow asymmetry signals semantically different
+//     snippets.
+//
+// Modifiers (`public`, `static`, `final`, `synchronized`, generics,
+// return type, `throws` clauses) are copied verbatim from A. Different
+// wrapping classes are NOT rejected (the advanced fixture has
+// UserStore.fetchA + OrderStore.fetchB and is meant to accept).
+func synthesizeJava(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between snippets"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
+		[]string{"return", "break", "continue", "throw", "yield"}); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
+	header, ok := javaHelperHeader(a.Code, helperName)
+	if !ok {
+		return Suggestion{Note: "rejected: snippet has no recognisable Java method header"}
+	}
+	body := javaRebodyAsHelper(a.Code)
+	divergence := formatDivergenceComment(al.Holes, "//")
+
+	src := strings.Builder{}
+	src.WriteString("// codetwin: starter helper extracted from " +
+		nonEmpty(SymbolForSnippet(a), "<anon>") +
+		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
+		" (pair " + pairID + ").\n")
+	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
+	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
+	src.WriteString("// NOTE: appended at file scope; move it into the appropriate Java\n")
+	src.WriteString("// class (or extract to a utility class) before compiling.\n")
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(header)
+	src.WriteString("\n")
+	src.WriteString(body)
+
+	confidence := 0.0
+	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	maxLines := aLines
+	if bLines > maxLines {
+		maxLines = bLines
+	}
+	if maxLines > 0 {
+		confidence = float64(al.CommonLines()) / float64(maxLines)
+	}
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: confidence,
+	}
+}
+
+// javaHelperHeader builds the helper's method-header line by finding
+// the first non-blank/non-comment/non-annotation line of snippet A,
+// stripping its leading whitespace, and replacing the method-name token
+// (the identifier immediately preceding the `(` of the parameter list)
+// with helperName. Modifiers, generic type parameters, return type,
+// parameter list, optional `throws` clause, and an optional trailing
+// `{` are preserved verbatim. Returns ok=false when no `(` is found
+// (e.g. a malformed chunk) or when no identifier precedes it.
+//
+// Multi-line method headers (where the parameter list wraps) aren't
+// exercised by v1 fixtures and aren't supported here; the splitter also
+// requires the header to fit on one line for `javaMethodRe` to match.
+func javaHelperHeader(aCode, helperName string) (string, bool) {
+	for _, l := range strings.Split(aCode, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" ||
+			strings.HasPrefix(t, "//") ||
+			strings.HasPrefix(t, "/*") ||
+			strings.HasPrefix(t, "*") ||
+			strings.HasPrefix(t, "@") {
+			continue
+		}
+		parenIdx := strings.IndexByte(t, '(')
+		if parenIdx <= 0 {
+			return "", false
+		}
+		nameEnd := parenIdx
+		for nameEnd > 0 && (t[nameEnd-1] == ' ' || t[nameEnd-1] == '\t') {
+			nameEnd--
+		}
+		nameStart := nameEnd
+		for nameStart > 0 && isIdentByte(t[nameStart-1]) {
+			nameStart--
+		}
+		if nameStart == nameEnd {
+			return "", false
+		}
+		return t[:nameStart] + helperName + t[nameEnd:], true
+	}
+	return "", false
+}
+
+// javaRebodyAsHelper returns the body of snippet A — everything inside
+// the method's outermost `{ ... }`. Each body line is dedented by the
+// header line's leading whitespace (typically 4 spaces for class
+// methods) so the helper renders at column 0 with body lines at one
+// natural indent level, ready to drop into a class. The closing `}` of
+// the method passes through.
+func javaRebodyAsHelper(aCode string) string {
+	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
+
+	headerIndent := ""
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		i := 0
+		for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
+			i++
+		}
+		headerIndent = l[:i]
+		break
+	}
+
+	openIdx := -1
+	for i, l := range lines {
+		if strings.Contains(l, "{") {
+			openIdx = i
+			break
+		}
+	}
+	if openIdx < 0 {
+		return strings.Join(lines, "\n") + "\n"
+	}
+	openLine := lines[openIdx]
+	bracePos := strings.IndexByte(openLine, '{')
+	afterBrace := strings.TrimSpace(openLine[bracePos+1:])
+	var body []string
+	if afterBrace != "" {
+		body = append(body, afterBrace)
+	}
+	for _, l := range lines[openIdx+1:] {
+		body = append(body, strings.TrimPrefix(l, headerIndent))
+	}
+	return strings.Join(body, "\n") + "\n"
 }
 
 // pythonHelperHeader builds the helper's `def` line by finding the

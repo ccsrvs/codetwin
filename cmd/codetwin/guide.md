@@ -147,12 +147,15 @@ A few things worth knowing:
 - **Pair IDs** are 8-char hex digests of `sha1(min(NameA,NameB) + "|"
   + max(NameA,NameB))`. They're stable across runs and order-invariant
   (the same pair has the same ID regardless of which side is "A").
-- **Language coverage in v1.** Go and Python emit helpers; JS/TS/Rust/
-  Java/Elixir return a `note: unsupported language: ...` and no diff
-  until their per-language emitters land. The synthesizer needs
+- **Language coverage in v1.** Go, Python, and Java emit helpers;
+  JS/TS/Rust/Elixir return a `note: unsupported language: ...` and no
+  diff until their per-language emitters land. The synthesizer needs
   language-specific logic to spot the function header and produce a
   sensible helper body — fixtures for the remaining languages are
-  already in place under `testdata/refactor/`.
+  already in place under `testdata/refactor/`. For Java, the helper is
+  appended at file scope (after the wrapping class's closing `}`) and
+  carries a `// NOTE: appended at file scope` comment; the human moves
+  it into the appropriate class before compiling.
 
 ## A note on config
 

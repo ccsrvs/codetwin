@@ -249,11 +249,258 @@ func TestSynthesize_PythonAcceptTiers(t *testing.T) {
 	}
 }
 
+// TestSynthesize_JavaAcceptTiers covers the simple/medium/advanced Java
+// fixtures. The helper is appended at file scope (after the wrapping
+// class's closing `}`) — this won't compile until a human moves it
+// into the appropriate class, which is the documented v1 contract for
+// Java. We assert the helper signature, the `// NOTE: appended at file
+// scope` placement comment, the `//`-style divergence block, and that
+// both differing literals show up.
+func TestSynthesize_JavaAcceptTiers(t *testing.T) {
+	cases := []struct {
+		dir           string
+		expectInSrc   []string
+		minConfidence float64
+	}{
+		{
+			dir: "../../testdata/refactor/java/simple",
+			expectInSrc: []string{
+				"public double extracted_priceWithTaxA_",
+				"// Divergences (B vs A):",
+				"// NOTE: appended at file scope",
+				"0.07",
+				"0.085",
+			},
+			minConfidence: 0.5,
+		},
+		{
+			dir: "../../testdata/refactor/java/medium",
+			expectInSrc: []string{
+				"public String extracted_formatUserA_",
+				`"user:"`,
+				`"admin:"`,
+				`"(active)"`,
+				`"(privileged)"`,
+			},
+			minConfidence: 0.4,
+		},
+		{
+			dir: "../../testdata/refactor/java/advanced",
+			expectInSrc: []string{
+				"public String extracted_fetchA_",
+				`"/v1"`,
+				`"/v2"`,
+				"this.table",
+			},
+			minConfidence: 0.4,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.dir, func(t *testing.T) {
+			a, b := loadSnippets(t, c.dir)
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if s.HelperSrc == "" {
+				t.Fatal("HelperSrc empty")
+			}
+			if s.Confidence < c.minConfidence {
+				t.Errorf("Confidence = %.2f, want >= %.2f", s.Confidence, c.minConfidence)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+			if !validGoIdent(s.HelperName) {
+				t.Errorf("HelperName %q is not a valid identifier", s.HelperName)
+			}
+		})
+	}
+}
+
+// TestSynthesize_JavaThrowAsymmetry_Rejected exercises the
+// reject-throw fixture: B introduces a `throw` on a line A has as a
+// plain statement, so the Java keyword set's `throw` entry triggers
+// control-flow asymmetry rejection.
+func TestSynthesize_JavaThrowAsymmetry_Rejected(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/java/reject-throw")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note == "" {
+		t.Fatalf("expected rejection, got HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.Note, "control-flow asymmetry") {
+		t.Errorf("Note = %q, want 'control-flow asymmetry' substring", s.Note)
+	}
+	if !strings.Contains(s.Note, `"throw"`) {
+		t.Errorf("Note = %q, want the keyword name to be \"throw\"", s.Note)
+	}
+	if s.HelperSrc != "" {
+		t.Errorf("rejected suggestion should have empty HelperSrc, got:\n%s", s.HelperSrc)
+	}
+}
+
+// TestRejectControlFlowAsymmetry_JavaKeywords covers the Java
+// emitter's keyword set: `throw` counts as control-flow asymmetry the
+// same way `return`/`break`/`continue`/`yield` do.
+func TestRejectControlFlowAsymmetry_JavaKeywords(t *testing.T) {
+	javaKeywords := []string{"return", "break", "continue", "throw", "yield"}
+	cases := []struct {
+		name string
+		hole Hole
+		want bool // true = rejected
+	}{
+		{"throw asymmetric", Hole{AText: "metric.increment();", BText: "throw new IllegalStateException(\"x\");"}, true},
+		{"throw symmetric", Hole{AText: "throw new A();", BText: "throw new B();"}, false},
+		{"yield asymmetric (switch expr)", Hole{AText: "x = 1;", BText: "yield 2;"}, true},
+		{"yield in identifier-name not standalone", Hole{AText: "yieldValue = 1;", BText: "x = 1;"}, false},
+		{"unrelated", Hole{AText: "x = 1;", BText: "x = 2;"}, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := rejectControlFlowAsymmetryWithKeywords([]Hole{c.hole}, javaKeywords)
+			rejected := !ok
+			if rejected != c.want {
+				t.Errorf("rejected=%v, want %v", rejected, c.want)
+			}
+		})
+	}
+}
+
+// TestSynthesizeJava_EmptyAlignment_Rejected covers the
+// no-common-lines branch in synthesizeJava.
+func TestSynthesizeJava_EmptyAlignment_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "X.java:1-3 foo", Lang: tokenizer.Java, Code: "    public void foo() {\n        a();\n    }"}
+	b := scan.Snippet{Name: "Y.java:1-3 bar", Lang: tokenizer.Java, Code: "    public void bar() {\n        b();\n    }"}
+	s := Synthesize(a, b, "deadbeef", Alignment{})
+	if !strings.Contains(s.Note, "no common lines") {
+		t.Errorf("expected empty-alignment rejection, got Note=%q", s.Note)
+	}
+}
+
+// TestSynthesizeJava_NoMethodHeader_Rejected hits the
+// javaHelperHeader=false branch: a chunk without a recognisable method
+// header (no `(`) should reject with a clear note.
+func TestSynthesizeJava_NoMethodHeader_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "X.java:1-2 foo", Lang: tokenizer.Java, Code: "// only comments\n// no method"}
+	b := scan.Snippet{Name: "Y.java:1-2 bar", Lang: tokenizer.Java, Code: "// only comments\n// no method"}
+	al := Alignment{
+		Common: []LineSpan{{AStart: 1, AEnd: 3, BStart: 1, BEnd: 3}},
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if !strings.Contains(s.Note, "recognisable Java method header") {
+		t.Errorf("expected no-method-header rejection, got Note=%q", s.Note)
+	}
+}
+
+// TestJavaHelperHeader_PreservesModifiersAndThrows verifies the header
+// rewriter preserves modifiers, generics, return type, parameter list,
+// and `throws` clause while replacing only the method name.
+func TestJavaHelperHeader_PreservesModifiersAndThrows(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain instance method",
+			"    public double priceWithTaxA(double amount) {\n        return amount;\n    }",
+			"public double extracted_h(double amount) {",
+		},
+		{
+			"static with throws",
+			"    public static int parse(String s) throws IOException {\n        return 0;\n    }",
+			"public static int extracted_h(String s) throws IOException {",
+		},
+		{
+			"generic method",
+			"    public <T> T identity(T x) {\n        return x;\n    }",
+			"public <T> T extracted_h(T x) {",
+		},
+		{
+			"annotation skipped, body line is the header",
+			"    @Override\n    public String toString() {\n        return \"x\";\n    }",
+			"public String extracted_h() {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := javaHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("javaHelperHeader returned ok=false for input:\n%s", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("javaHelperHeader = %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// TestJavaHelperHeader_NoParen_ReturnsFalse covers the `parenIdx <= 0`
+// rejection branch.
+func TestJavaHelperHeader_NoParen_ReturnsFalse(t *testing.T) {
+	if _, ok := javaHelperHeader("    public class X {\n", "extracted_h"); ok {
+		t.Error("expected ok=false when first non-comment line has no `(`")
+	}
+}
+
+// TestJavaHelperHeader_AllCommentsAndAnnotations_ReturnsFalse exhausts
+// the loop without finding any candidate header.
+func TestJavaHelperHeader_AllCommentsAndAnnotations_ReturnsFalse(t *testing.T) {
+	if _, ok := javaHelperHeader("// hi\n/* block */\n* javadoc cont\n@Override\n", "extracted_h"); ok {
+		t.Error("expected ok=false when nothing but comments/annotations are present")
+	}
+}
+
+// TestJavaRebodyAsHelper_DedentsByHeaderIndent confirms each body line
+// is dedented by the header line's leading whitespace, leaving the body
+// at one natural indent below the helper header.
+func TestJavaRebodyAsHelper_DedentsByHeaderIndent(t *testing.T) {
+	input := "    public void foo() {\n        a();\n        b();\n    }"
+	got := javaRebodyAsHelper(input)
+	if !strings.Contains(got, "    a();\n") {
+		t.Errorf("body line `a();` not dedented to 4-space indent. Got:\n%s", got)
+	}
+	if !strings.Contains(got, "    b();\n") {
+		t.Errorf("body line `b();` not dedented to 4-space indent. Got:\n%s", got)
+	}
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), "}") {
+		t.Errorf("closing brace missing from body. Got:\n%s", got)
+	}
+}
+
+// TestJavaRebodyAsHelper_NoBrace covers the early-return branch when
+// the chunk has no `{`.
+func TestJavaRebodyAsHelper_NoBrace(t *testing.T) {
+	got := javaRebodyAsHelper("int x = 1;\nint y = 2;")
+	if !strings.Contains(got, "int x = 1;") || !strings.Contains(got, "int y = 2;") {
+		t.Errorf("javaRebodyAsHelper dropped no-brace input: %q", got)
+	}
+}
+
+// TestSynthesize_JavaCrossLanguage_Rejected verifies the upstream
+// cross-language guard fires before reaching synthesizeJava.
+func TestSynthesize_JavaCrossLanguage_Rejected(t *testing.T) {
+	a, _ := loadSnippets(t, "../../testdata/refactor/java/simple")
+	_, bGo := loadSnippets(t, "../../testdata/refactor/go/simple")
+	al := Align(a, bGo)
+	s := Synthesize(a, bGo, "deadbeef", al)
+	if !strings.Contains(s.Note, "cross-language") {
+		t.Errorf("expected cross-language rejection, got %q", s.Note)
+	}
+}
+
 func TestSynthesize_NonGoFixtures_Unsupported(t *testing.T) {
 	cases := []string{
 		"../../testdata/refactor/js/simple",
 		"../../testdata/refactor/rust/simple",
-		"../../testdata/refactor/java/simple",
 		"../../testdata/refactor/elixir/simple",
 	}
 	for _, dir := range cases {

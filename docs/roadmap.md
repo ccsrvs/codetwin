@@ -22,9 +22,9 @@ commits `159a298`, `59fe97f`, `f53a739` on
 |---|---|---|
 | Go | **Shipped** | Starter helper + divergence comment block. |
 | Python | **Shipped** | Starter helper with `#`-comment divergence block; class methods carried through as top-level helpers with `self`/`cls` as ordinary parameters. |
+| Java | **Shipped** | Starter helper with `//`-comment divergence block; modifiers/generics/`throws` preserved verbatim; helper is appended at file scope after the wrapping class's closing `}` and carries a `// NOTE: appended at file scope…` placement comment (file won't compile until a human moves the helper into the appropriate class — the v1 "starter, human finishes" boundary). Control-flow keyword set extended with `throw`. |
 | JavaScript / TypeScript | Fixture in place | Returns `unsupported language: javascript`. |
 | Rust | Fixture in place | Returns `unsupported language: rust`. |
-| Java | Fixture in place | Returns `unsupported language: java`. |
 | Elixir | Fixture in place | Returns `unsupported language: elixir`; splitter still falls back to whole-file for Elixir. |
 
 ## Context
@@ -222,13 +222,16 @@ The original recommendation was **1 + 2 + 3** as the headline narrative:
 history, and only complains about the duplication you just introduced."*
 **That triad is now shipped.**
 
-Bet **4** (refactor patches) shipped Go in v1 and now Python — codetwin
-goes from reporter to *starter generator*: it emits a unified diff
-that adds a helper extracted from a clone pair, with a comment block
-listing every divergence. Per-language emitters for JS/TS/Rust/Java
-are the natural next commits (Elixir additionally needs a function-
-level splitter); fixtures and "unsupported language" CLI contracts
-are already in place.
+Bet **4** (refactor patches) shipped Go in v1, then Python, and now
+Java — codetwin goes from reporter to *starter generator*: it emits a
+unified diff that adds a helper extracted from a clone pair, with a
+comment block listing every divergence. Per-language emitters for
+JS/TS and Rust are the natural next commits (Elixir additionally needs
+a function-level splitter); fixtures and "unsupported language" CLI
+contracts are already in place. The Java emitter also established the
+`cmd/codetwin/refactor_subprocess_test.go` convention required by the
+"Testing layers" section below — every future emitter should add
+subprocess cases there.
 
 The next bet to consider is **5** (clone watchlist + drift alerts) or
 **6** (cross-repo / org-level scanning), depending on whether the
@@ -274,7 +277,7 @@ lets bugs slip through.
 | **Unit** | Does this function compute the right value for crafted inputs? | `*_test.go` next to the function | `rejectControlFlowAsymmetryWithKeywords` table-driven cases |
 | **Fixture-driven** | Does the real splitter/tokenizer/aligner pipeline produce the right result on representative source? | `testdata/<feature>/<tier>/` + a test that feeds it through the in-process pipeline | `TestSynthesize_PythonRealworld_Decorated` reads `testdata/refactor/python/realworld-decorated/{a,b}.py` through `splitter.Split → Align → Synthesize` |
 | **Round-trip** | Does the emitted artefact (diff, JSON, baseline file) round-trip through the tool that consumes it? | Subprocess test invoking the consuming tool | `TestBuildPatch_GoMethodRealworld_AppliesClean` shells out to `git apply --check` and `git apply` against a tempdir repo |
-| **Subprocess CLI** | Does the binary itself produce the right stdout/stderr/exit code for the documented invocation? | `cmd/codetwin/*_subprocess_test.go` (to add) | _Missing today._ Future: `./codetwin --suggest <id> testdata/...` exits 0 and prints `func extracted_…` |
+| **Subprocess CLI** | Does the binary itself produce the right stdout/stderr/exit code for the documented invocation? | `cmd/codetwin/*_subprocess_test.go` | `TestSuggest_JavaSimple_ExitsZeroAndPrintsDiff` runs `./codetwin --suggest <id> testdata/refactor/java/simple` and asserts exit 0 plus `extracted_priceWithTaxA_` in the diff; `TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote` asserts exit 1 + stderr note on rejection. Established by Bet #4's Java commit. |
 | **Self-host** | Does the tool work on its own source tree without crashing or producing pathological output? | `cmd/codetwin/main_selfhost_test.go` (to add) — short-circuits in `-short` mode | _Missing today._ Future: `./codetwin --threshold 0.85 ./internal` exits 0 and prints a summary |
 
 ### What "true integration" requires that unit tests don't catch
