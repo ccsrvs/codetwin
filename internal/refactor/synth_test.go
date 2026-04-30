@@ -180,6 +180,436 @@ func TestRejectControlFlowAsymmetry_PythonKeywords(t *testing.T) {
 	}
 }
 
+// Given the simple/medium/advanced JS fixtures, when Synthesize runs,
+// then it accepts and emits a HelperSrc with the helper signature, the
+// divergence block, and both sides' literals. The advanced case
+// additionally surfaces the this-binding NOTE because the source is a
+// class method. Cycle 10.
+func TestSynthesize_JavaScriptAcceptTiers(t *testing.T) {
+	cases := []struct {
+		dir           string
+		expectInSrc   []string
+		minConfidence float64
+	}{
+		{
+			dir: "../../testdata/refactor/js/simple",
+			expectInSrc: []string{
+				"function extracted_priceWithTaxA_",
+				"// Divergences (B vs A):",
+				"0.07",
+				"0.085",
+			},
+			minConfidence: 0.5,
+		},
+		{
+			dir: "../../testdata/refactor/js/medium",
+			expectInSrc: []string{
+				"function extracted_formatUserA_",
+				`"user:"`,
+				`"admin:"`,
+				`"(active)"`,
+				`"(privileged)"`,
+			},
+			minConfidence: 0.4,
+		},
+		{
+			dir: "../../testdata/refactor/js/advanced",
+			expectInSrc: []string{
+				"function extracted_fetchA_",
+				`"/v1"`,
+				`"/v2"`,
+				"this.table",
+				"// NOTE:",
+			},
+			minConfidence: 0.4,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.dir, func(t *testing.T) {
+			a, b := loadSnippets(t, c.dir)
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if s.HelperSrc == "" {
+				t.Fatal("HelperSrc empty")
+			}
+			if s.Confidence < c.minConfidence {
+				t.Errorf("Confidence = %.2f, want >= %.2f", s.Confidence, c.minConfidence)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+			if !validGoIdent(s.HelperName) {
+				t.Errorf("HelperName %q is not a valid identifier", s.HelperName)
+			}
+		})
+	}
+}
+
+// Given a snippet whose first non-blank line is a `function name(...)`
+// declaration, when jsHelperHeader rewrites the header, then the
+// function name is replaced and modifiers/parameters/async marker are
+// preserved verbatim. Cycle 2.
+func TestJsHelperHeader_FreeFunctionForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain function",
+			"function priceWithTaxA(amount) {\n  return amount;\n}",
+			"function extracted_h(amount) {",
+		},
+		{
+			"async function",
+			"async function fetchUserA(id) {\n  return id;\n}",
+			"async function extracted_h(id) {",
+		},
+		{
+			"export default function",
+			"export default function compute(x) {\n  return x;\n}",
+			"export default function extracted_h(x) {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := jsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("jsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a snippet whose first non-blank line is an arrow assignment or
+// `const x = function(...)`, when jsHelperHeader runs, then the helper
+// is emitted as a free `function extracted_h(...) {` declaration —
+// arrow-shape sources are normalised into the canonical free-function
+// form for the helper. Cycle 3.
+func TestJsHelperHeader_ArrowForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"arrow with parens",
+			"const compute = (a, b) => {\n  return a + b;\n};",
+			"function extracted_h(a, b) {",
+		},
+		{
+			"async arrow",
+			"const fetchA = async (id) => {\n  return id;\n};",
+			"async function extracted_h(id) {",
+		},
+		{
+			"const = function",
+			"const compute = function(a) {\n  return a;\n};",
+			"function extracted_h(a) {",
+		},
+		{
+			"const = async function",
+			"const compute = async function(a) {\n  return a;\n};",
+			"async function extracted_h(a) {",
+		},
+		{
+			"let = arrow",
+			"let f = (x) => {\n  return x;\n};",
+			"function extracted_h(x) {",
+		},
+		{
+			"export const arrow",
+			"export const f = (x) => {\n  return x;\n};",
+			"export function extracted_h(x) {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := jsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("jsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a snippet whose first non-blank line is a class-method header
+// (no `function` keyword, no `=` arrow assignment, just
+// `name(params) {`), when jsHelperHeader runs, then the helper is
+// emitted as a free `function extracted_h(params) {` declaration.
+// Methods come up when the JS splitter chunks class bodies. Cycle 4.
+func TestJsHelperHeader_ClassMethodForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain class method",
+			"  fetchA(key) {\n    return key;\n  }",
+			"function extracted_h(key) {",
+		},
+		{
+			"async class method",
+			"  async fetchA(key) {\n    return key;\n  }",
+			"async function extracted_h(key) {",
+		},
+		{
+			"static class method",
+			"  static fetchA(key) {\n    return key;\n  }",
+			"static function extracted_h(key) {",
+		},
+		{
+			"two-arg method",
+			"  format(name, age) {\n    return name;\n  }",
+			"function extracted_h(name, age) {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := jsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("jsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a class-method JS snippet whose body references `this.`, when
+// Synthesize emits the helper, then a `// NOTE:` line surfaces the
+// this-binding boundary. Free functions and class methods that don't
+// touch `this` MUST NOT carry the NOTE — the user shouldn't see it
+// when it doesn't apply. Cycle 9.
+func TestSynthesize_JavaScriptClassMethod_AnnotatesThisBinding(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.js:1-4 fetchA", Lang: tokenizer.JavaScript,
+		Code: "  fetchA(key) {\n    const prefix = this.table + \":\";\n    return prefix + key;\n  }",
+	}
+	b := scan.Snippet{
+		Name: "y.js:1-4 fetchB", Lang: tokenizer.JavaScript,
+		Code: "  fetchB(key) {\n    const prefix = this.table + \":\";\n    return prefix + key;\n  }",
+	}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "// NOTE:") {
+		t.Errorf("class-method helper that references `this.` should carry a // NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "this") {
+		t.Errorf("expected NOTE to mention `this`. HelperSrc:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a free-function JS snippet without any `this` reference, when
+// Synthesize emits the helper, then NO this-binding NOTE is emitted.
+// Cycle 9.
+func TestSynthesize_JavaScriptFreeFunction_NoThisNote(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.js:1-3 a", Lang: tokenizer.JavaScript,
+		Code: "function a(x) {\n  return x + 1;\n}",
+	}
+	b := scan.Snippet{
+		Name: "y.js:1-3 b", Lang: tokenizer.JavaScript,
+		Code: "function b(x) {\n  return x + 2;\n}",
+	}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if strings.Contains(s.HelperSrc, "// NOTE:") {
+		t.Errorf("free-function helper should NOT carry a // NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	}
+}
+
+// Given two JS snippets and an Alignment with no common spans, when
+// Synthesize runs, then synthesis is rejected with a "no common
+// lines" Note. Cycle 7.
+func TestSynthesizeJavaScript_EmptyAlignment_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "x.js:1-3 a", Lang: tokenizer.JavaScript, Code: "function a() {\n  return 1;\n}"}
+	b := scan.Snippet{Name: "y.js:1-3 b", Lang: tokenizer.JavaScript, Code: "function b() {\n  return 2;\n}"}
+	s := Synthesize(a, b, "deadbeef", Alignment{})
+	if !strings.Contains(s.Note, "no common lines") {
+		t.Errorf("expected empty-alignment rejection, got Note=%q", s.Note)
+	}
+}
+
+// Given a JS snippet whose first non-blank line has no recognisable
+// definition header (no `function`, no arrow, no class method), when
+// Synthesize runs, then it rejects with a clear Note. Cycle 7.
+func TestSynthesizeJavaScript_NoFunctionHeader_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "x.js:1-2 a", Lang: tokenizer.JavaScript, Code: "// only comments\n// no header"}
+	b := scan.Snippet{Name: "y.js:1-2 b", Lang: tokenizer.JavaScript, Code: "// only comments\n// no header"}
+	al := Alignment{Common: []LineSpan{{AStart: 1, AEnd: 3, BStart: 1, BEnd: 3}}}
+	s := Synthesize(a, b, "deadbeef", al)
+	if !strings.Contains(s.Note, "JavaScript") && !strings.Contains(s.Note, "function header") {
+		t.Errorf("expected no-function-header rejection, got Note=%q", s.Note)
+	}
+}
+
+// Given a JS snippet paired with a Python snippet, when Synthesize
+// runs, then the cross-language guard fires before reaching
+// synthesizeJavaScript. Cycle 7.
+func TestSynthesize_JavaScriptCrossLanguage_Rejected(t *testing.T) {
+	a, _ := loadSnippets(t, "../../testdata/refactor/js/simple")
+	_, bPy := loadSnippets(t, "../../testdata/refactor/python/simple")
+	al := Align(a, bPy)
+	s := Synthesize(a, bPy, "deadbeef", al)
+	if !strings.Contains(s.Note, "cross-language") {
+		t.Errorf("expected cross-language rejection, got %q", s.Note)
+	}
+}
+
+// Given two JS snippets where B is materially longer than A, when
+// Synthesize computes confidence, then bLines drives the denominator
+// (mirrors the Go/Java/Python tests). Cycle 8.
+func TestSynthesizeJavaScript_ConfidenceWithBLongerThanA(t *testing.T) {
+	a := scan.Snippet{Name: "x.js:1-3 foo", Lang: tokenizer.JavaScript, Code: "function foo() {\n  return 1;\n}"}
+	b := scan.Snippet{Name: "y.js:1-7 bar", Lang: tokenizer.JavaScript, Code: "function bar() {\n  return 1;\n  let extra = 2;\n  let extra2 = 3;\n  let extra3 = 4;\n  let extra4 = 5;\n}"}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line; alignment found none")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if s.Confidence <= 0 {
+		t.Errorf("Confidence = %v; expected non-zero score", s.Confidence)
+	}
+	if s.Confidence >= 0.5 {
+		t.Errorf("Confidence = %v; expected B's line count to drive denominator", s.Confidence)
+	}
+}
+
+// Given a hole where one side has `throw` and the other doesn't, when
+// rejectControlFlowAsymmetryWithKeywords is called with the JS keyword
+// set, then it rejects. Symmetric throws and identifier-prefix
+// matches must NOT reject. Cycle 6.
+func TestRejectControlFlowAsymmetry_JavaScriptKeywords(t *testing.T) {
+	jsKeywords := []string{"return", "break", "continue", "throw", "yield"}
+	cases := []struct {
+		name string
+		hole Hole
+		want bool // true = rejected
+	}{
+		{"throw asymmetric", Hole{AText: "log(err);", BText: "throw new Error('x');"}, true},
+		{"throw symmetric", Hole{AText: "throw new A();", BText: "throw new B();"}, false},
+		{"yield asymmetric", Hole{AText: "x = 1;", BText: "yield 2;"}, true},
+		{"yieldValue identifier not standalone", Hole{AText: "yieldValue = 1;", BText: "x = 1;"}, false},
+		{"return asymmetric", Hole{AText: "return 1;", BText: "x = 1;"}, true},
+		{"unrelated", Hole{AText: "x = 1;", BText: "x = 2;"}, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := rejectControlFlowAsymmetryWithKeywords([]Hole{c.hole}, jsKeywords)
+			rejected := !ok
+			if rejected != c.want {
+				t.Errorf("rejected=%v, want %v", rejected, c.want)
+			}
+		})
+	}
+}
+
+// Given two JS snippets where B introduces a `throw` on a line A has
+// as a plain statement, when Synthesize runs, then synthesis is
+// rejected with a `control-flow asymmetry` Note and an empty
+// HelperSrc. Cycles 6 + 11 (fixture-driven).
+func TestSynthesize_JavaScriptThrowAsymmetry_Rejected(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/js/reject-throw")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note == "" {
+		t.Fatalf("expected rejection, got HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.Note, "control-flow asymmetry") {
+		t.Errorf("Note = %q, want 'control-flow asymmetry' substring", s.Note)
+	}
+	if !strings.Contains(s.Note, `"throw"`) {
+		t.Errorf("Note = %q, want the keyword name to be \"throw\"", s.Note)
+	}
+	if s.HelperSrc != "" {
+		t.Errorf("rejected suggestion should have empty HelperSrc, got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a class-method snippet whose body is indented 4 spaces, when
+// jsRebodyAsHelper extracts and dedents the body, then the result is
+// the inner statements at 2-space indent (one level deep) without the
+// outer header line, and ends with the closing `}` brace. Cycle 5.
+func TestJsRebodyAsHelper_ClassMethodDedents(t *testing.T) {
+	input := "  fetchA(key) {\n    const prefix = this.table + \":\";\n    return prefix;\n  }"
+	got := jsRebodyAsHelper(input)
+	expected := "  const prefix = this.table + \":\";\n  return prefix;\n}\n"
+	if got != expected {
+		t.Errorf("got:\n%q\nwant:\n%q", got, expected)
+	}
+}
+
+// Given a free-function snippet whose body is at 2-space indent, when
+// jsRebodyAsHelper runs, then the body is dedented relative to the
+// header indent (which is 0 spaces here). Cycle 5.
+func TestJsRebodyAsHelper_FreeFunctionPassesThrough(t *testing.T) {
+	input := "function priceWithTaxA(amount) {\n  return amount * 1.07;\n}"
+	got := jsRebodyAsHelper(input)
+	expected := "  return amount * 1.07;\n}\n"
+	if got != expected {
+		t.Errorf("got:\n%q\nwant:\n%q", got, expected)
+	}
+}
+
+// Given a snippet whose header line ends with a `{` followed by inline
+// content, when jsRebodyAsHelper runs, then the inline content becomes
+// the first body line. Cycle 5.
+func TestJsRebodyAsHelper_InlineFirstStatement(t *testing.T) {
+	input := "function f(x) { return x; }"
+	got := jsRebodyAsHelper(input)
+	if !strings.Contains(got, "return x;") {
+		t.Errorf("expected inline body to surface; got:\n%q", got)
+	}
+}
+
+// Given two JavaScript snippets that share the bulk of their bodies,
+// when Synthesize runs, then it accepts (no rejection Note) and emits
+// a non-empty HelperSrc. Cycle 1 — drives the JS dispatch into
+// synth.go.
+func TestSynthesize_JavaScriptSimple_Accepts(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/js/simple")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if s.HelperSrc == "" {
+		t.Fatal("HelperSrc empty")
+	}
+}
+
 // TestSynthesize_PythonAcceptTiers covers the simple/medium/advanced
 // Python fixtures. Mirrors TestSynthesize_GoAcceptTiers but checks the
 // `#`-comment block and the dedented helper body that drops out of
@@ -576,7 +1006,6 @@ func TestSynthesize_JavaCrossLanguage_Rejected(t *testing.T) {
 
 func TestSynthesize_NonGoFixtures_Unsupported(t *testing.T) {
 	cases := []string{
-		"../../testdata/refactor/js/simple",
 		"../../testdata/refactor/rust/simple",
 		"../../testdata/refactor/elixir/simple",
 	}

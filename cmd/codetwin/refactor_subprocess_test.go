@@ -154,6 +154,150 @@ func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	}
 }
 
+// TestSuggest_JavaScriptSimple_ExitsZeroAndPrintsDiff mirrors the Java
+// case for the JavaScript emitter.
+func TestSuggest_JavaScriptSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/js/simple"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID string `json:"id"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	if len(doc.Pairs) == 0 || doc.Pairs[0].ID == "" {
+		t.Fatalf("expected at least one pair with an id, got:\n%s", jsonOut)
+	}
+	pairID := doc.Pairs[0].ID
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "@@") {
+		t.Errorf("stdout missing hunk header. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "extracted_priceWithTaxA_") {
+		t.Errorf("stdout missing JS helper signature. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "// Divergences (B vs A):") {
+		t.Errorf("stdout missing divergence comment block. Got:\n%s", diff)
+	}
+}
+
+// TestSuggestAll_JavaScriptSimple_PopulatesSuggestedPatch mirrors the
+// Java case: --suggest-all --json embeds a non-empty unified_diff on
+// every visible pair.
+func TestSuggestAll_JavaScriptSimple_PopulatesSuggestedPatch(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/js/simple"
+
+	stdout, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--suggest-all", "--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--suggest-all: %v\nstdout:\n%s", err, stdout)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID             string `json:"id"`
+			SuggestedPatch *struct {
+				UnifiedDiff string `json:"unified_diff"`
+				HelperName  string `json:"helper_name"`
+				Note        string `json:"note"`
+			} `json:"suggested_patch"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(stdout, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, stdout)
+	}
+	if len(doc.Pairs) == 0 {
+		t.Fatalf("expected at least one pair, got none")
+	}
+	p := doc.Pairs[0]
+	if p.SuggestedPatch == nil {
+		t.Fatal("suggested_patch field missing on pair")
+	}
+	if p.SuggestedPatch.UnifiedDiff == "" {
+		t.Errorf("unified_diff empty (note=%q)", p.SuggestedPatch.Note)
+	}
+	if !strings.HasPrefix(p.SuggestedPatch.HelperName, "extracted_priceWithTaxA_") {
+		t.Errorf("helper_name = %q, want extracted_priceWithTaxA_… prefix",
+			p.SuggestedPatch.HelperName)
+	}
+}
+
+// TestSuggest_JavaScriptRejectThrow_ExitsNonZeroWithNote: the JS
+// reject-throw fixture must produce a note on stderr and exit code 1.
+func TestSuggest_JavaScriptRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/js/reject-throw"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID string `json:"id"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	if len(doc.Pairs) == 0 {
+		t.Fatalf("expected the reject-throw fixture to surface a pair: %s", jsonOut)
+	}
+	pairID := doc.Pairs[0].ID
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	if err == nil {
+		t.Fatalf("expected non-zero exit on rejected pair; stdout:\n%s", stdout.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected exit code 1, got err=%v stderr:\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "control-flow asymmetry") {
+		t.Errorf("stderr missing rejection note. Got:\n%s", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected empty stdout on rejection, got:\n%s", stdout.String())
+	}
+}
+
 // TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote: the reject-throw
 // fixture must produce a note on stderr and exit code 1, NOT a diff on
 // stdout. This guards the rejection-routing contract documented in

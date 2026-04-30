@@ -508,22 +508,44 @@ func findBraceEnd(lines []string, start int) (int, bool) {
 // ── JavaScript / TypeScript ───────────────────────────────────────────────────
 
 var (
-	jsFuncRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
-	jsArrowRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)`)
-	jsClassRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?class\s+(\w+)`)
+	jsFuncRe   = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
+	jsArrowRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)`)
+	jsClassRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?class\s+\w+`)
+	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*\{`)
 )
+
+// jsMethodReservedNames are control-flow / language keywords whose
+// `name(...)` shape would otherwise look like a method header. Mirrors
+// the Java splitter's reserved-name rejection.
+var jsMethodReservedNames = map[string]bool{
+	"if": true, "while": true, "for": true, "switch": true, "catch": true,
+	"return": true, "do": true, "else": true, "try": true, "finally": true,
+	"function": true, "class": true, "throw": true,
+}
 
 func splitJavaScript(code string) []Chunk {
 	return splitBraceBased(code, jsHeaderMatch, true)
 }
 
 // jsHeaderMatch tries each JavaScript/TypeScript header pattern in order
-// (named function, arrow assigned to const/let/var, class) and returns the
-// first symbol found. emitBodyless=true at the splitBraceBased call site
-// captures single-expression arrow shorthands that have no `{...}` body.
+// (named function, arrow assigned to const/let/var, class method) and
+// returns the first symbol found. Class declarations are deliberately
+// rejected so the loop falls through into the class body, where each
+// method is extracted as its own chunk — matching Python's and Java's
+// method-level granularity. emitBodyless=true at the splitBraceBased
+// call site captures single-expression arrow shorthands that have no
+// `{...}` body.
 func jsHeaderMatch(line string) (string, bool) {
-	for _, re := range []*regexp.Regexp{jsFuncRe, jsArrowRe, jsClassRe} {
+	if jsClassRe.MatchString(line) {
+		return "", false
+	}
+	for _, re := range []*regexp.Regexp{jsFuncRe, jsArrowRe} {
 		if m := re.FindStringSubmatch(line); m != nil {
+			return m[1], true
+		}
+	}
+	if m := jsMethodRe.FindStringSubmatch(line); m != nil {
+		if !jsMethodReservedNames[m[1]] {
 			return m[1], true
 		}
 	}

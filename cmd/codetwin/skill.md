@@ -141,12 +141,13 @@ Rejection cases (printed as a `note:` line on stderr; exit 1):
 - Methods on different receiver types (Go)
 - Anonymous/goroutine/defer chunks (Go)
 - Cross-language pairs (v1 doesn't transpile)
-- Unsupported language (v1 supports Go, Python, and Java; JS/TS/Rust/Elixir
-  return a clear note so a follow-up emitter has a known contract)
+- Unsupported language (v1 supports Go, Python, Java, and
+  JavaScript/TypeScript; Rust/Elixir return a clear note so a follow-up
+  emitter has a known contract)
 - Holes where one side has a control-flow keyword (`return`/`break`/
   `continue`, plus `raise`/`yield` for Python and `throw`/`yield` for
-  Java) and the other doesn't — that asymmetry signals semantically
-  different snippets
+  Java and JavaScript/TypeScript) and the other doesn't — that
+  asymmetry signals semantically different snippets
 
 For Java specifically, the helper is appended at file scope (after the
 wrapping class's closing `}`) so the diff applies cleanly via `git
@@ -154,6 +155,14 @@ apply`, but the file won't compile until a human moves the helper
 inside an appropriate class. The helper carries a leading `// NOTE:
 appended at file scope; move it into the appropriate Java class…`
 comment to flag the placement step.
+
+For JavaScript/TypeScript, ES6+ class methods are unwrapped from their
+class chunk and emitted as free `function` helpers. When the body
+references `this`, the helper carries a `// NOTE: extracted as a free
+function from a class-method context; this references must be wired
+at call sites…` comment so the user knows to bind via `.call(this, …)`
+or pass `this` explicitly. Free-function and arrow-assignment sources
+don't carry that NOTE.
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
 pair, so a single run produces machine-readable suggestions across the

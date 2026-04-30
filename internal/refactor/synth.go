@@ -36,9 +36,11 @@ func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		return synthesizePython(a, b, pairID, al)
 	case tokenizer.Java:
 		return synthesizeJava(a, b, pairID, al)
+	case tokenizer.JavaScript:
+		return synthesizeJavaScript(a, b, pairID, al)
 	default:
 		return Suggestion{Note: fmt.Sprintf(
-			"unsupported language: %s (v1 supports Go, Python, Java)", a.Lang)}
+			"unsupported language: %s (v1 supports Go, Python, Java, JavaScript/TypeScript)", a.Lang)}
 	}
 }
 
@@ -252,6 +254,322 @@ func synthesizeJava(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		HelperSrc:  src.String(),
 		Confidence: confidence,
 	}
+}
+
+// synthesizeJavaScript produces a starter helper for two JavaScript or
+// TypeScript snippets. The emitter targets the same v1 contract as
+// Go/Python/Java: literal copy of A's body, divergence comments, no
+// parameterization, human finishes the refactor.
+//
+// Rejection rules (mirroring synthesizeJava):
+//   - Alignment must have at least one common span.
+//   - Holes must agree on `return`/`break`/`continue`/`throw`/`yield`
+//     presence — control-flow asymmetry signals semantically different
+//     snippets.
+//   - The chunk must have a recognisable JS/TS definition header
+//     (free function, arrow assignment, or class method).
+func synthesizeJavaScript(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between snippets"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
+		[]string{"return", "break", "continue", "throw", "yield"}); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
+	header, ok := jsHelperHeader(a.Code, helperName)
+	if !ok {
+		return Suggestion{Note: "rejected: snippet has no recognisable JavaScript function header"}
+	}
+	body := jsRebodyAsHelper(a.Code)
+	divergence := formatDivergenceComment(al.Holes, "//")
+
+	src := strings.Builder{}
+	src.WriteString("// codetwin: starter helper extracted from " +
+		nonEmpty(SymbolForSnippet(a), "<anon>") +
+		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
+		" (pair " + pairID + ").\n")
+	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
+	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
+	if jsBodyReferencesThis(a.Code) {
+		src.WriteString("// NOTE: extracted as a free function from a class-method context;\n")
+		src.WriteString("// `this` references must be wired at call sites (e.g. via\n")
+		src.WriteString("// helper.call(this, …)) before relying on the helper.\n")
+	}
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(header)
+	src.WriteString("\n")
+	src.WriteString(body)
+
+	confidence := 0.0
+	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	maxLines := aLines
+	if bLines > maxLines {
+		maxLines = bLines
+	}
+	if maxLines > 0 {
+		confidence = float64(al.CommonLines()) / float64(maxLines)
+	}
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: confidence,
+	}
+}
+
+// jsHelperHeader rewrites the first recognisable JS/TS definition
+// header of aCode to use helperName. Supported forms:
+//   - `function name(...)`, `async function name(...)`, optionally
+//     prefixed with `export` / `export default`.
+//
+// Subsequent cycles add arrow-assignment and class-method forms.
+// Returns ok=false when no recognisable form is found.
+func jsHelperHeader(aCode, helperName string) (string, bool) {
+	for _, l := range strings.Split(aCode, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" ||
+			strings.HasPrefix(t, "//") ||
+			strings.HasPrefix(t, "/*") ||
+			strings.HasPrefix(t, "*") ||
+			strings.HasPrefix(t, "@") {
+			continue
+		}
+		if h, ok := jsRewriteFunctionHeader(t, helperName); ok {
+			return h, true
+		}
+		if h, ok := jsRewriteArrowOrFuncExpr(t, helperName); ok {
+			return h, true
+		}
+		if h, ok := jsRewriteClassMethod(t, helperName); ok {
+			return h, true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// jsRewriteClassMethod handles ES6+ class-method headers — a bare
+// `name(params) {` line, optionally prefixed with `async`, `static`, or
+// both. The method is normalised into a free-function declaration so
+// the helper can drop into module scope. `static` is preserved because
+// it reads naturally on the helper if a human chooses to lift it back
+// inside a class.
+//
+// Control-flow keywords like `if`, `while`, `for`, `switch`, `catch`,
+// `return` happen to share the `keyword(...)` shape with method
+// headers; jsClassMethodReservedNames rejects them.
+func jsRewriteClassMethod(line, helperName string) (string, bool) {
+	rest := line
+	prefix := ""
+	for {
+		switch {
+		case strings.HasPrefix(rest, "async "):
+			prefix += "async "
+			rest = rest[len("async "):]
+		case strings.HasPrefix(rest, "static "):
+			prefix += "static "
+			rest = rest[len("static "):]
+		default:
+			goto done
+		}
+	}
+done:
+	nameEnd := 0
+	for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
+		nameEnd++
+	}
+	if nameEnd == 0 {
+		return "", false
+	}
+	name := rest[:nameEnd]
+	if jsClassMethodReservedNames[name] {
+		return "", false
+	}
+	afterName := rest[nameEnd:]
+	if !strings.HasPrefix(afterName, "(") {
+		return "", false
+	}
+	return prefix + "function " + helperName + afterName, true
+}
+
+// jsBodyReferencesThis reports whether snippet code contains a
+// standalone `this` token (not as part of an identifier like
+// `thisYear`). Used to decide whether to emit the this-binding NOTE
+// after lifting a class-method body to a free-function helper.
+func jsBodyReferencesThis(code string) bool {
+	return containsKeyword(code, "this")
+}
+
+// jsRebodyAsHelper returns the body of snippet A — everything inside
+// the outermost `{ ... }`. Each body line is dedented by the header
+// line's leading whitespace so the helper renders at column 0 and the
+// body sits at one natural indent level below it. Mirrors
+// javaRebodyAsHelper; the closing `}` of the function passes through.
+func jsRebodyAsHelper(aCode string) string {
+	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
+
+	headerIndent := ""
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		i := 0
+		for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
+			i++
+		}
+		headerIndent = l[:i]
+		break
+	}
+
+	openIdx := -1
+	for i, l := range lines {
+		if strings.Contains(l, "{") {
+			openIdx = i
+			break
+		}
+	}
+	if openIdx < 0 {
+		return strings.Join(lines, "\n") + "\n"
+	}
+	openLine := lines[openIdx]
+	bracePos := strings.IndexByte(openLine, '{')
+	afterBrace := strings.TrimSpace(openLine[bracePos+1:])
+	var body []string
+	if afterBrace != "" {
+		body = append(body, afterBrace)
+	}
+	for _, l := range lines[openIdx+1:] {
+		body = append(body, strings.TrimPrefix(l, headerIndent))
+	}
+	return strings.Join(body, "\n") + "\n"
+}
+
+var jsClassMethodReservedNames = map[string]bool{
+	"if": true, "while": true, "for": true, "switch": true, "catch": true,
+	"return": true, "do": true, "function": true, "class": true,
+	"const": true, "let": true, "var": true, "new": true, "typeof": true,
+	"yield": true, "await": true, "throw": true, "try": true, "else": true,
+}
+
+// jsRewriteArrowOrFuncExpr handles assignment-style definitions:
+//   - `const|let|var name = (params) => {…}`
+//   - `const|let|var name = async (params) => {…}`
+//   - `const|let|var name = function(params) {…}`
+//   - `const|let|var name = async function(params) {…}`
+//
+// Each is normalised into a free-function header: `[export ]function
+// extracted_h(params) {`. Arrow shorthands without parens around a
+// single parameter and without a `{}` body are deliberately not
+// matched — they require body lifting that v1 doesn't tackle.
+func jsRewriteArrowOrFuncExpr(line, helperName string) (string, bool) {
+	rest := line
+	exportPrefix := ""
+	if strings.HasPrefix(rest, "export default ") {
+		exportPrefix = "export default "
+		rest = rest[len("export default "):]
+	} else if strings.HasPrefix(rest, "export ") {
+		exportPrefix = "export "
+		rest = rest[len("export "):]
+	}
+	switch {
+	case strings.HasPrefix(rest, "const "):
+		rest = rest[len("const "):]
+	case strings.HasPrefix(rest, "let "):
+		rest = rest[len("let "):]
+	case strings.HasPrefix(rest, "var "):
+		rest = rest[len("var "):]
+	default:
+		return "", false
+	}
+	nameEnd := 0
+	for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
+		nameEnd++
+	}
+	if nameEnd == 0 {
+		return "", false
+	}
+	rest = strings.TrimLeft(rest[nameEnd:], " \t")
+	if !strings.HasPrefix(rest, "=") {
+		return "", false
+	}
+	rest = strings.TrimLeft(rest[1:], " \t")
+	asyncPrefix := ""
+	if strings.HasPrefix(rest, "async ") {
+		asyncPrefix = "async "
+		rest = strings.TrimLeft(rest[len("async "):], " \t")
+	}
+	if strings.HasPrefix(rest, "function") {
+		afterFunc := rest[len("function"):]
+		if afterFunc == "" || afterFunc[0] == '(' || afterFunc[0] == ' ' || afterFunc[0] == '\t' {
+			afterFunc = strings.TrimLeft(afterFunc, " \t")
+			afterName := afterFunc
+			if len(afterName) > 0 && isIdentByte(afterName[0]) {
+				k := 0
+				for k < len(afterName) && isIdentByte(afterName[k]) {
+					k++
+				}
+				afterName = afterName[k:]
+			}
+			if !strings.HasPrefix(afterName, "(") {
+				return "", false
+			}
+			return exportPrefix + asyncPrefix + "function " + helperName + afterName, true
+		}
+	}
+	if !strings.HasPrefix(rest, "(") {
+		return "", false
+	}
+	closeParen := strings.IndexByte(rest, ')')
+	if closeParen < 0 {
+		return "", false
+	}
+	params := rest[:closeParen+1]
+	tail := strings.TrimLeft(rest[closeParen+1:], " \t")
+	if !strings.HasPrefix(tail, "=>") {
+		return "", false
+	}
+	afterArrow := strings.TrimLeft(tail[len("=>"):], " \t")
+	headerSuffix := ""
+	if strings.HasPrefix(afterArrow, "{") {
+		headerSuffix = " {"
+	}
+	return exportPrefix + asyncPrefix + "function " + helperName + params + headerSuffix, true
+}
+
+// jsRewriteFunctionHeader handles `function name(...)` / `async
+// function name(...)` (with optional `export` / `export default`
+// prefix). Returns ok=false when the line isn't of that shape.
+func jsRewriteFunctionHeader(line, helperName string) (string, bool) {
+	rest := line
+	prefix := ""
+	if strings.HasPrefix(rest, "export default ") {
+		prefix += "export default "
+		rest = rest[len("export default "):]
+	} else if strings.HasPrefix(rest, "export ") {
+		prefix += "export "
+		rest = rest[len("export "):]
+	}
+	if strings.HasPrefix(rest, "async ") {
+		prefix += "async "
+		rest = rest[len("async "):]
+	}
+	if !strings.HasPrefix(rest, "function ") {
+		return "", false
+	}
+	afterKeyword := rest[len("function "):]
+	nameEnd := 0
+	for nameEnd < len(afterKeyword) && isIdentByte(afterKeyword[nameEnd]) {
+		nameEnd++
+	}
+	if nameEnd == 0 {
+		return "", false
+	}
+	return prefix + "function " + helperName + afterKeyword[nameEnd:], true
 }
 
 // javaHelperHeader builds the helper's method-header line by finding

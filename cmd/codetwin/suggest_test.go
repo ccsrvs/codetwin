@@ -197,7 +197,7 @@ func TestBuildSuggestionMap_PythonFixture_PopulatesPatch(t *testing.T) {
 	}
 }
 
-func TestBuildSuggestionMap_JSFixture_PopulatesNote(t *testing.T) {
+func TestBuildSuggestionMap_JSFixture_PopulatesPatch(t *testing.T) {
 	snips := loadFixtureSnippets(t,
 		"../../testdata/refactor/js/simple/a.js",
 		"../../testdata/refactor/js/simple/b.js",
@@ -212,10 +212,19 @@ func TestBuildSuggestionMap_JSFixture_PopulatesNote(t *testing.T) {
 	if !ok {
 		t.Fatalf("no patch entry for pair %s", pair.ID)
 	}
-	if patch.UnifiedDiff != "" {
-		t.Errorf("expected empty UnifiedDiff for unsupported language, got %q", patch.UnifiedDiff)
+	if patch.UnifiedDiff == "" {
+		t.Errorf("expected UnifiedDiff to be set; Note=%q", patch.Note)
 	}
-	if !strings.Contains(patch.Note, "unsupported language") {
-		t.Errorf("Note = %q, want 'unsupported language'", patch.Note)
+	if !strings.Contains(patch.UnifiedDiff, "function extracted_priceWithTaxA_") {
+		t.Errorf("expected JS helper signature in UnifiedDiff. Got:\n%s", patch.UnifiedDiff)
+	}
+	if !strings.Contains(patch.UnifiedDiff, "// Divergences (B vs A):") {
+		t.Errorf("expected `//`-style divergence header. Got:\n%s", patch.UnifiedDiff)
+	}
+	if !strings.HasPrefix(patch.HelperName, "extracted_priceWithTaxA_") {
+		t.Errorf("HelperName = %q, want extracted_priceWithTaxA_… prefix", patch.HelperName)
+	}
+	if patch.Confidence <= 0 {
+		t.Errorf("Confidence = %v, want > 0", patch.Confidence)
 	}
 }

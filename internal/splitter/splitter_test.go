@@ -511,7 +511,44 @@ class Widget {
 	for i, c := range chunks {
 		got[i] = c.Symbol
 	}
-	want := []string{"App", "useFoo", "Widget"}
+	// Class methods are extracted at method granularity — matching the
+	// Python and Java splitters. Detection then operates on individual
+	// methods rather than swallowing the entire class as one chunk.
+	want := []string{"App", "useFoo", "render"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("chunk %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestSplit_JavaScriptClassMethods exercises the multi-method case to
+// confirm every method is extracted, including async and static
+// shorthands. Mirrors Python's class-method coverage.
+func TestSplit_JavaScriptClassMethods(t *testing.T) {
+	code := `class UserService {
+  constructor(db) {
+    this.db = db;
+  }
+
+  async fetch(key) {
+    return await this.db.get(key);
+  }
+
+  static parse(s) {
+    return JSON.parse(s);
+  }
+}
+`
+	chunks := Split("a.js", code, tokenizer.JavaScript)
+	got := make([]string, len(chunks))
+	for i, c := range chunks {
+		got[i] = c.Symbol
+	}
+	want := []string{"constructor", "fetch", "parse"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
