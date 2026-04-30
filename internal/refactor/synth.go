@@ -38,9 +38,11 @@ func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		return synthesizeJava(a, b, pairID, al)
 	case tokenizer.JavaScript:
 		return synthesizeJavaScript(a, b, pairID, al)
+	case tokenizer.Rust:
+		return synthesizeRust(a, b, pairID, al)
 	default:
 		return Suggestion{Note: fmt.Sprintf(
-			"unsupported language: %s (v1 supports Go, Python, Java, JavaScript/TypeScript)", a.Lang)}
+			"unsupported language: %s (v1 supports Go, Python, Java, JavaScript/TypeScript, Rust)", a.Lang)}
 	}
 }
 
@@ -254,6 +256,213 @@ func synthesizeJava(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		HelperSrc:  src.String(),
 		Confidence: confidence,
 	}
+}
+
+// synthesizeRust produces a starter helper for two Rust snippets. The
+// emitter targets the same v1 contract as Go/Python/Java/JS: literal
+// copy of A's body, divergence comments, no parameterization, human
+// finishes the refactor.
+//
+// Rejection rules (mirroring synthesizeJavaScript):
+//   - Alignment must have at least one common span.
+//   - Holes must agree on `return`/`break`/`continue`/`panic` presence
+//     — the `panic!(...)` macro counts as control-flow asymmetry the
+//     same way Java's `throw` does.
+//   - The chunk must have a recognisable Rust definition header.
+func synthesizeRust(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between snippets"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
+		[]string{"return", "break", "continue", "panic"}); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
+	header, ok := rsHelperHeader(a.Code, helperName)
+	if !ok {
+		return Suggestion{Note: "rejected: snippet has no recognisable Rust fn header"}
+	}
+	body := rsRebodyAsHelper(a.Code)
+	divergence := formatDivergenceComment(al.Holes, "//")
+
+	src := strings.Builder{}
+	src.WriteString("// codetwin: starter helper extracted from " +
+		nonEmpty(SymbolForSnippet(a), "<anon>") +
+		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
+		" (pair " + pairID + ").\n")
+	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
+	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
+	if rsBodyReferencesSelf(a.Code) {
+		src.WriteString("// NOTE: extracted as a free function with &self carried as an\n")
+		src.WriteString("// explicit parameter; bind a receiver at call sites (e.g.\n")
+		src.WriteString("// extracted_helper(&store, key)) or move the fn into an impl\n")
+		src.WriteString("// block to restore method-call syntax.\n")
+	}
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(header)
+	src.WriteString("\n")
+	src.WriteString(body)
+
+	confidence := 0.0
+	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	maxLines := aLines
+	if bLines > maxLines {
+		maxLines = bLines
+	}
+	if maxLines > 0 {
+		confidence = float64(al.CommonLines()) / float64(maxLines)
+	}
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: confidence,
+	}
+}
+
+// rsBodyReferencesSelf reports whether snippet code contains a
+// standalone `self` token. Used to decide whether to emit the
+// self-binding NOTE after lifting a method body to a free function.
+// `Self` (capital S — the implementing-type alias) is also a method
+// idiom but `containsKeyword` is case-sensitive, so this only matches
+// the receiver `self`.
+func rsBodyReferencesSelf(code string) bool {
+	return containsKeyword(code, "self")
+}
+
+// rsHelperHeader rewrites the first recognisable Rust definition
+// header of aCode to use helperName. Skips blank lines, line comments
+// (`//`), block comment fragments (`/*`, `*`), and attributes (`#[...]`)
+// before locating the `fn` keyword. Modifiers (`pub`, `pub(crate)`,
+// `async`, `unsafe`) before `fn` and everything after the function
+// name (generics, parameter list, return type, `where` clause, opening
+// brace) are preserved verbatim. Returns ok=false when no `fn` is
+// found.
+func rsHelperHeader(aCode, helperName string) (string, bool) {
+	for _, l := range strings.Split(aCode, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" ||
+			strings.HasPrefix(t, "//") ||
+			strings.HasPrefix(t, "/*") ||
+			strings.HasPrefix(t, "*") ||
+			strings.HasPrefix(t, "#[") ||
+			strings.HasPrefix(t, "#![") {
+			continue
+		}
+		fnIdx := rsFindFnKeyword(t)
+		if fnIdx < 0 {
+			return "", false
+		}
+		afterFn := t[fnIdx+len("fn "):]
+		nameEnd := 0
+		for nameEnd < len(afterFn) && isIdentByte(afterFn[nameEnd]) {
+			nameEnd++
+		}
+		if nameEnd == 0 {
+			return "", false
+		}
+		return t[:fnIdx] + "fn " + helperName + afterFn[nameEnd:], true
+	}
+	return "", false
+}
+
+// rsFindFnKeyword locates the `fn ` token at the start of a Rust
+// header line, after any leading modifiers (`pub`, `pub(crate)`,
+// `async`, `unsafe`). Returns the byte offset of the `f` in `fn`, or
+// -1 when not found. Modifiers may appear in any order — Rust
+// canonicalises them but rustfmt accepts e.g. `pub async fn`.
+func rsFindFnKeyword(line string) int {
+	rest := line
+	consumed := 0
+	for {
+		switch {
+		case strings.HasPrefix(rest, "fn "):
+			return consumed
+		case strings.HasPrefix(rest, "pub "):
+			rest = rest[len("pub "):]
+			consumed += len("pub ")
+		case strings.HasPrefix(rest, "pub("):
+			closeParen := strings.IndexByte(rest, ')')
+			if closeParen < 0 {
+				return -1
+			}
+			skip := closeParen + 1
+			for skip < len(rest) && (rest[skip] == ' ' || rest[skip] == '\t') {
+				skip++
+			}
+			rest = rest[skip:]
+			consumed += skip
+		case strings.HasPrefix(rest, "async "):
+			rest = rest[len("async "):]
+			consumed += len("async ")
+		case strings.HasPrefix(rest, "unsafe "):
+			rest = rest[len("unsafe "):]
+			consumed += len("unsafe ")
+		case strings.HasPrefix(rest, "extern "):
+			rest = rest[len("extern "):]
+			consumed += len("extern ")
+		case strings.HasPrefix(rest, "const "):
+			rest = rest[len("const "):]
+			consumed += len("const ")
+		default:
+			return -1
+		}
+	}
+}
+
+// rsRebodyAsHelper returns the body of snippet A — everything inside
+// the outermost `{ ... }`. Each body line is dedented by the header
+// line's leading whitespace so the helper renders at column 0 and the
+// body sits at one natural indent level below it. Mirrors
+// jsRebodyAsHelper / javaRebodyAsHelper; the closing `}` of the
+// function passes through.
+func rsRebodyAsHelper(aCode string) string {
+	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
+
+	headerIndent := ""
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "" ||
+			strings.HasPrefix(t, "//") ||
+			strings.HasPrefix(t, "/*") ||
+			strings.HasPrefix(t, "*") ||
+			strings.HasPrefix(t, "#[") ||
+			strings.HasPrefix(t, "#![") {
+			continue
+		}
+		i := 0
+		for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
+			i++
+		}
+		headerIndent = l[:i]
+		break
+	}
+
+	openIdx := -1
+	for i, l := range lines {
+		if strings.Contains(l, "{") {
+			openIdx = i
+			break
+		}
+	}
+	if openIdx < 0 {
+		return strings.Join(lines, "\n") + "\n"
+	}
+	openLine := lines[openIdx]
+	bracePos := strings.IndexByte(openLine, '{')
+	afterBrace := strings.TrimSpace(openLine[bracePos+1:])
+	var body []string
+	if afterBrace != "" {
+		body = append(body, afterBrace)
+	}
+	for _, l := range lines[openIdx+1:] {
+		body = append(body, strings.TrimPrefix(l, headerIndent))
+	}
+	return strings.Join(body, "\n") + "\n"
 }
 
 // synthesizeJavaScript produces a starter helper for two JavaScript or

@@ -252,6 +252,427 @@ func TestSynthesize_JavaScriptAcceptTiers(t *testing.T) {
 	}
 }
 
+// Given a Rust snippet whose first non-blank line is a `fn name(...)`
+// declaration, when rsHelperHeader rewrites the header, then the name
+// is replaced and modifiers (pub/pub(crate)/async/unsafe) plus the
+// parameter list are preserved verbatim. Cycle 2.
+func TestRsHelperHeader_FreeFunctionForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain fn",
+			"fn price_with_tax_a(amount: f64) -> f64 {\n    amount\n}",
+			"fn extracted_h(amount: f64) -> f64 {",
+		},
+		{
+			"pub fn",
+			"pub fn compute(x: i32) -> i32 {\n    x\n}",
+			"pub fn extracted_h(x: i32) -> i32 {",
+		},
+		{
+			"pub(crate) fn",
+			"pub(crate) fn compute(x: i32) -> i32 {\n    x\n}",
+			"pub(crate) fn extracted_h(x: i32) -> i32 {",
+		},
+		{
+			"async fn",
+			"async fn fetch(id: u64) -> Result<String, Error> {\n    Ok(String::new())\n}",
+			"async fn extracted_h(id: u64) -> Result<String, Error> {",
+		},
+		{
+			"unsafe fn",
+			"unsafe fn raw(p: *const u8) -> u8 {\n    *p\n}",
+			"unsafe fn extracted_h(p: *const u8) -> u8 {",
+		},
+		{
+			"pub async fn",
+			"pub async fn fetch(id: u64) -> String {\n    String::new()\n}",
+			"pub async fn extracted_h(id: u64) -> String {",
+		},
+		{
+			"impl method with &self",
+			"    fn fetch_a(&self, key: i32) -> String {\n        String::new()\n    }",
+			"fn extracted_h(&self, key: i32) -> String {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := rsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("rsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a Rust snippet whose header carries generics, lifetimes, a
+// return type, or a `where` clause, when rsHelperHeader rewrites the
+// header, then everything after the function name is preserved
+// verbatim. Cycle 3.
+func TestRsHelperHeader_GenericsAndReturnType(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"single type param",
+			"fn process<T>(x: T) -> T {\n    x\n}",
+			"fn extracted_h<T>(x: T) -> T {",
+		},
+		{
+			"bounded type param",
+			"fn process<T: Clone + Send>(x: T) -> T {\n    x.clone()\n}",
+			"fn extracted_h<T: Clone + Send>(x: T) -> T {",
+		},
+		{
+			"lifetime param",
+			"fn first<'a>(s: &'a str) -> &'a str {\n    s\n}",
+			"fn extracted_h<'a>(s: &'a str) -> &'a str {",
+		},
+		{
+			"return Result",
+			"fn parse(s: &str) -> Result<i32, ParseIntError> {\n    s.parse()\n}",
+			"fn extracted_h(s: &str) -> Result<i32, ParseIntError> {",
+		},
+		{
+			"where clause",
+			"fn process<T>(x: T) -> T where T: Clone {\n    x.clone()\n}",
+			"fn extracted_h<T>(x: T) -> T where T: Clone {",
+		},
+		{
+			"attribute above header",
+			"#[inline]\nfn fast(x: i32) -> i32 {\n    x\n}",
+			"fn extracted_h(x: i32) -> i32 {",
+		},
+		{
+			"doc comment above header",
+			"/// Compute the price.\nfn price(amount: f64) -> f64 {\n    amount\n}",
+			"fn extracted_h(amount: f64) -> f64 {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := rsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("rsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given an impl-method snippet indented 4 spaces, when rsRebodyAsHelper
+// extracts the body, then the method's outer indent is stripped so the
+// body sits at one natural level below a column-zero header, ending
+// with the closing `}`. Cycle 4.
+func TestRsRebodyAsHelper_ImplMethodDedents(t *testing.T) {
+	input := "    fn fetch_a(&self, key: i32) -> String {\n        let prefix = format!(\"{}:\", self.table);\n        prefix\n    }"
+	got := rsRebodyAsHelper(input)
+	expected := "    let prefix = format!(\"{}:\", self.table);\n    prefix\n}\n"
+	if got != expected {
+		t.Errorf("got:\n%q\nwant:\n%q", got, expected)
+	}
+}
+
+// Given a free-function Rust snippet at column 0, when rsRebodyAsHelper
+// runs, then the body is dedented relative to the (zero-indent) header
+// — i.e. preserved as-is. Cycle 4.
+func TestRsRebodyAsHelper_FreeFunctionPassesThrough(t *testing.T) {
+	input := "fn price(amount: f64) -> f64 {\n    amount * 1.07\n}"
+	got := rsRebodyAsHelper(input)
+	expected := "    amount * 1.07\n}\n"
+	if got != expected {
+		t.Errorf("got:\n%q\nwant:\n%q", got, expected)
+	}
+}
+
+// Given two Rust snippets and an Alignment with no common spans, when
+// Synthesize runs, then synthesis is rejected with a "no common
+// lines" Note. Cycle 6.
+func TestSynthesizeRust_EmptyAlignment_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "x.rs:1-3 a", Lang: tokenizer.Rust, Code: "fn a() -> i32 {\n    1\n}"}
+	b := scan.Snippet{Name: "y.rs:1-3 b", Lang: tokenizer.Rust, Code: "fn b() -> i32 {\n    2\n}"}
+	s := Synthesize(a, b, "deadbeef", Alignment{})
+	if !strings.Contains(s.Note, "no common lines") {
+		t.Errorf("expected empty-alignment rejection, got Note=%q", s.Note)
+	}
+}
+
+// Given a Rust snippet whose first non-blank line has no `fn` keyword,
+// when Synthesize runs, then it rejects with a clear Note. Cycle 6.
+func TestSynthesizeRust_NoFnHeader_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "x.rs:1-2 a", Lang: tokenizer.Rust, Code: "// only comments\n// no header"}
+	b := scan.Snippet{Name: "y.rs:1-2 b", Lang: tokenizer.Rust, Code: "// only comments\n// no header"}
+	al := Alignment{Common: []LineSpan{{AStart: 1, AEnd: 3, BStart: 1, BEnd: 3}}}
+	s := Synthesize(a, b, "deadbeef", al)
+	if !strings.Contains(s.Note, "Rust") && !strings.Contains(s.Note, "fn header") {
+		t.Errorf("expected no-fn-header rejection, got Note=%q", s.Note)
+	}
+}
+
+// Given a Rust snippet paired with a Python snippet, when Synthesize
+// runs, then the cross-language guard fires before reaching
+// synthesizeRust. Cycle 6.
+func TestSynthesize_RustCrossLanguage_Rejected(t *testing.T) {
+	a, _ := loadSnippets(t, "../../testdata/refactor/rust/simple")
+	_, bPy := loadSnippets(t, "../../testdata/refactor/python/simple")
+	al := Align(a, bPy)
+	s := Synthesize(a, bPy, "deadbeef", al)
+	if !strings.Contains(s.Note, "cross-language") {
+		t.Errorf("expected cross-language rejection, got %q", s.Note)
+	}
+}
+
+// Given two Rust snippets where B is materially longer than A, when
+// Synthesize computes confidence, then bLines drives the denominator
+// (mirrors the Go/Java/Python/JS tests). Cycle 6.
+func TestSynthesizeRust_ConfidenceWithBLongerThanA(t *testing.T) {
+	a := scan.Snippet{Name: "x.rs:1-3 foo", Lang: tokenizer.Rust, Code: "fn foo() -> i32 {\n    1\n}"}
+	b := scan.Snippet{Name: "y.rs:1-7 bar", Lang: tokenizer.Rust, Code: "fn bar() -> i32 {\n    1\n    let extra = 2;\n    let extra2 = 3;\n    let extra3 = 4;\n    let extra4 = 5;\n}"}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line; alignment found none")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if s.Confidence <= 0 {
+		t.Errorf("Confidence = %v; expected non-zero score", s.Confidence)
+	}
+	if s.Confidence >= 0.5 {
+		t.Errorf("Confidence = %v; expected B's line count to drive denominator", s.Confidence)
+	}
+}
+
+// Given an impl-method Rust snippet whose body references `self`, when
+// Synthesize emits the helper, then a `// NOTE:` line surfaces the
+// self-binding boundary. Cycle 7.
+func TestSynthesize_RustImplMethod_AnnotatesSelfBinding(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.rs:1-4 fetch_a", Lang: tokenizer.Rust,
+		Code: "    fn fetch_a(&self, key: i32) -> String {\n        let prefix = format!(\"{}:\", self.table);\n        prefix\n    }",
+	}
+	b := scan.Snippet{
+		Name: "y.rs:1-4 fetch_b", Lang: tokenizer.Rust,
+		Code: "    fn fetch_b(&self, key: i32) -> String {\n        let prefix = format!(\"{}:\", self.table);\n        prefix\n    }",
+	}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "// NOTE:") {
+		t.Errorf("impl-method helper that references `self` should carry a // NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "self") {
+		t.Errorf("expected NOTE to mention `self`. HelperSrc:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a free-function Rust snippet without any `self` reference,
+// when Synthesize emits the helper, then NO self-binding NOTE is
+// emitted. Cycle 7.
+func TestSynthesize_RustFreeFunction_NoSelfNote(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.rs:1-3 a", Lang: tokenizer.Rust,
+		Code: "fn a(x: i32) -> i32 {\n    x + 1\n}",
+	}
+	b := scan.Snippet{
+		Name: "y.rs:1-3 b", Lang: tokenizer.Rust,
+		Code: "fn b(x: i32) -> i32 {\n    x + 2\n}",
+	}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if strings.Contains(s.HelperSrc, "// NOTE:") {
+		t.Errorf("free-function helper should NOT carry a // NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a hole where one side has a Rust control-flow keyword (incl.
+// the `panic!(...)` macro) and the other doesn't, when
+// rejectControlFlowAsymmetryWithKeywords runs with the Rust keyword
+// set, then it rejects. Symmetric flows and identifier-prefix matches
+// must NOT reject. Cycle 5.
+func TestRejectControlFlowAsymmetry_RustKeywords(t *testing.T) {
+	rsKeywords := []string{"return", "break", "continue", "panic"}
+	cases := []struct {
+		name string
+		hole Hole
+		want bool // true = rejected
+	}{
+		{"panic asymmetric", Hole{AText: "metric.increment();", BText: "panic!(\"bad\");"}, true},
+		{"panic symmetric", Hole{AText: "panic!(\"a\");", BText: "panic!(\"b\");"}, false},
+		{"return asymmetric", Hole{AText: "return 1;", BText: "x = 1;"}, true},
+		{"break asymmetric", Hole{AText: "break;", BText: "continue_value();"}, true},
+		{"continue asymmetric", Hole{AText: "continue;", BText: "next();"}, true},
+		{"panicked identifier not standalone", Hole{AText: "panicked = true;", BText: "x = true;"}, false},
+		{"unrelated", Hole{AText: "x = 1;", BText: "x = 2;"}, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := rejectControlFlowAsymmetryWithKeywords([]Hole{c.hole}, rsKeywords)
+			rejected := !ok
+			if rejected != c.want {
+				t.Errorf("rejected=%v, want %v", rejected, c.want)
+			}
+		})
+	}
+}
+
+// Given two Rust snippets where B introduces a `panic!` on a line A
+// has as a plain statement, when Synthesize runs, then synthesis is
+// rejected with a `control-flow asymmetry` Note containing `"panic"`.
+// Cycle 5 (in-memory; fixture-driven version comes in Cycle 8).
+func TestSynthesize_RustPanicAsymmetry_Rejected_InMemory(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.rs:1-3 a", Lang: tokenizer.Rust,
+		Code: "fn a() {\n    metric.increment();\n}",
+	}
+	b := scan.Snippet{
+		Name: "y.rs:1-3 b", Lang: tokenizer.Rust,
+		Code: "fn b() {\n    panic!(\"bad\");\n}",
+	}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if !strings.Contains(s.Note, "control-flow asymmetry") {
+		t.Errorf("expected control-flow rejection, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.Note, `"panic"`) {
+		t.Errorf("expected the keyword name to be \"panic\" in Note, got %q", s.Note)
+	}
+	if s.HelperSrc != "" {
+		t.Errorf("rejected suggestion should have empty HelperSrc, got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given the simple/medium/advanced Rust fixtures, when Synthesize
+// runs, then it accepts and emits a HelperSrc with the helper
+// signature, the divergence block, and both sides' literals. The
+// advanced case additionally surfaces the self-binding NOTE because
+// the source is an impl method. Cycle 8.
+func TestSynthesize_RustAcceptTiers(t *testing.T) {
+	cases := []struct {
+		dir           string
+		expectInSrc   []string
+		minConfidence float64
+	}{
+		{
+			dir: "../../testdata/refactor/rust/simple",
+			expectInSrc: []string{
+				"fn extracted_price_with_tax_a_",
+				"// Divergences (B vs A):",
+				"0.07",
+				"0.085",
+			},
+			minConfidence: 0.5,
+		},
+		{
+			dir: "../../testdata/refactor/rust/medium",
+			expectInSrc: []string{
+				"fn extracted_format_user_a_",
+				`"user:"`,
+				`"admin:"`,
+				`"(active)"`,
+				`"(privileged)"`,
+			},
+			minConfidence: 0.4,
+		},
+		{
+			dir: "../../testdata/refactor/rust/advanced",
+			expectInSrc: []string{
+				"fn extracted_fetch_a_",
+				`"/v1"`,
+				`"/v2"`,
+				"self.table",
+				"// NOTE:",
+				"&self",
+			},
+			minConfidence: 0.4,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.dir, func(t *testing.T) {
+			a, b := loadSnippets(t, c.dir)
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if s.HelperSrc == "" {
+				t.Fatal("HelperSrc empty")
+			}
+			if s.Confidence < c.minConfidence {
+				t.Errorf("Confidence = %.2f, want >= %.2f", s.Confidence, c.minConfidence)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+			if !validGoIdent(s.HelperName) {
+				t.Errorf("HelperName %q is not a valid identifier", s.HelperName)
+			}
+		})
+	}
+}
+
+// Given the reject-panic fixture (B introduces panic!() where A had a
+// plain call), when Synthesize runs, then it rejects with a
+// `control-flow asymmetry` Note containing `"panic"`. Cycle 8.
+func TestSynthesize_RustPanicAsymmetry_Rejected(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/rust/reject-panic")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note == "" {
+		t.Fatalf("expected rejection, got HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.Note, "control-flow asymmetry") {
+		t.Errorf("Note = %q, want 'control-flow asymmetry' substring", s.Note)
+	}
+	if !strings.Contains(s.Note, `"panic"`) {
+		t.Errorf("Note = %q, want the keyword name to be \"panic\"", s.Note)
+	}
+	if s.HelperSrc != "" {
+		t.Errorf("rejected suggestion should have empty HelperSrc, got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given two Rust snippets that share the bulk of their bodies, when
+// Synthesize runs, then it accepts (no rejection Note) and emits a
+// non-empty HelperSrc. Drives the Rust dispatch into synth.go.
+func TestSynthesize_RustSimple_Accepts(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/rust/simple")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if s.HelperSrc == "" {
+		t.Fatal("HelperSrc empty")
+	}
+}
+
 // Given a snippet whose first non-blank line is a `function name(...)`
 // declaration, when jsHelperHeader rewrites the header, then the
 // function name is replaced and modifiers/parameters/async marker are
@@ -1006,7 +1427,6 @@ func TestSynthesize_JavaCrossLanguage_Rejected(t *testing.T) {
 
 func TestSynthesize_NonGoFixtures_Unsupported(t *testing.T) {
 	cases := []string{
-		"../../testdata/refactor/rust/simple",
 		"../../testdata/refactor/elixir/simple",
 	}
 	for _, dir := range cases {

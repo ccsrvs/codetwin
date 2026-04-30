@@ -24,7 +24,7 @@ commits `159a298`, `59fe97f`, `f53a739` on
 | Python | **Shipped** | Starter helper with `#`-comment divergence block; class methods carried through as top-level helpers with `self`/`cls` as ordinary parameters. |
 | Java | **Shipped** | Starter helper with `//`-comment divergence block; modifiers/generics/`throws` preserved verbatim; helper is appended at file scope after the wrapping class's closing `}` and carries a `// NOTE: appended at file scope…` placement comment (file won't compile until a human moves the helper into the appropriate class — the v1 "starter, human finishes" boundary). Control-flow keyword set extended with `throw`. |
 | JavaScript / TypeScript | **Shipped** | Starter helper with `//`-comment divergence block. Recognises four definition shapes: `function name(...)` (incl. `async` / `export default`), arrow assignments `const|let|var name = (...) => {…}`, `const|let|var name = async function(...) {…}`, and ES6+ class methods. The JS splitter was lifted to method-level granularity in the same commit (matching Python and Java) so detection itself runs on individual methods rather than swallowing whole class bodies. When a method references `this.`, the helper carries a `// NOTE:` line flagging that `this` must be wired at call sites. Control-flow keyword set extended with `throw` (mirrors Java). |
-| Rust | Fixture in place | Returns `unsupported language: rust`. |
+| Rust | **Shipped** | Starter helper with `//`-comment divergence block. Recognises `fn name(...)` headers with any combination of `pub` / `pub(crate)` / `async` / `unsafe` / `const` / `extern` modifiers; preserves generics, lifetimes, return types, and `where` clauses verbatim. Impl methods come through the splitter as method-level chunks (the splitter was already method-granular for Rust). When the body references the standalone `self` keyword, the helper carries a `// NOTE: extracted as a free function with &self carried as an explicit parameter…` block flagging that the receiver must be bound at call sites. Control-flow keyword set extended with `panic` so `panic!(…)` macro asymmetry triggers rejection (mirrors Java's `throw`). |
 | Elixir | Fixture in place | Returns `unsupported language: elixir`; splitter still falls back to whole-file for Elixir. |
 
 ## Context
@@ -223,17 +223,17 @@ history, and only complains about the duplication you just introduced."*
 **That triad is now shipped.**
 
 Bet **4** (refactor patches) shipped Go in v1, then Python, then Java,
-and now JavaScript/TypeScript — codetwin goes from reporter to
-*starter generator*: it emits a unified diff that adds a helper
+then JavaScript/TypeScript, and now Rust — codetwin goes from reporter
+to *starter generator*: it emits a unified diff that adds a helper
 extracted from a clone pair, with a comment block listing every
-divergence. Per-language emitters for Rust are the natural next commit
-(Elixir additionally needs a function-level splitter); fixtures and
-"unsupported language" CLI contracts are already in place. The Java
-emitter established the `cmd/codetwin/refactor_subprocess_test.go`
-convention required by the "Testing layers" section below — every
-future emitter should add subprocess cases there. The JS/TS emitter
-added the first `cmd/codetwin/main_selfhost_test.go` cases, partially
-closing the standing 25.2% coverage gap on cmd/codetwin.
+divergence. Elixir is the only remaining emitter on Bet #4, and it
+additionally needs a function-level splitter (currently whole-file
+fallback). The Java emitter established the
+`cmd/codetwin/refactor_subprocess_test.go` convention required by the
+"Testing layers" section below — every future emitter should add
+subprocess cases there. The JS/TS emitter added the first
+`cmd/codetwin/main_selfhost_test.go` cases, partially closing the
+standing 25.2% coverage gap on cmd/codetwin.
 
 The next bet to consider is **5** (clone watchlist + drift alerts) or
 **6** (cross-repo / org-level scanning), depending on whether the

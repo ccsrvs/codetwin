@@ -153,20 +153,25 @@ A few things worth knowing:
 - **Pair IDs** are 8-char hex digests of `sha1(min(NameA,NameB) + "|"
   + max(NameA,NameB))`. They're stable across runs and order-invariant
   (the same pair has the same ID regardless of which side is "A").
-- **Language coverage in v1.** Go, Python, Java, and
-  JavaScript/TypeScript emit helpers; Rust/Elixir return a
-  `note: unsupported language: ...` and no diff until their
-  per-language emitters land. The synthesizer needs language-specific
-  logic to spot the function header and produce a sensible helper body
-  — fixtures for the remaining languages are already in place under
-  `testdata/refactor/`. For Java, the helper is appended at file scope
-  (after the wrapping class's closing `}`) and carries a `// NOTE:
-  appended at file scope` comment; the human moves it into the
-  appropriate class before compiling. For JavaScript/TypeScript, ES6+
-  class methods are unwrapped and emitted as free `function` helpers;
-  when the body references `this`, the helper carries a `// NOTE:
-  extracted as a free function from a class-method context…` comment
-  flagging that `this` must be wired at call sites.
+- **Language coverage in v1.** Go, Python, Java, JavaScript/TypeScript,
+  and Rust emit helpers; Elixir returns a
+  `note: unsupported language: ...` and no diff until its per-language
+  emitter lands (it additionally needs a function-level splitter). The
+  synthesizer needs language-specific logic to spot the function
+  header and produce a sensible helper body — fixtures for the
+  remaining language are already in place under `testdata/refactor/`.
+  For Java, the helper is appended at file scope (after the wrapping
+  class's closing `}`) and carries a `// NOTE: appended at file scope`
+  comment; the human moves it into the appropriate class before
+  compiling. For JavaScript/TypeScript, ES6+ class methods are
+  unwrapped and emitted as free `function` helpers; when the body
+  references `this`, the helper carries a `// NOTE: extracted as a
+  free function from a class-method context…` comment flagging that
+  `this` must be wired at call sites. For Rust, impl methods are
+  emitted as free `fn` helpers carrying `&self` as an explicit
+  parameter; when the body references `self`, the helper carries a
+  `// NOTE: extracted as a free function with &self carried as an
+  explicit parameter…` comment.
 
 ## A note on config
 
