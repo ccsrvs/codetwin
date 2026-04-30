@@ -111,6 +111,7 @@ func BuildMatrix(
 						continue
 					}
 					local = append(local, report.Pair{
+						ID:         report.PairID(snippets[i].Name, snippets[j].Name),
 						NameA:      snippets[i].Name,
 						NameB:      snippets[j].Name,
 						Structural: structural,

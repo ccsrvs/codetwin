@@ -11,10 +11,21 @@ commits `159a298`, `59fe97f`, `f53a739` on
 | 1 | Git provenance | **Shipped** | `--blame`, `--sort age`, `--sort age-asc` |
 | 2 | PR-delta mode | **Shipped** | `--since <ref>` |
 | 3 | Cross-language as the headline | **Shipped** | `--cross-lang-only`, `lang_{a,b}` JSON |
-| 4 | Refactor patch emission | Not started | (proposed: `--suggest`) |
+| 4 | Refactor patch emission | **Shipped (v1, Go)** | `--suggest <pair-id>`, `--suggest-all`, `id` + `suggested_patch` in JSON |
 | 5 | Clone watchlist + drift alerts | Not started | (proposed: `--baseline`) |
 | 6 | Cross-repo / org-level scanning | Not started | (existing CLI already accepts multiple roots; needs namespacing + per-repo cluster grouping) |
 | 7 | Behavioural / runtime equivalence | Flagged longshot | — |
+
+### Per-language emitter status (Bet #4)
+
+| Language | Synthesizer | Notes |
+|---|---|---|
+| Go | **Shipped** | Starter helper + divergence comment block. |
+| Python | Fixture in place | Returns `unsupported language: python` until an emitter ships. |
+| JavaScript / TypeScript | Fixture in place | Returns `unsupported language: javascript`. |
+| Rust | Fixture in place | Returns `unsupported language: rust`. |
+| Java | Fixture in place | Returns `unsupported language: java`. |
+| Elixir | Fixture in place | Returns `unsupported language: elixir`; splitter still falls back to whole-file for Elixir. |
 
 ## Context
 
@@ -114,26 +125,49 @@ other tool finds duplicate logic across them.
 `internal/similarity/matrix_test.go` (Lang population).
 
 ### 4. Refactor patch emission — turn detection into action
-**Status: Not started.** Natural next step now that the detection
-trio is in place.
+**Status: Shipped (v1, Go-only).**
 
-**Why nobody has it:** Every clone detector stops at "here are the
-matches". Codetwin already aligns matched fingerprints by token
-position (`internal/fingerprint`'s `PositionalSet`), so it can compute
-which tokens differ between two clones and propose an extracted helper
-parameterized on those differences — no LLM required.
+**What landed:**
+- `report.Pair.ID`: stable, order-invariant 8-char hex digest of
+  `sha1(min(NameA,NameB) + "|" + max(NameA,NameB))`. Populated in
+  `similarity.BuildMatrix`; surfaced as `id` in JSON.
+- `--suggest <pair-id>`: looks up the pair across all materialized
+  pairs (so users can address a sub-threshold pair without retuning
+  `--threshold`), runs the refactor pipeline, and prints a unified
+  diff to stdout. Rejection cases print `note: <reason>` on stderr
+  and exit 1.
+- `--suggest-all`: with `--json`, populates `suggested_patch` on every
+  visible pair. Off by default — synthesis cost scales with pair
+  count.
+- New package `internal/refactor`:
+  - `align.go` — language-agnostic line-level LCS alignment producing
+    `Common []LineSpan` + `Holes []Hole`. Operates on raw source
+    rather than normalized tokens (the tokenizer collapses literals
+    so token-level alignment can't see literal-only differences).
+  - `synth.go` — Go emitter. Dispatch returns
+    `unsupported language: <lang>` for Python/JS/TS/Rust/Java/Elixir.
+  - `patch.go` — unified-diff builder; appends the helper at the end
+    of A's file with 3 lines of trailing context.
 
-**Fit:** Medium. Needs new code (template-based emission per language)
-but builds on data the fingerprint layer already has. Pairs naturally
-with the Claude skill: codetwin emits the candidate, Claude applies it.
+**v1 scope choice:** the helper is a *literal copy* of A's body with a
+`// Divergences (B vs A):` comment block listing every divergence;
+codetwin doesn't rewrite either call site. Full parameterization would
+require per-language type inference, which is unsafe without an AST.
+The starter-helper approach makes the boundary explicit — codetwin
+gets you 80% of the way, the human (or the Claude skill) finishes.
 
-**Proposed surface:**
-- `codetwin --suggest <pair-id>` prints a unified diff that introduces
-  a shared helper and rewrites both call sites.
-- JSON gets a `suggested_patch` field (opt-in via `--suggest`).
+**Verified:**
+- `internal/refactor/{align,synth,patch}_test.go` — table-driven over
+  21 fixtures across 6 languages × 3 complexity tiers + 3 Go rejection
+  cases.
+- `internal/refactor/patch_test.go` round-trips a fixture through
+  `git apply --check`.
+- `cmd/codetwin/suggest_test.go` covers the CLI hooks
+  (`emitSuggestion`, `buildSuggestionMap`).
 
-**Critical files (proposed):** new `internal/refactor/extract.go`,
-hooks in `cmd/codetwin/main.go`.
+**Follow-up commits (one per language):** Python, JS/TS, Rust, Java,
+Elixir emitters. Fixtures are already in place under
+`testdata/refactor/<lang>/{simple,medium,advanced}/`.
 
 ### 5. Clone watchlist + drift alerts
 **Status: Not started.**
@@ -188,9 +222,17 @@ The original recommendation was **1 + 2 + 3** as the headline narrative:
 history, and only complains about the duplication you just introduced."*
 **That triad is now shipped.**
 
-Bet **4** (refactor patches) remains the natural follow-up: it converts
-codetwin from a reporter into an actor and makes the Claude skill
-substantially more useful.
+Bet **4** (refactor patches) shipped as a Go-only v1 — codetwin now
+goes from reporter to *starter generator*: it emits a unified diff
+that adds a helper extracted from a clone pair, with a comment block
+listing every divergence. Per-language emitters for Python/JS/TS/
+Rust/Java/Elixir are the natural follow-up commits; fixtures and
+"unsupported language" CLI contracts are already in place.
+
+The next bet to consider is **5** (clone watchlist + drift alerts) or
+**6** (cross-repo / org-level scanning), depending on whether the
+priority is lifecycle (track clone families over time) or scale
+(surface "promote to library" candidates across N repos).
 
 ## Coverage of shipped code
 

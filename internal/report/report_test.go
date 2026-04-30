@@ -665,3 +665,27 @@ func TestBuildMatchPreview_OutOfRangeFirstTokFallsBack(t *testing.T) {
 	}
 }
 
+func TestPairID_OrderInvariant(t *testing.T) {
+	if got, want := PairID("a/foo.go", "b/bar.go"), PairID("b/bar.go", "a/foo.go"); got != want {
+		t.Errorf("PairID not order-invariant: %q vs %q", got, want)
+	}
+}
+
+func TestPairID_LengthAndCharset(t *testing.T) {
+	id := PairID("a/foo.go", "b/bar.go")
+	if len(id) != 8 {
+		t.Fatalf("PairID length = %d, want 8", len(id))
+	}
+	for _, r := range id {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			t.Errorf("PairID %q contains non-hex char %q", id, r)
+		}
+	}
+}
+
+func TestPairID_Distinct(t *testing.T) {
+	if PairID("a", "b") == PairID("a", "c") {
+		t.Error("PairID(a,b) collided with PairID(a,c)")
+	}
+}
+

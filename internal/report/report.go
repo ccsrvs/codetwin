@@ -5,6 +5,8 @@ package report
 import (
 	"cmp"
 	"container/heap"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"sort"
@@ -12,8 +14,27 @@ import (
 	"time"
 )
 
+// PairID returns a stable, order-invariant 8-char hex digest for a pair
+// of snippet names. Sorting the inputs before hashing means
+// PairID(a,b) == PairID(b,a). The 8-char prefix is enough namespace to
+// disambiguate every pair on a real corpus (32 bits of entropy) while
+// staying short enough to type at the CLI.
+func PairID(nameA, nameB string) string {
+	lo, hi := nameA, nameB
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	sum := sha1.Sum([]byte(lo + "|" + hi))
+	return hex.EncodeToString(sum[:4])
+}
+
 // Pair represents a similarity finding between two snippets.
 type Pair struct {
+	// ID is a stable, order-invariant 8-char hex digest derived from
+	// (sorted) NameA + NameB. Lets `--suggest <id>` address one pair
+	// across runs without rerunning the whole pipeline. Empty only on
+	// pairs constructed outside BuildMatrix (e.g. test fixtures).
+	ID         string
 	NameA      string
 	NameB      string
 	Structural float64 // Jaccard

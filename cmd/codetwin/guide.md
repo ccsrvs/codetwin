@@ -126,6 +126,31 @@ or on a system without git installed, codetwin exits 1 with a clear
 error rather than silently degrading — the user explicitly opted in to
 a git-dependent feature, so silent fallback would hide the real problem.
 
+## Refactor suggestions
+
+`--suggest <pair-id>` emits a unified diff that *adds* a starter
+helper to the file containing snippet A. The helper is a literal copy
+of A's body, prefaced by a `// Divergences (B vs A):` comment listing
+exactly what differs. Codetwin doesn't rewrite the call sites — it
+plants a starting point so a human (or the Claude skill) can finish the
+extraction with full visibility on every divergence.
+
+A few things worth knowing:
+
+- **Confidence** is `commonLines / max(linesA, linesB)`. A 1.0
+  confidence means every line of A is shared with B (literal
+  duplication); 0.5 means about half overlap. v1 doesn't gate on
+  confidence — even a low-confidence suggestion can be useful as a
+  diff to read — but `--suggest-all --json` exposes the number so
+  consumers can filter.
+- **Pair IDs** are 8-char hex digests of `sha1(min(NameA,NameB) + "|"
+  + max(NameA,NameB))`. They're stable across runs and order-invariant
+  (the same pair has the same ID regardless of which side is "A").
+- **Why Go-only in v1.** The synthesizer needs language-specific logic
+  to spot the function header and emit a sensible helper name. Adding
+  Python/JS/TS/Rust/Java/Elixir is the natural follow-up; until then
+  non-Go pairs get a `note: unsupported language: ...` and no diff.
+
 ## A note on config
 
 Some `.codetwin.json` knobs change what the tool *sees* before it

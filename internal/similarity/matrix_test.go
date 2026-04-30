@@ -113,6 +113,52 @@ func TestBuildMatrix_PopulatesLanguageOnPairs(t *testing.T) {
 	}
 }
 
+func TestBuildMatrix_PopulatesPairID(t *testing.T) {
+	tokens := []string{"VAR", "=", "VAR", ".", "len", "(", ")", "for", "VAR", "in", "VAR", "VAR", "+=", "VAR"}
+	snips := []scan.Snippet{
+		makeSnippet("a/sum.go", "/a.go", tokens),
+		makeSnippet("b/sum.go", "/b.go", tokens),
+	}
+	vectors := vectorsFor(snips)
+
+	_, pairs := BuildMatrix(snips, vectors, 0, nil)
+
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	}
+	id := pairs[0].ID
+	if len(id) != 8 {
+		t.Errorf("pair ID = %q, want 8-char hex", id)
+	}
+	for _, r := range id {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			t.Errorf("pair ID = %q has non-hex char %q", id, r)
+		}
+	}
+}
+
+func TestBuildMatrix_PairIDIsOrderInvariantAndStable(t *testing.T) {
+	tokens := []string{"VAR", "=", "VAR", ".", "len", "(", ")", "for", "VAR", "in", "VAR", "VAR", "+=", "VAR"}
+	a := makeSnippet("a/sum.go", "/a.go", tokens)
+	b := makeSnippet("b/sum.go", "/b.go", tokens)
+	vectors := vectorsFor([]scan.Snippet{a, b})
+
+	_, pairsAB := BuildMatrix([]scan.Snippet{a, b}, vectors, 0, nil)
+	_, pairsBA := BuildMatrix([]scan.Snippet{b, a}, vectors, 0, nil)
+
+	if len(pairsAB) != 1 || len(pairsBA) != 1 {
+		t.Fatalf("expected 1 pair from each ordering, got %d / %d", len(pairsAB), len(pairsBA))
+	}
+	if pairsAB[0].ID != pairsBA[0].ID {
+		t.Errorf("pair ID not order-invariant: %q vs %q", pairsAB[0].ID, pairsBA[0].ID)
+	}
+	// Re-run with the original ordering — same input, same output.
+	_, pairsAB2 := BuildMatrix([]scan.Snippet{a, b}, vectors, 0, nil)
+	if pairsAB[0].ID != pairsAB2[0].ID {
+		t.Errorf("pair ID not deterministic across runs: %q vs %q", pairsAB[0].ID, pairsAB2[0].ID)
+	}
+}
+
 func TestBuildMatrix_GivenOnPairDoneCallback_When_Build_Then_TotalArgIsPairCount(t *testing.T) {
 	tokens := []string{"VAR", "=", "VAR", "+", "VAR"}
 	snips := []scan.Snippet{
