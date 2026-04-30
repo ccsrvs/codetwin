@@ -352,6 +352,83 @@ func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
 	}
 }
 
+func TestRender_PrintsProvenanceWhenSet(t *testing.T) {
+	intro := time.Date(2024, 7, 15, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{{
+		NameA: "a.go SumA", NameB: "b.go SumB", Score: 0.9,
+		ProvenanceA: &Provenance{
+			FirstCommit: "deadbeefcafebabe1234",
+			FirstAuthor: "Alice Author",
+			FirstTime:   intro,
+		},
+		ProvenanceB: &Provenance{
+			FirstCommit: "feedfacefeedfacefeed",
+			FirstAuthor: "Bob Builder",
+			FirstTime:   intro,
+		},
+	}}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0})
+
+	out := buf.String()
+	wants := []string{
+		"introduced 2024-07-15 by Alice Author (deadbee)", // 7-char short SHA
+		"introduced 2024-07-15 by Bob Builder (feedfac)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("rendered output missing %q\n--- got ---\n%s", w, out)
+		}
+	}
+}
+
+func TestRender_PrintsLastTouchedWhenDistinct(t *testing.T) {
+	first := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	last := time.Date(2025, 6, 30, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{{
+		NameA: "a", NameB: "b", Score: 0.9,
+		ProvenanceA: &Provenance{
+			FirstCommit: "1111111aaaaaaaa",
+			FirstAuthor: "A",
+			FirstTime:   first,
+			LastCommit:  "2222222bbbbbbbb",
+			LastAuthor:  "B",
+			LastTime:    last,
+		},
+	}}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0})
+
+	out := buf.String()
+	want := "introduced 2023-01-01 by A (1111111); last touched 2025-06-30 by B (2222222)"
+	if !strings.Contains(out, want) {
+		t.Errorf("rendered output missing %q\n--- got ---\n%s", want, out)
+	}
+}
+
+func TestRender_OmitsProvenanceWhenNil(t *testing.T) {
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 0.9}}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0})
+	if strings.Contains(buf.String(), "introduced") {
+		t.Errorf("output should not mention provenance when none set; got:\n%s", buf.String())
+	}
+}
+
+func TestShortSHA_TruncatesAndPasses(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"abc", "abc"},
+		{"1234567", "1234567"},
+		{"abcdef0123456789", "abcdef0"},
+	}
+	for _, c := range cases {
+		if got := shortSHA(c.in); got != c.want {
+			t.Errorf("shortSHA(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestPrepare_SortByAgeNewestPairsFirst(t *testing.T) {
 	t1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	t2 := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)

@@ -158,6 +158,61 @@ func TestDiffMap_TouchesIntersectsAnyRange(t *testing.T) {
 	}
 }
 
+func TestParseHunkHeader_GivenMalformedInputs_ReturnsFalse(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"missing plus marker", "@@ -1,2 1,3 @@"},
+		{"non-numeric start", "@@ -1,2 +abc,3 @@"},
+		{"non-numeric count", "@@ -1,2 +5,xyz @@"},
+		{"new-side count zero (deletion)", "@@ -5,3 +5,0 @@"},
+		{"missing trailing space", "@@ -1,2 +5,3@@"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, ok := parseHunkHeader(c.in); ok {
+				t.Errorf("expected (_, false) for malformed input %q", c.in)
+			}
+		})
+	}
+}
+
+func TestParseHunkHeader_GivenSingleLineForm_DefaultsCountToOne(t *testing.T) {
+	// `@@ -10 +20 @@` (no comma) implies count=1 on each side.
+	lr, ok := parseHunkHeader("@@ -10 +20 @@")
+	if !ok {
+		t.Fatalf("expected ok for `@@ -10 +20 @@`")
+	}
+	if lr.Start != 20 || lr.End != 20 {
+		t.Errorf("got %+v, want {20, 20}", lr)
+	}
+}
+
+func TestStripDiffPrefix_LeavesUnusualPrefixesIntact(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"b/foo.go", "foo.go"},
+		{"b/nested/a.go", "nested/a.go"},
+		{"foo.go", "foo.go"},                // no prefix at all
+		{"src/foo.go", "src/foo.go"},        // arbitrary --dst-prefix=src/
+		{"workdir/x/y", "workdir/x/y"},      // arbitrary --dst-prefix=workdir/
+	}
+	for _, c := range cases {
+		if got := stripDiffPrefix(c.in); got != c.want {
+			t.Errorf("stripDiffPrefix(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestTouches_GivenPathInsideRepoButOutsideDiff_ReturnsFalse(t *testing.T) {
+	// Path with a relative-to-root resolution that doesn't start with
+	// ".." but the file isn't in the diff at all.
+	m := DiffMap{"only.go": {{Start: 1, End: 5}}}
+	if m.Touches("/repo", "/repo/other.go", 1, 100) {
+		t.Errorf("expected false for file not in diff")
+	}
+}
+
 func TestChangedSince_GivenUnknownRef_ReturnsError(t *testing.T) {
 	requireGit(t)
 	dir := t.TempDir()

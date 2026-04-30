@@ -106,6 +106,50 @@ func TestBlame_GivenNonexistentFile_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestBlame_GivenInvalidRange_ReturnsError(t *testing.T) {
+	requireGit(t)
+	dir := initRepoWithCommit(t)
+	repo, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	cases := []struct {
+		name       string
+		start, end int
+	}{
+		{"start zero", 0, 3},
+		{"start negative", -1, 3},
+		{"end before start", 5, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := repo.Blame(filepath.Join(dir, "foo.go"), c.start, c.end)
+			if err == nil {
+				t.Errorf("expected error for invalid range [%d, %d]", c.start, c.end)
+			}
+		})
+	}
+}
+
+func TestBlame_GivenPathOutsideRepo_ReturnsError(t *testing.T) {
+	requireGit(t)
+	dir := initRepoWithCommit(t)
+	repo, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Use an absolute path under a different parent so the relative
+	// resolution starts with "..".
+	other := filepath.Join(t.TempDir(), "stranger.go")
+	if err := os.WriteFile(other, []byte("nope\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err = repo.Blame(other, 1, 1)
+	if err == nil {
+		t.Errorf("expected error for path outside repo")
+	}
+}
+
 func TestBlame_TimeIsParsedAsUnix(t *testing.T) {
 	requireGit(t)
 	dir := initRepoWithCommit(t)
