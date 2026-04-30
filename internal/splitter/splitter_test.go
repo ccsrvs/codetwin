@@ -582,6 +582,78 @@ impl Foo {
 	}
 }
 
+// Given an Elixir module with one top-level `def` block, when the
+// splitter runs, then exactly one chunk is produced — the def itself,
+// not the wrapping defmodule. Detection should match individual
+// functions rather than swallowing whole modules. Cycle 1.
+func TestSplit_ElixirModuleAndDef(t *testing.T) {
+	code := `defmodule TaxA do
+  def price_with_tax(amount) do
+    rounded = Float.round(amount, 2)
+    tax = rounded * 0.07
+    Float.round(rounded + tax, 2)
+  end
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	got := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		got = append(got, c.Symbol)
+	}
+	if len(got) != 1 || got[0] != "price_with_tax" {
+		t.Fatalf("expected [price_with_tax], got %v", got)
+	}
+	if !strings.Contains(chunks[0].Code, "rounded * 0.07") {
+		t.Errorf("expected chunk body to include `rounded * 0.07`; got:\n%s", chunks[0].Code)
+	}
+}
+
+// Given an Elixir module with multiple `def`s, when the splitter runs,
+// then each def becomes its own chunk. Cycle 2.
+func TestSplit_ElixirMultipleDefs(t *testing.T) {
+	code := `defmodule Calc do
+  def add(a, b) do
+    a + b
+  end
+
+  def mul(a, b) do
+    a * b
+  end
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	got := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		got = append(got, c.Symbol)
+	}
+	if len(got) != 2 || got[0] != "add" || got[1] != "mul" {
+		t.Errorf("expected [add mul], got %v", got)
+	}
+}
+
+// Given an Elixir module containing a private `defp`, when the
+// splitter runs, then the private def is also extracted. Cycle 3.
+func TestSplit_ElixirDefp(t *testing.T) {
+	code := `defmodule Calc do
+  def public_add(a, b) do
+    private_add(a, b)
+  end
+
+  defp private_add(a, b) do
+    a + b
+  end
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	got := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		got = append(got, c.Symbol)
+	}
+	if len(got) != 2 || got[0] != "public_add" || got[1] != "private_add" {
+		t.Errorf("expected [public_add private_add], got %v", got)
+	}
+}
+
 func TestSplit_JavaInterfaceStubsFallBackToWholeFile(t *testing.T) {
 	// An interface containing only abstract method stubs (no bodies) has
 	// no `{`-balanced chunks for splitJava to extract, so the splitter

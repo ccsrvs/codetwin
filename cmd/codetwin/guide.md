@@ -153,25 +153,25 @@ A few things worth knowing:
 - **Pair IDs** are 8-char hex digests of `sha1(min(NameA,NameB) + "|"
   + max(NameA,NameB))`. They're stable across runs and order-invariant
   (the same pair has the same ID regardless of which side is "A").
-- **Language coverage in v1.** Go, Python, Java, JavaScript/TypeScript,
-  and Rust emit helpers; Elixir returns a
-  `note: unsupported language: ...` and no diff until its per-language
-  emitter lands (it additionally needs a function-level splitter). The
-  synthesizer needs language-specific logic to spot the function
-  header and produce a sensible helper body — fixtures for the
-  remaining language are already in place under `testdata/refactor/`.
-  For Java, the helper is appended at file scope (after the wrapping
-  class's closing `}`) and carries a `// NOTE: appended at file scope`
-  comment; the human moves it into the appropriate class before
-  compiling. For JavaScript/TypeScript, ES6+ class methods are
-  unwrapped and emitted as free `function` helpers; when the body
-  references `this`, the helper carries a `// NOTE: extracted as a
-  free function from a class-method context…` comment flagging that
-  `this` must be wired at call sites. For Rust, impl methods are
-  emitted as free `fn` helpers carrying `&self` as an explicit
-  parameter; when the body references `self`, the helper carries a
-  `// NOTE: extracted as a free function with &self carried as an
-  explicit parameter…` comment.
+- **Language coverage in v1.** All six supported languages emit
+  helpers — Go, Python, Java, JavaScript/TypeScript, Rust, and Elixir.
+  The synthesizer needs language-specific logic to spot the function
+  header and produce a sensible helper body. For Java, the helper is
+  appended at file scope (after the wrapping class's closing `}`) and
+  carries a `// NOTE: appended at file scope` comment; the human moves
+  it into the appropriate class before compiling. For
+  JavaScript/TypeScript, ES6+ class methods are unwrapped and emitted
+  as free `function` helpers; when the body references `this`, the
+  helper carries a `// NOTE: extracted as a free function from a
+  class-method context…` comment flagging that `this` must be wired
+  at call sites. For Rust, impl methods are emitted as free `fn`
+  helpers carrying `&self` as an explicit parameter; when the body
+  references `self`, the helper carries a `// NOTE: extracted as a
+  free function with &self carried as an explicit parameter…`
+  comment. For Elixir, defs are emitted as a free `def name do … end`
+  block and ALWAYS carry a `# NOTE: appended at file scope; Elixir
+  defs must live inside a defmodule…` comment, since Elixir cannot
+  have free-standing defs.
 
 ## A note on config
 

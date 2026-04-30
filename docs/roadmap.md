@@ -25,7 +25,7 @@ commits `159a298`, `59fe97f`, `f53a739` on
 | Java | **Shipped** | Starter helper with `//`-comment divergence block; modifiers/generics/`throws` preserved verbatim; helper is appended at file scope after the wrapping class's closing `}` and carries a `// NOTE: appended at file scope…` placement comment (file won't compile until a human moves the helper into the appropriate class — the v1 "starter, human finishes" boundary). Control-flow keyword set extended with `throw`. |
 | JavaScript / TypeScript | **Shipped** | Starter helper with `//`-comment divergence block. Recognises four definition shapes: `function name(...)` (incl. `async` / `export default`), arrow assignments `const|let|var name = (...) => {…}`, `const|let|var name = async function(...) {…}`, and ES6+ class methods. The JS splitter was lifted to method-level granularity in the same commit (matching Python and Java) so detection itself runs on individual methods rather than swallowing whole class bodies. When a method references `this.`, the helper carries a `// NOTE:` line flagging that `this` must be wired at call sites. Control-flow keyword set extended with `throw` (mirrors Java). |
 | Rust | **Shipped** | Starter helper with `//`-comment divergence block. Recognises `fn name(...)` headers with any combination of `pub` / `pub(crate)` / `async` / `unsafe` / `const` / `extern` modifiers; preserves generics, lifetimes, return types, and `where` clauses verbatim. Impl methods come through the splitter as method-level chunks (the splitter was already method-granular for Rust). When the body references the standalone `self` keyword, the helper carries a `// NOTE: extracted as a free function with &self carried as an explicit parameter…` block flagging that the receiver must be bound at call sites. Control-flow keyword set extended with `panic` so `panic!(…)` macro asymmetry triggers rejection (mirrors Java's `throw`). |
-| Elixir | Fixture in place | Returns `unsupported language: elixir`; splitter still falls back to whole-file for Elixir. |
+| Elixir | **Shipped** | Starter helper with `#`-comment divergence block. Recognises `def name(args) do` and `defp name(args) do` block-form headers; preserves params and trailing `do` verbatim. Splitter was extended in the same commit to extract individual defs from `defmodule` blocks (mirroring Python's method-level granularity). Helper is emitted as a free `def` and ALWAYS carries a `# NOTE: appended at file scope; Elixir defs must live inside a defmodule…` block — Elixir defs cannot live at file scope, so the user must always move the helper into a module before running. Control-flow keyword set is `["raise", "throw", "exit"]` (Elixir has no `return`/`break`/`continue`; functions return their last expression). |
 
 ## Context
 
@@ -222,18 +222,47 @@ The original recommendation was **1 + 2 + 3** as the headline narrative:
 history, and only complains about the duplication you just introduced."*
 **That triad is now shipped.**
 
-Bet **4** (refactor patches) shipped Go in v1, then Python, then Java,
-then JavaScript/TypeScript, and now Rust — codetwin goes from reporter
-to *starter generator*: it emits a unified diff that adds a helper
-extracted from a clone pair, with a comment block listing every
-divergence. Elixir is the only remaining emitter on Bet #4, and it
-additionally needs a function-level splitter (currently whole-file
-fallback). The Java emitter established the
-`cmd/codetwin/refactor_subprocess_test.go` convention required by the
-"Testing layers" section below — every future emitter should add
-subprocess cases there. The JS/TS emitter added the first
-`cmd/codetwin/main_selfhost_test.go` cases, partially closing the
-standing 25.2% coverage gap on cmd/codetwin.
+Bet **4** (refactor patches) is **fully shipped** — Go, Python, Java,
+JavaScript/TypeScript, Rust, and Elixir all emit starter helpers via
+`--suggest`. Codetwin goes from reporter to *starter generator*: it
+emits a unified diff that adds a helper extracted from a clone pair,
+with a comment block listing every divergence. The Elixir commit also
+built the long-standing missing function-level splitter so detection
+runs at def granularity rather than swallowing whole modules. The Java
+emitter established the `cmd/codetwin/refactor_subprocess_test.go`
+convention required by the "Testing layers" section below — every
+future emitter should add subprocess cases there. The JS/TS emitter
+added the first `cmd/codetwin/main_selfhost_test.go` cases, partially
+closing the standing 25.2% coverage gap on cmd/codetwin.
+
+### Bet #4 deferred follow-ups
+
+These were carved out of the v1 emitter implementations and remain
+worth pursuing if a real-world fixture surfaces or a user requests
+them:
+
+- **Elixir `do:` shorthand** — `def add(a, b), do: a + b` (single-line
+  form, no `end`). The current splitter only matches block-form
+  headers ending in bare `do`; the emitter has no rebody path for the
+  shorthand. Needs both pieces extended together.
+- **Elixir multi-clause guarded defs** — `def parse(0), do: …` then
+  `def parse(n) when n > 0, do: …`. Splitter would currently emit each
+  clause as a separate chunk; the emitter would synthesize a helper
+  from one clause only. Needs a multi-clause-aware grouping pass.
+- **Elixir `@spec` / `@doc` propagation** — module attributes sitting
+  above a def are skipped by `exHelperHeader` and not carried into the
+  emitted helper. If the contract or docstring is part of the
+  duplication's value, it should propagate.
+- **Auto-insertion inside the enclosing `defmodule`** — Elixir and
+  Java helpers both append at file scope and ask the user to relocate.
+  Detecting the chunk's parent container and inserting before its
+  closing `end`/`}` would make the patch immediately compilable.
+- **Python multi-line `def` signatures** — flagged as a TODO at
+  `pythonHelperHeader`. v1 fixtures don't exercise it.
+- **TypeScript-specific syntax in the JS emitter** — return-type
+  annotations (`fn(): T {`), interface declarations, etc. The shared
+  JS emitter handles plain TS today but doesn't strip type
+  annotations.
 
 The next bet to consider is **5** (clone watchlist + drift alerts) or
 **6** (cross-repo / org-level scanning), depending on whether the

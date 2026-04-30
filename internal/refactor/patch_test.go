@@ -418,6 +418,66 @@ func TestBuildPatch_RustSimple_AppliesClean(t *testing.T) {
 	}
 }
 
+// TestBuildPatch_ElixirSimple_AppliesClean is the Elixir round-trip:
+// synthesize the helper for the simple Elixir fixture, build the diff
+// against a temp git repo, and confirm `git apply` accepts it. The
+// resulting file is NOT valid Elixir (the helper lands after the
+// wrapping defmodule's `end`) — that's the documented v1 contract.
+func TestBuildPatch_ElixirSimple_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippets(t, "../../testdata/refactor/elixir/simple")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/elixir/simple/a.ex")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.ex")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.ex: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.ex", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s",
+			err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	got := string(patched)
+	if !strings.Contains(got, "def extracted_price_with_tax_deadbeef(amount) do") {
+		t.Errorf("patched file missing Elixir helper signature. Content:\n%s", got)
+	}
+	if !strings.Contains(got, "# Divergences (B vs A):") {
+		t.Errorf("patched file missing `#`-style divergence block")
+	}
+	if !strings.Contains(got, "# NOTE: appended at file scope") {
+		t.Errorf("patched file missing the module-context NOTE")
+	}
+}
+
 func TestBuildPatch_EmptySuggestion_ReturnsEmpty(t *testing.T) {
 	out, err := BuildPatch("/nonexistent/path", Suggestion{Note: "rejected: ..."})
 	if err != nil {

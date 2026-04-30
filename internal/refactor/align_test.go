@@ -182,11 +182,16 @@ func TestAlign_FixturesAcrossLanguages(t *testing.T) {
 			holeBContains:  []string{"priceWithTaxB", "0.085"},
 		},
 		{
+			// After the Elixir splitter shipped, chunks are the inner
+			// `def price_with_tax(amount) do` (identical between A and B)
+			// — so the wrapper module names `TaxA`/`TaxB` no longer
+			// appear in the alignment. The only divergence is the tax
+			// rate literal.
 			dir:            "../../testdata/refactor/elixir/simple",
 			minCommonRatio: 0.4,
 			maxHoles:       3,
-			holeAContains:  []string{"TaxA", "0.07"},
-			holeBContains:  []string{"TaxB", "0.085"},
+			holeAContains:  []string{"0.07"},
+			holeBContains:  []string{"0.085"},
 		},
 	}
 

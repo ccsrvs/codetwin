@@ -69,6 +69,8 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 		chunks = splitBraceLang(code, rustFnRe)
 	case tokenizer.Java:
 		chunks = splitJava(code)
+	case tokenizer.Elixir:
+		chunks = splitElixir(code)
 	}
 	if len(chunks) == 0 {
 		lines := strings.Split(code, "\n")
@@ -550,4 +552,81 @@ func jsHeaderMatch(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ── Elixir ────────────────────────────────────────────────────────────────────
+
+var exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp)\s+(\w+)`)
+
+// splitElixir chunks an Elixir source file into per-`def`/`defp` blocks.
+// Each chunk runs from the def's header line through the matching `end`
+// keyword at the same indent level. Module wrappers (`defmodule`) are
+// not chunked; their inner defs are. v1 only supports the
+// `def name(args) do ... end` block form — the `do:` shorthand
+// (`def add(a, b), do: a + b`) and multi-clause guarded forms aren't
+// matched. Header lines must end with the bare `do` keyword.
+func splitElixir(code string) []Chunk {
+	lines := strings.Split(code, "\n")
+	var chunks []Chunk
+	i := 0
+	for i < len(lines) {
+		m := exDefRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			i++
+			continue
+		}
+		if !exHeaderEndsWithDo(lines[i]) {
+			i++
+			continue
+		}
+		defIndent := indentLen(m[1])
+		end := exFindMatchingEnd(lines, i, defIndent)
+		if end < 0 {
+			i++
+			continue
+		}
+		chunks = append(chunks, Chunk{
+			StartLine: i + 1,
+			EndLine:   end + 1,
+			Symbol:    m[2],
+			Code:      strings.Join(lines[i:end+1], "\n"),
+		})
+		i = end + 1
+	}
+	return chunks
+}
+
+// exHeaderEndsWithDo reports whether a `def` header line terminates
+// with the bare `do` keyword (block form). Skips the `do:` shorthand
+// and any continuation form that doesn't open a do/end block.
+func exHeaderEndsWithDo(line string) bool {
+	t := strings.TrimRight(line, " \t")
+	if !strings.HasSuffix(t, " do") && t != "do" {
+		return false
+	}
+	if strings.HasSuffix(t, ", do") {
+		return false
+	}
+	return true
+}
+
+// exFindMatchingEnd walks forward from defLine looking for the first
+// non-blank line at indent <= defIndent whose trimmed text is `end`.
+// That line closes the def's block. Returns -1 if no closing `end` is
+// found at the matching indent — the caller should skip this def.
+func exFindMatchingEnd(lines []string, defLine, defIndent int) int {
+	for j := defLine + 1; j < len(lines); j++ {
+		t := strings.TrimSpace(lines[j])
+		if t == "" {
+			continue
+		}
+		ind := indentLen(lines[j])
+		if ind <= defIndent {
+			if t == "end" {
+				return j
+			}
+			return -1
+		}
+	}
+	return -1
 }

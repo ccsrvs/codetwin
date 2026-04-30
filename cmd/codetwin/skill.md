@@ -142,12 +142,13 @@ Rejection cases (printed as a `note:` line on stderr; exit 1):
 - Anonymous/goroutine/defer chunks (Go)
 - Cross-language pairs (v1 doesn't transpile)
 - Unsupported language (v1 supports Go, Python, Java,
-  JavaScript/TypeScript, and Rust; Elixir returns a clear note so a
-  follow-up emitter has a known contract)
+  JavaScript/TypeScript, Rust, and Elixir — every language with a
+  splitter)
 - Holes where one side has a control-flow keyword (`return`/`break`/
   `continue`, plus `raise`/`yield` for Python, `throw`/`yield` for
-  Java and JavaScript/TypeScript, and `panic` for Rust) and the other
-  doesn't — that asymmetry signals semantically different snippets
+  Java and JavaScript/TypeScript, `panic` for Rust, and
+  `raise`/`throw`/`exit` for Elixir) and the other doesn't — that
+  asymmetry signals semantically different snippets
 
 For Java specifically, the helper is appended at file scope (after the
 wrapping class's closing `}`) so the diff applies cleanly via `git
@@ -172,6 +173,13 @@ carries a `// NOTE: extracted as a free function with &self carried as
 an explicit parameter…` comment so the user knows to either bind a
 receiver at call sites (e.g. `extracted_helper(&store, key)`) or move
 the helper into an `impl` block.
+
+For Elixir, defs (and `defp` private defs) inside a `defmodule` are
+extracted as method-level chunks. The helper is emitted as a free
+`def name(args) do … end` block and ALWAYS carries a `# NOTE: appended
+at file scope; Elixir defs must live inside a defmodule…` comment —
+Elixir cannot have free-standing defs, so the user must always move
+the helper into an appropriate module before running.
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
 pair, so a single run produces machine-readable suggestions across the

@@ -40,9 +40,11 @@ func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 		return synthesizeJavaScript(a, b, pairID, al)
 	case tokenizer.Rust:
 		return synthesizeRust(a, b, pairID, al)
+	case tokenizer.Elixir:
+		return synthesizeElixir(a, b, pairID, al)
 	default:
 		return Suggestion{Note: fmt.Sprintf(
-			"unsupported language: %s (v1 supports Go, Python, Java, JavaScript/TypeScript, Rust)", a.Lang)}
+			"unsupported language: %s", a.Lang)}
 	}
 }
 
@@ -332,6 +334,148 @@ func synthesizeRust(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 // the receiver `self`.
 func rsBodyReferencesSelf(code string) bool {
 	return containsKeyword(code, "self")
+}
+
+// synthesizeElixir produces a starter helper for two Elixir snippets.
+// The emitter targets the same v1 contract as Go/Python/Java/JS/Rust:
+// literal copy of A's body, divergence comments, no parameterization,
+// human finishes the refactor.
+//
+// Elixir defs must live inside a `defmodule`, so the helper is
+// emitted as a free `def` block and ALWAYS carries a `# NOTE:` line
+// flagging that the user must move it into an appropriate module
+// before running. (Mirrors Java's "appended at file scope" contract,
+// adapted for Elixir's module-context requirement.)
+//
+// Rejection rules:
+//   - Alignment must have at least one common span.
+//   - Holes must agree on `raise`/`throw`/`exit` presence — Elixir
+//     has no `return`/`break`/`continue` (functions return their last
+//     expression; iteration is recursive).
+//   - The chunk must have a recognisable `def`/`defp` header.
+func synthesizeElixir(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between snippets"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
+		[]string{"raise", "throw", "exit"}); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
+	header, ok := exHelperHeader(a.Code, helperName)
+	if !ok {
+		return Suggestion{Note: "rejected: snippet has no recognisable Elixir def header"}
+	}
+	body := exRebodyAsHelper(a.Code)
+	divergence := formatDivergenceComment(al.Holes, "#")
+
+	src := strings.Builder{}
+	src.WriteString("# codetwin: starter helper extracted from " +
+		nonEmpty(SymbolForSnippet(a), "<anon>") +
+		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
+		" (pair " + pairID + ").\n")
+	src.WriteString("# This is a literal copy of the first snippet's body. Review the\n")
+	src.WriteString("# divergences below and parameterize as needed before relying on it.\n")
+	src.WriteString("# NOTE: appended at file scope; Elixir defs must live inside a\n")
+	src.WriteString("# defmodule — move this def into the appropriate module (or\n")
+	src.WriteString("# extract to a shared helper module) before compiling.\n")
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(header)
+	src.WriteString("\n")
+	src.WriteString(body)
+
+	confidence := 0.0
+	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	maxLines := aLines
+	if bLines > maxLines {
+		maxLines = bLines
+	}
+	if maxLines > 0 {
+		confidence = float64(al.CommonLines()) / float64(maxLines)
+	}
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: confidence,
+	}
+}
+
+// exRebodyAsHelper returns the body of an Elixir def chunk —
+// everything between the header line's trailing `do` and the
+// closing `end`. Each body line is dedented by the header line's
+// leading whitespace so the helper renders at column 0 with body lines
+// at one natural indent level. The closing `end` of the def passes
+// through. Mirrors rsRebodyAsHelper / javaRebodyAsHelper in shape,
+// adapted for `do`/`end` framing.
+func exRebodyAsHelper(aCode string) string {
+	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
+
+	headerIdx := -1
+	headerIndent := ""
+	for i, l := range lines {
+		t := strings.TrimSpace(l)
+		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
+			continue
+		}
+		headerIdx = i
+		k := 0
+		for k < len(l) && (l[k] == ' ' || l[k] == '\t') {
+			k++
+		}
+		headerIndent = l[:k]
+		break
+	}
+	if headerIdx < 0 {
+		return strings.Join(lines, "\n") + "\n"
+	}
+	var body []string
+	for _, l := range lines[headerIdx+1:] {
+		body = append(body, strings.TrimPrefix(l, headerIndent))
+	}
+	return strings.Join(body, "\n") + "\n"
+}
+
+// exHelperHeader rewrites the first recognisable Elixir `def`/`defp`
+// header of aCode to use helperName. Skips blank lines, line comments
+// (`#`), and module attributes (`@spec`, `@doc`, etc.) before locating
+// the def keyword. The `def` or `defp` keyword, parameter list, and
+// trailing `do` keyword are preserved verbatim. Returns ok=false when
+// no def header is found.
+func exHelperHeader(aCode, helperName string) (string, bool) {
+	for _, l := range strings.Split(aCode, "\n") {
+		t := strings.TrimSpace(l)
+		if t == "" ||
+			strings.HasPrefix(t, "#") ||
+			strings.HasPrefix(t, "@") {
+			continue
+		}
+		var keyword string
+		var rest string
+		switch {
+		case strings.HasPrefix(t, "def "):
+			keyword = "def "
+			rest = t[len("def "):]
+		case strings.HasPrefix(t, "defp "):
+			keyword = "defp "
+			rest = t[len("defp "):]
+		default:
+			return "", false
+		}
+		nameEnd := 0
+		for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
+			nameEnd++
+		}
+		if nameEnd == 0 {
+			return "", false
+		}
+		return keyword + helperName + rest[nameEnd:], true
+	}
+	return "", false
 }
 
 // rsHelperHeader rewrites the first recognisable Rust definition

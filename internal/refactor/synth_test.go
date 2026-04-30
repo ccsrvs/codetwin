@@ -658,6 +658,331 @@ func TestSynthesize_RustPanicAsymmetry_Rejected(t *testing.T) {
 	}
 }
 
+// Given an Elixir snippet whose first non-blank line is a `def` or
+// `defp` declaration, when exHelperHeader rewrites the header, then
+// the function name is replaced and the def/defp keyword, parameters,
+// and trailing `do` are preserved verbatim. Cycle 5.
+func TestExHelperHeader_DefForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain def",
+			"def price_with_tax(amount) do\n  amount\nend",
+			"def extracted_h(amount) do",
+		},
+		{
+			"private defp",
+			"defp internal(x) do\n  x\nend",
+			"defp extracted_h(x) do",
+		},
+		{
+			"indented def (inside defmodule)",
+			"  def fetch_a(table, key) do\n    \"#{table}:\"\n  end",
+			"def extracted_h(table, key) do",
+		},
+		{
+			"def with multiple params",
+			"def format(name, age) do\n  name\nend",
+			"def extracted_h(name, age) do",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := exHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("exHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given the simple/medium/advanced Elixir fixtures, when Synthesize
+// runs, then it accepts and emits a HelperSrc with the helper
+// signature, the divergence block, the module-context NOTE, and both
+// sides' literals. Cycle 10.
+func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
+	cases := []struct {
+		dir           string
+		expectInSrc   []string
+		minConfidence float64
+	}{
+		{
+			dir: "../../testdata/refactor/elixir/simple",
+			expectInSrc: []string{
+				"def extracted_price_with_tax_",
+				"# Divergences (B vs A):",
+				"# NOTE:",
+				"defmodule",
+				"0.07",
+				"0.085",
+			},
+			minConfidence: 0.5,
+		},
+		{
+			dir: "../../testdata/refactor/elixir/medium",
+			expectInSrc: []string{
+				"def extracted_format_",
+				`"user:"`,
+				`"admin:"`,
+				`"(active)"`,
+				`"(privileged)"`,
+				"# NOTE:",
+			},
+			minConfidence: 0.4,
+		},
+		{
+			dir: "../../testdata/refactor/elixir/advanced",
+			expectInSrc: []string{
+				"def extracted_fetch_a_",
+				`"/v1"`,
+				`"/v2"`,
+				"# NOTE:",
+			},
+			minConfidence: 0.4,
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.dir, func(t *testing.T) {
+			a, b := loadSnippets(t, c.dir)
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if s.HelperSrc == "" {
+				t.Fatal("HelperSrc empty")
+			}
+			if s.Confidence < c.minConfidence {
+				t.Errorf("Confidence = %.2f, want >= %.2f", s.Confidence, c.minConfidence)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+			if !validGoIdent(s.HelperName) {
+				t.Errorf("HelperName %q is not a valid identifier", s.HelperName)
+			}
+		})
+	}
+}
+
+// Given the reject-raise fixture (B introduces raise where A returns
+// :ok), when Synthesize runs, then it rejects with a `control-flow
+// asymmetry` Note containing `"raise"`. Cycle 10.
+func TestSynthesize_ElixirRaiseAsymmetry_Rejected(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/elixir/reject-raise")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note == "" {
+		t.Fatalf("expected rejection, got HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.Note, "control-flow asymmetry") {
+		t.Errorf("Note = %q, want 'control-flow asymmetry' substring", s.Note)
+	}
+	if !strings.Contains(s.Note, `"raise"`) {
+		t.Errorf("Note = %q, want the keyword name to be \"raise\"", s.Note)
+	}
+	if s.HelperSrc != "" {
+		t.Errorf("rejected suggestion should have empty HelperSrc, got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a hole where one side has an Elixir control-flow keyword
+// (raise/throw/exit) and the other doesn't, when
+// rejectControlFlowAsymmetryWithKeywords runs with the Elixir set,
+// then it rejects. Symmetric and identifier-prefix matches must NOT
+// reject. Cycle 7.
+func TestRejectControlFlowAsymmetry_ElixirKeywords(t *testing.T) {
+	exKeywords := []string{"raise", "throw", "exit"}
+	cases := []struct {
+		name string
+		hole Hole
+		want bool
+	}{
+		{"raise asymmetric", Hole{AText: ":ok", BText: "raise \"bad\""}, true},
+		{"raise symmetric", Hole{AText: "raise \"a\"", BText: "raise \"b\""}, false},
+		{"throw asymmetric", Hole{AText: ":ok", BText: "throw :bad"}, true},
+		{"exit asymmetric", Hole{AText: ":ok", BText: "exit(:normal)"}, true},
+		{"raised identifier not standalone", Hole{AText: "raised = true", BText: "x = true"}, false},
+		{"unrelated", Hole{AText: "x = 1", BText: "x = 2"}, false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, ok := rejectControlFlowAsymmetryWithKeywords([]Hole{c.hole}, exKeywords)
+			rejected := !ok
+			if rejected != c.want {
+				t.Errorf("rejected=%v, want %v", rejected, c.want)
+			}
+		})
+	}
+}
+
+// Given two Elixir snippets where B introduces `raise` on a line A
+// has as a return value, when Synthesize runs, then synthesis is
+// rejected with a `control-flow asymmetry` Note containing `"raise"`.
+// Cycle 7 (in-memory; fixture-driven version is in C10).
+func TestSynthesize_ElixirRaiseAsymmetry_Rejected_InMemory(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.ex:1-3 a", Lang: tokenizer.Elixir,
+		Code: "def a do\n  :ok\nend",
+	}
+	b := scan.Snippet{
+		Name: "y.ex:1-3 b", Lang: tokenizer.Elixir,
+		Code: "def b do\n  raise \"bad\"\nend",
+	}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if !strings.Contains(s.Note, "control-flow asymmetry") {
+		t.Errorf("expected control-flow rejection, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.Note, `"raise"`) {
+		t.Errorf("expected the keyword name to be \"raise\" in Note, got %q", s.Note)
+	}
+	if s.HelperSrc != "" {
+		t.Errorf("rejected suggestion should have empty HelperSrc, got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given two Elixir snippets and an Alignment with no common spans,
+// when Synthesize runs, then synthesis is rejected with a "no common
+// lines" Note. Cycle 8.
+func TestSynthesizeElixir_EmptyAlignment_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:1-3 a", Lang: tokenizer.Elixir, Code: "def a do\n  1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, Code: "def b do\n  2\nend"}
+	s := Synthesize(a, b, "deadbeef", Alignment{})
+	if !strings.Contains(s.Note, "no common lines") {
+		t.Errorf("expected empty-alignment rejection, got Note=%q", s.Note)
+	}
+}
+
+// Given an Elixir snippet whose first non-blank line has no `def`,
+// when Synthesize runs, then it rejects with a clear Note. Cycle 8.
+func TestSynthesizeElixir_NoDefHeader_Rejected(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:1-2 a", Lang: tokenizer.Elixir, Code: "# only comments\n# no header"}
+	b := scan.Snippet{Name: "y.ex:1-2 b", Lang: tokenizer.Elixir, Code: "# only comments\n# no header"}
+	al := Alignment{Common: []LineSpan{{AStart: 1, AEnd: 3, BStart: 1, BEnd: 3}}}
+	s := Synthesize(a, b, "deadbeef", al)
+	if !strings.Contains(s.Note, "Elixir") && !strings.Contains(s.Note, "def header") {
+		t.Errorf("expected no-def-header rejection, got Note=%q", s.Note)
+	}
+}
+
+// Given an Elixir snippet paired with a Python snippet, when
+// Synthesize runs, then the cross-language guard fires before reaching
+// synthesizeElixir. Cycle 8.
+func TestSynthesize_ElixirCrossLanguage_Rejected(t *testing.T) {
+	a, _ := loadSnippets(t, "../../testdata/refactor/elixir/simple")
+	_, bPy := loadSnippets(t, "../../testdata/refactor/python/simple")
+	al := Align(a, bPy)
+	s := Synthesize(a, bPy, "deadbeef", al)
+	if !strings.Contains(s.Note, "cross-language") {
+		t.Errorf("expected cross-language rejection, got %q", s.Note)
+	}
+}
+
+// Given two Elixir snippets where B is materially longer than A, when
+// Synthesize computes confidence, then bLines drives the denominator
+// (mirrors the other languages). Cycle 8.
+func TestSynthesizeElixir_ConfidenceWithBLongerThanA(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:1-3 foo", Lang: tokenizer.Elixir, Code: "def foo do\n  1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-7 bar", Lang: tokenizer.Elixir, Code: "def bar do\n  1\n  e = 2\n  e2 = 3\n  e3 = 4\n  e4 = 5\nend"}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if s.Confidence <= 0 {
+		t.Errorf("Confidence = %v; expected non-zero score", s.Confidence)
+	}
+	if s.Confidence >= 0.5 {
+		t.Errorf("Confidence = %v; expected B's line count to drive denominator", s.Confidence)
+	}
+}
+
+// Given any Elixir snippet, when Synthesize emits the helper, then a
+// `# NOTE:` block always surfaces — Elixir defs cannot live at file
+// scope, so the user must always move the helper into a module.
+// Cycle 9.
+func TestSynthesize_ElixirAlwaysCarriesModuleNote(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:1-3 a", Lang: tokenizer.Elixir, Code: "def a(x) do\n  x + 1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, Code: "def b(x) do\n  x + 2\nend"}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "# NOTE:") {
+		t.Errorf("Elixir helper should always carry a module-context # NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "defmodule") {
+		t.Errorf("expected NOTE to mention `defmodule`. HelperSrc:\n%s", s.HelperSrc)
+	}
+}
+
+// Given an Elixir def chunk indented 2 spaces (inside a defmodule),
+// when exRebodyAsHelper extracts the body, then the def's outer indent
+// is stripped so the body sits at one natural indent level below a
+// column-zero header, ending with `end`. Cycle 6.
+func TestExRebodyAsHelper_IndentedDefDedents(t *testing.T) {
+	input := "  def fetch_a(table, key) do\n    prefix = \"#{table}:\"\n    body = \"#{prefix}#{key}\"\n    body\n  end"
+	got := exRebodyAsHelper(input)
+	expected := "  prefix = \"#{table}:\"\n  body = \"#{prefix}#{key}\"\n  body\nend\n"
+	if got != expected {
+		t.Errorf("got:\n%q\nwant:\n%q", got, expected)
+	}
+}
+
+// Given a column-zero Elixir def, when exRebodyAsHelper runs, then the
+// body passes through dedented relative to the (zero-indent) header.
+// Cycle 6.
+func TestExRebodyAsHelper_FreeDefPassesThrough(t *testing.T) {
+	input := "def add(a, b) do\n  a + b\nend"
+	got := exRebodyAsHelper(input)
+	expected := "  a + b\nend\n"
+	if got != expected {
+		t.Errorf("got:\n%q\nwant:\n%q", got, expected)
+	}
+}
+
+// Given a snippet led by a blank line, when exRebodyAsHelper runs,
+// then it skips past the blank to find the def's indent. Cycle 6.
+func TestExRebodyAsHelper_LeadingBlankLineSkipped(t *testing.T) {
+	input := "\ndef add(a, b) do\n  a + b\nend"
+	got := exRebodyAsHelper(input)
+	if !strings.Contains(got, "  a + b") {
+		t.Errorf("expected body to surface despite leading blank; got:\n%q", got)
+	}
+}
+
+// Given two Elixir snippets that share the bulk of their bodies, when
+// Synthesize runs, then it accepts (no rejection Note) and emits a
+// non-empty HelperSrc. Drives the Elixir dispatch into synth.go.
+func TestSynthesize_ElixirSimple_Accepts(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/elixir/simple")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if s.HelperSrc == "" {
+		t.Fatal("HelperSrc empty")
+	}
+}
+
 // Given two Rust snippets that share the bulk of their bodies, when
 // Synthesize runs, then it accepts (no rejection Note) and emits a
 // non-empty HelperSrc. Drives the Rust dispatch into synth.go.
@@ -1425,25 +1750,6 @@ func TestSynthesize_JavaCrossLanguage_Rejected(t *testing.T) {
 	}
 }
 
-func TestSynthesize_NonGoFixtures_Unsupported(t *testing.T) {
-	cases := []string{
-		"../../testdata/refactor/elixir/simple",
-	}
-	for _, dir := range cases {
-		dir := dir
-		t.Run(dir, func(t *testing.T) {
-			a, b := loadSnippets(t, dir)
-			al := Align(a, b)
-			s := Synthesize(a, b, "deadbeef", al)
-			if !strings.Contains(s.Note, "unsupported language") {
-				t.Errorf("expected 'unsupported language' note, got %q", s.Note)
-			}
-			if s.HelperSrc != "" {
-				t.Errorf("unsupported language should have empty HelperSrc, got:\n%s", s.HelperSrc)
-			}
-		})
-	}
-}
 
 func TestSynthesize_CrossLanguage_Rejected(t *testing.T) {
 	a, _ := loadSnippets(t, "../../testdata/refactor/go/simple")
