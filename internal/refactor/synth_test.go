@@ -282,14 +282,79 @@ func TestSynthesize_CrossLanguage_Rejected(t *testing.T) {
 	}
 }
 
-// ── Real-world Python fixtures ───────────────────────────────────────────────
+// ── Real-world fixtures ──────────────────────────────────────────────────────
 //
 // The simple/medium/advanced tiers are toy fixtures. The
 // realworld-* tiers exercise patterns the toy fixtures don't:
-// `async def` (so the async branch in pythonHelperHeader runs through
-// the full Synthesize → BuildPatch path), and decorated functions
-// (verifying decorators are dropped from the helper header but show
-// up in the divergence comment block).
+//   - Go: methods on a shared receiver type (so the
+//     receiver-stripping branch in goHelperHeader runs end-to-end)
+//     and a multi-statement err-wrap function with shared
+//     control-flow shape.
+//   - Python: `async def` (so the async branch in
+//     pythonHelperHeader runs end-to-end), and decorated functions
+//     (verifying decorators are dropped from the helper header but
+//     show up in the divergence comment block).
+
+func TestSynthesize_GoRealworld_Method(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/go/realworld-method")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept (same receiver type), got Note=%q", s.Note)
+	}
+	if !strings.HasPrefix(s.HelperName, "extracted_FindUserByID_") {
+		t.Errorf("HelperName = %q, want extracted_FindUserByID_… prefix", s.HelperName)
+	}
+	// Helper must be a free function — receiver `(r *Repo)` dropped
+	// from the header. (The divergence comment block does retain the
+	// original receivers verbatim — that's intended, so the reviewer
+	// can see what was elided. We don't assert on that.)
+	if !strings.Contains(s.HelperSrc, "func extracted_FindUserByID_deadbeef(ctx context.Context, id int) (*User, error) {") {
+		t.Errorf("helper header didn't strip the receiver. Source:\n%s", s.HelperSrc)
+	}
+	// Body retained.
+	if !strings.Contains(s.HelperSrc, `r.db.QueryRowContext(ctx, "SELECT * FROM users WHERE id = $1", id)`) {
+		t.Errorf("helper missing original body line. Source:\n%s", s.HelperSrc)
+	}
+	// Divergences surface both method names + return-type differences.
+	if !strings.Contains(s.HelperSrc, "FindUserByID") || !strings.Contains(s.HelperSrc, "FindOrderByID") {
+		t.Errorf("divergence comment missing method-name pair. Source:\n%s", s.HelperSrc)
+	}
+}
+
+// TestSynthesize_GoRealworld_ErrWrap exercises a multi-statement Go
+// function with two `if err != nil` branches that share the same
+// control-flow shape (`return nil, fmt.Errorf(...)` on both sides).
+// Both sides have the keyword in the same place, so
+// rejectControlFlowAsymmetry must accept; the divergences should
+// surface the differing config types and error messages.
+func TestSynthesize_GoRealworld_ErrWrap(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/go/realworld-errwrap")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept (matching control flow), got Note=%q", s.Note)
+	}
+	if !strings.HasPrefix(s.HelperName, "extracted_loadUserConfig_") {
+		t.Errorf("HelperName = %q, want extracted_loadUserConfig_… prefix", s.HelperName)
+	}
+	wantSubs := []string{
+		"data, err := os.ReadFile(path)",
+		`json.Unmarshal(data, &cfg)`,
+		"UserConfig", "OrderConfig",
+		`"read user config: %w"`, `"read order config: %w"`,
+		`"parse user config: %w"`, `"parse order config: %w"`,
+	}
+	for _, want := range wantSubs {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	// 9 lines in each chunk, ~5 common (declarations + return).
+	if s.Confidence < 0.4 {
+		t.Errorf("Confidence = %.2f, want >= 0.4 for substantial overlap", s.Confidence)
+	}
+}
 
 func TestSynthesize_PythonRealworld_Async(t *testing.T) {
 	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-async")

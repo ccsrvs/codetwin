@@ -126,6 +126,64 @@ func TestBuildPatch_PythonSimple_AppliesClean(t *testing.T) {
 	}
 }
 
+// TestBuildPatch_GoMethodRealworld_AppliesClean confirms the
+// realworld-method Go fixture round-trips through `git apply`. The
+// receiver-stripping path emits a helper that's a free function (no
+// `(r *Repo)` prefix), and we assert the patched file contains that
+// free-function helper rather than the original method header.
+func TestBuildPatch_GoMethodRealworld_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippets(t, "../../testdata/refactor/go/realworld-method")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/go/realworld-method/a.go")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.go")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.go: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.go", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s",
+			err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	got := string(patched)
+	if !strings.Contains(got, "func extracted_FindUserByID_deadbeef(ctx context.Context, id int) (*User, error) {") {
+		t.Errorf("patched file missing free-function helper. Content:\n%s", got)
+	}
+	// The helper's def line must NOT include the receiver.
+	if strings.Contains(got, "func (r *Repo) extracted_FindUserByID_") {
+		t.Errorf("helper retained the receiver, contradicting v1 contract. Content:\n%s", got)
+	}
+}
+
 // TestBuildPatch_PythonDecoratedRealworld_AppliesClean is the
 // real-world counterpart of TestBuildPatch_PythonSimple_AppliesClean:
 // it runs through a fixture that has decorators on the source side,
