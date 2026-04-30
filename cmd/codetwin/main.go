@@ -36,6 +36,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/git"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
+	"github.com/ccsrvs/codetwin/internal/refactor"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
@@ -80,6 +81,8 @@ func main() {
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
+	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair (look up the 8-char pair ID in --json output). Go-only in v1; non-Go pairs print a 'note' explaining why.")
+	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair. Off by default — synthesis adds work proportional to pair count.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
 	flag.Usage = usage
@@ -378,6 +381,22 @@ func main() {
 	debugf("prepared: %d visible pairs, %d visible clusters",
 		len(visiblePairs), len(visibleClusters))
 
+	// --suggest <pair-id> short-circuits the rest of the report. We
+	// look up across all materialized pairs (not just visiblePairs) so
+	// the user can target a sub-threshold pair without having to
+	// re-tune --threshold.
+	if *suggest != "" {
+		if showProgress {
+			fmt.Fprint(os.Stderr, "\r\033[K")
+		}
+		if err := emitSuggestion(*suggest, pairs, snippets); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		debugf("done (suggest)")
+		return
+	}
+
 	if *preview {
 		if showProgress {
 			fmt.Fprint(os.Stderr, "\r\033[Kbuilding previews...")
@@ -391,7 +410,12 @@ func main() {
 	}
 
 	if *jsonOut {
-		printJSON(visiblePairs, visibleClusters, opts.Previews)
+		var suggestions map[string]jsonPatch
+		if *suggestAll {
+			suggestions = buildSuggestionMap(visiblePairs, snippets)
+			debugf("--suggest-all: built %d suggestions", len(suggestions))
+		}
+		printJSON(visiblePairs, visibleClusters, opts.Previews, suggestions)
 		debugf("done (json)")
 		return
 	}
@@ -478,6 +502,96 @@ func buildPreviews(
 	return previews
 }
 
+// ── Refactor suggestions (--suggest / --suggest-all) ─────────────────────────
+
+// emitSuggestion looks up a pair by 8-char ID, runs the refactor
+// pipeline (align → synthesize → patch), and writes the resulting
+// unified diff to stdout. When synthesis is rejected, prints a single
+// "note: <reason>" line on stderr and exits 1 — that matches the
+// failure semantics of `--since` on a non-existent ref and gives CI
+// pipelines a clean way to detect "no patch produced."
+func emitSuggestion(id string, pairs []report.Pair, snippets []scan.Snippet) error {
+	pair, ok := findPairByID(id, pairs)
+	if !ok {
+		return fmt.Errorf("no pair matches id %q (lower --threshold or check the id from --json output)", id)
+	}
+	a, ok := findSnippet(pair.NameA, snippets)
+	if !ok {
+		return fmt.Errorf("snippet not found: %s", pair.NameA)
+	}
+	b, ok := findSnippet(pair.NameB, snippets)
+	if !ok {
+		return fmt.Errorf("snippet not found: %s", pair.NameB)
+	}
+	al := refactor.Align(a, b)
+	s := refactor.Synthesize(a, b, pair.ID, al)
+	if s.Note != "" {
+		fmt.Fprintf(os.Stderr, "note: %s\n", s.Note)
+		os.Exit(1)
+	}
+	diff, err := refactor.BuildPatch(a.Path, s)
+	if err != nil {
+		return fmt.Errorf("build patch: %w", err)
+	}
+	fmt.Print(diff)
+	return nil
+}
+
+// buildSuggestionMap synthesizes a Suggestion for every visible pair
+// and packages it as a jsonPatch. Used by --suggest-all to populate
+// `suggested_patch` on each pair in the JSON output. Pairs whose
+// snippets can't be resolved are skipped silently — they wouldn't have
+// rendered anyway.
+func buildSuggestionMap(pairs []report.Pair, snippets []scan.Snippet) map[string]jsonPatch {
+	out := make(map[string]jsonPatch, len(pairs))
+	byName := make(map[string]scan.Snippet, len(snippets))
+	for _, s := range snippets {
+		byName[s.Name] = s
+	}
+	for _, p := range pairs {
+		a, okA := byName[p.NameA]
+		b, okB := byName[p.NameB]
+		if !okA || !okB {
+			continue
+		}
+		al := refactor.Align(a, b)
+		sug := refactor.Synthesize(a, b, p.ID, al)
+		patch := jsonPatch{
+			HelperName: sug.HelperName,
+			Confidence: sug.Confidence,
+			Note:       sug.Note,
+		}
+		if sug.HelperSrc != "" {
+			diff, err := refactor.BuildPatch(a.Path, sug)
+			if err != nil {
+				patch.Note = "error: " + err.Error()
+			} else {
+				patch.UnifiedDiff = diff
+			}
+		}
+		out[p.ID] = patch
+	}
+	return out
+}
+
+func findPairByID(id string, pairs []report.Pair) (report.Pair, bool) {
+	for _, p := range pairs {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return report.Pair{}, false
+}
+
+func findSnippet(name string, snippets []scan.Snippet) (scan.Snippet, bool) {
+	for _, s := range snippets {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return scan.Snippet{}, false
+}
+
 // ── JSON output ───────────────────────────────────────────────────────────────
 
 type jsonOutput struct {
@@ -487,16 +601,28 @@ type jsonOutput struct {
 }
 
 type jsonPair struct {
-	FileA       string           `json:"file_a"`
-	FileB       string           `json:"file_b"`
-	Score       float64          `json:"score"`
-	Structural  float64          `json:"structural"`
-	Semantic    float64          `json:"semantic"`
-	Label       string           `json:"label"`
-	LangA       string           `json:"lang_a,omitempty"`
-	LangB       string           `json:"lang_b,omitempty"`
-	ProvenanceA *jsonProvenance  `json:"provenance_a,omitempty"`
-	ProvenanceB *jsonProvenance  `json:"provenance_b,omitempty"`
+	ID             string          `json:"id,omitempty"`
+	FileA          string          `json:"file_a"`
+	FileB          string          `json:"file_b"`
+	Score          float64         `json:"score"`
+	Structural     float64         `json:"structural"`
+	Semantic       float64         `json:"semantic"`
+	Label          string          `json:"label"`
+	LangA          string          `json:"lang_a,omitempty"`
+	LangB          string          `json:"lang_b,omitempty"`
+	ProvenanceA    *jsonProvenance `json:"provenance_a,omitempty"`
+	ProvenanceB    *jsonProvenance `json:"provenance_b,omitempty"`
+	SuggestedPatch *jsonPatch      `json:"suggested_patch,omitempty"`
+}
+
+// jsonPatch is the shape of `suggested_patch` on each pair when
+// --suggest-all is set. UnifiedDiff is empty when synthesis was
+// rejected; in that case Note explains why.
+type jsonPatch struct {
+	UnifiedDiff string  `json:"unified_diff,omitempty"`
+	HelperName  string  `json:"helper_name,omitempty"`
+	Confidence  float64 `json:"confidence,omitempty"`
+	Note        string  `json:"note,omitempty"`
 }
 
 type jsonProvenance struct {
@@ -539,8 +665,9 @@ type jsonPreview struct {
 // printJSON emits the prepared (already sorted, threshold-filtered, limited)
 // pairs and clusters as JSON. Sort and limit are applied upstream via
 // report.Prepare so JSON consumers see the same set of findings as the
-// terminal renderer.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview) {
+// terminal renderer. When suggestions is non-nil, each pair's
+// suggested_patch field is populated by ID lookup.
+func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview, suggestions map[string]jsonPatch) {
 	out := jsonOutput{}
 	if len(previews) > 0 {
 		out.Previews = make(map[string]jsonPreview, len(previews))
@@ -549,14 +676,21 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 		}
 	}
 	for _, p := range pairs {
-		out.Pairs = append(out.Pairs, jsonPair{
+		jp := jsonPair{
+			ID:    p.ID,
 			FileA: p.NameA, FileB: p.NameB,
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
 			Label: report.JSONLabel(p.Score),
 			LangA: p.LangA, LangB: p.LangB,
 			ProvenanceA: toJSONProvenance(p.ProvenanceA),
 			ProvenanceB: toJSONProvenance(p.ProvenanceB),
-		})
+		}
+		if suggestions != nil {
+			if patch, ok := suggestions[p.ID]; ok {
+				jp.SuggestedPatch = &patch
+			}
+		}
+		out.Pairs = append(out.Pairs, jp)
 	}
 	for _, c := range clusters {
 		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score})

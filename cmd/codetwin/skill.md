@@ -54,6 +54,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Filter noisy short-snippet matches | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
+| Suggest a refactor (Go) | `codetwin --suggest <pair-id> <path>` |
+| Suggest for every visible pair (JSON) | `codetwin --suggest-all --json <path>` |
 
 ### All flags
 
@@ -78,6 +80,10 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         lines changed since <ref> (e.g. main, HEAD~5, abc123)
 --blame                 annotate findings with git provenance (when introduced, by whom,
                         last touched). Pairs --sort=age for "newest clones first".
+--suggest string        print a unified diff that adds a starter helper extracted from the
+                        matching pair (look up the 8-char pair ID in --json output). Go-only
+                        in v1; non-Go pairs print a 'note' explaining why.
+--suggest-all           with --json: populate `suggested_patch` on every visible pair
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
@@ -104,6 +110,44 @@ works the same in a non-git directory as it does in one.
 `codetwin --help` prints the same flag list with one-line descriptions.
 `codetwin --guide` walks through the score bands, structural/semantic
 sub-scores, and pairs vs clusters in more depth.
+
+### Refactor suggestions (`--suggest`)
+
+Once a pair is identified, `--suggest` turns codetwin from a *reporter*
+into a *starter generator*: it emits a unified diff that appends a
+helper function — a literal copy of snippet A's body, prefaced by a
+divergence comment block listing exactly how snippet B differs.
+
+```bash
+# 1. Run with --json to discover pair IDs.
+codetwin --json --threshold 0.85 ./pkg | jq '.pairs[] | {id, file_a, file_b}'
+
+# 2. Pick a Go-Go pair and emit its suggestion.
+codetwin --suggest <pair-id> ./pkg > suggest.diff
+
+# 3. Review, then apply.
+git apply suggest.diff
+```
+
+The diff is *additive only* — it adds the helper at the end of A's
+file without rewriting either call site. The reviewer (or a Claude
+skill consuming the JSON output) finishes the refactor by hand.
+Codetwin deliberately stops short of full parameterization: doing it
+without a language AST would be unsafe.
+
+Rejection cases (printed as a `note:` line on stderr; exit 1):
+
+- Methods on different receiver types
+- Anonymous/goroutine/defer chunks
+- Cross-language pairs (v1 doesn't transpile)
+- Unsupported language (v1 ships Go only; Python/JS/TS/Rust/Java/Elixir
+  return a clear note so a follow-up emitter has a known contract)
+- Holes where one side has `return`/`break`/`continue` and the other
+  doesn't — that asymmetry signals semantically different snippets
+
+`--suggest-all` with `--json` populates `suggested_patch` on every
+pair, so a single run produces machine-readable suggestions across the
+whole report.
 
 ### Sorting and limiting results
 
