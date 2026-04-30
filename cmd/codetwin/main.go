@@ -81,7 +81,7 @@ func main() {
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
-	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair (look up the 8-char pair ID in --json output). Go-only in v1; non-Go pairs print a 'note' explaining why.")
+	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair (look up the 8-char pair ID in --json output). v1 supports Go and Python; other languages print a 'note' explaining why.")
 	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair. Off by default — synthesis adds work proportional to pair count.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")

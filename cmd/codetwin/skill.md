@@ -81,8 +81,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --blame                 annotate findings with git provenance (when introduced, by whom,
                         last touched). Pairs --sort=age for "newest clones first".
 --suggest string        print a unified diff that adds a starter helper extracted from the
-                        matching pair (look up the 8-char pair ID in --json output). Go-only
-                        in v1; non-Go pairs print a 'note' explaining why.
+                        matching pair (look up the 8-char pair ID in --json output). v1
+                        supports Go and Python; other languages print a 'note' explaining why.
 --suggest-all           with --json: populate `suggested_patch` on every visible pair
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
@@ -122,7 +122,7 @@ divergence comment block listing exactly how snippet B differs.
 # 1. Run with --json to discover pair IDs.
 codetwin --json --threshold 0.85 ./pkg | jq '.pairs[] | {id, file_a, file_b}'
 
-# 2. Pick a Go-Go pair and emit its suggestion.
+# 2. Pick a same-language pair (Go or Python in v1) and emit its suggestion.
 codetwin --suggest <pair-id> ./pkg > suggest.diff
 
 # 3. Review, then apply.
@@ -137,13 +137,14 @@ without a language AST would be unsafe.
 
 Rejection cases (printed as a `note:` line on stderr; exit 1):
 
-- Methods on different receiver types
-- Anonymous/goroutine/defer chunks
+- Methods on different receiver types (Go)
+- Anonymous/goroutine/defer chunks (Go)
 - Cross-language pairs (v1 doesn't transpile)
-- Unsupported language (v1 ships Go only; Python/JS/TS/Rust/Java/Elixir
+- Unsupported language (v1 supports Go and Python; JS/TS/Rust/Java/Elixir
   return a clear note so a follow-up emitter has a known contract)
-- Holes where one side has `return`/`break`/`continue` and the other
-  doesn't — that asymmetry signals semantically different snippets
+- Holes where one side has a control-flow keyword (`return`/`break`/
+  `continue`, plus `raise`/`yield` for Python) and the other doesn't —
+  that asymmetry signals semantically different snippets
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
 pair, so a single run produces machine-readable suggestions across the

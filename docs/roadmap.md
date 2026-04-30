@@ -21,7 +21,7 @@ commits `159a298`, `59fe97f`, `f53a739` on
 | Language | Synthesizer | Notes |
 |---|---|---|
 | Go | **Shipped** | Starter helper + divergence comment block. |
-| Python | Fixture in place | Returns `unsupported language: python` until an emitter ships. |
+| Python | **Shipped** | Starter helper with `#`-comment divergence block; class methods carried through as top-level helpers with `self`/`cls` as ordinary parameters. |
 | JavaScript / TypeScript | Fixture in place | Returns `unsupported language: javascript`. |
 | Rust | Fixture in place | Returns `unsupported language: rust`. |
 | Java | Fixture in place | Returns `unsupported language: java`. |
@@ -222,12 +222,13 @@ The original recommendation was **1 + 2 + 3** as the headline narrative:
 history, and only complains about the duplication you just introduced."*
 **That triad is now shipped.**
 
-Bet **4** (refactor patches) shipped as a Go-only v1 — codetwin now
+Bet **4** (refactor patches) shipped Go in v1 and now Python — codetwin
 goes from reporter to *starter generator*: it emits a unified diff
 that adds a helper extracted from a clone pair, with a comment block
-listing every divergence. Per-language emitters for Python/JS/TS/
-Rust/Java/Elixir are the natural follow-up commits; fixtures and
-"unsupported language" CLI contracts are already in place.
+listing every divergence. Per-language emitters for JS/TS/Rust/Java
+are the natural next commits (Elixir additionally needs a function-
+level splitter); fixtures and "unsupported language" CLI contracts
+are already in place.
 
 The next bet to consider is **5** (clone watchlist + drift alerts) or
 **6** (cross-repo / org-level scanning), depending on whether the
@@ -236,28 +237,132 @@ priority is lifecycle (track clone families over time) or scale
 
 ## Coverage of shipped code
 
-After the test pass in commit `f53a739`:
+After the Python emitter test pass (commits `d032c0d`, `c6ff2b6`,
+`d42f4d5`):
 
 | Package | Coverage |
 |---|---|
-| `internal/git` (new) | 93.8% |
+| `internal/refactor` | **99.7%** (residual is one provably-unreachable defensive break) |
+| `internal/fingerprint` | 97.3% |
+| `internal/pathutil` | 96.4% |
 | `internal/similarity` | 95.6% |
-| `internal/report` | 91.4% |
-| `cmd/codetwin` | 19.9% (`main()` body still un-unit-tested; new helpers at 88–100%) |
+| `internal/scan` | 94.3% |
+| `internal/tokenizer` | 94.4% |
+| `internal/config` | 93.9% |
+| `internal/git` | 93.8% |
+| `internal/cluster` | 93.2% |
+| `internal/report` | 91.7% |
+| `internal/splitter` | 90.3% |
+| `internal/cache` | 79.4% |
+| `cmd/codetwin` | 25.2% (`main()` body still un-unit-tested; new helpers at 75–100%) |
 
-Uncovered surface worth knowing about: `cmd/codetwin/main.go`'s
-`computeProvenance` is a thin orchestrator over `git.Blame` and would
-need a fixture repo to exercise meaningfully.
+The biggest standing gap is `cmd/codetwin/main.go`'s top-level
+orchestration: `main()`, `printJSON`, `applyConfigDefaults`,
+`computeProvenance`, `usage`, etc. all sit at 0% because they're
+only reachable by spawning the binary. **Closing that gap is the
+charter of the integration-test layer described below** — every
+future bet should add a subprocess test that runs `./codetwin
+<new-flag>` against a fixture and asserts on stdout/exit code.
 
-## Verification recipe (template for future bets)
+## Testing layers (required for every bet)
 
-For whichever direction is picked next, the end-to-end check is:
+Each layer answers a different question. Skipping any one is what
+lets bugs slip through.
 
-- `make test` for unit coverage of the new package.
-- `./codetwin <new-flag> testdata/` and confirm the new fields appear
-  in `--json` output.
-- Run codetwin against its own repo with the new flag and sanity-check
-  the output against `git log` / `git blame` / `git diff` as relevant.
-- Update `--skill` and `--guide` embedded text so Claude knows about
-  the new capability.
-- Update this roadmap's status table.
+| Layer | Question it answers | Where it lives | Example |
+|---|---|---|---|
+| **Unit** | Does this function compute the right value for crafted inputs? | `*_test.go` next to the function | `rejectControlFlowAsymmetryWithKeywords` table-driven cases |
+| **Fixture-driven** | Does the real splitter/tokenizer/aligner pipeline produce the right result on representative source? | `testdata/<feature>/<tier>/` + a test that feeds it through the in-process pipeline | `TestSynthesize_PythonRealworld_Decorated` reads `testdata/refactor/python/realworld-decorated/{a,b}.py` through `splitter.Split → Align → Synthesize` |
+| **Round-trip** | Does the emitted artefact (diff, JSON, baseline file) round-trip through the tool that consumes it? | Subprocess test invoking the consuming tool | `TestBuildPatch_GoMethodRealworld_AppliesClean` shells out to `git apply --check` and `git apply` against a tempdir repo |
+| **Subprocess CLI** | Does the binary itself produce the right stdout/stderr/exit code for the documented invocation? | `cmd/codetwin/*_subprocess_test.go` (to add) | _Missing today._ Future: `./codetwin --suggest <id> testdata/...` exits 0 and prints `func extracted_…` |
+| **Self-host** | Does the tool work on its own source tree without crashing or producing pathological output? | `cmd/codetwin/main_selfhost_test.go` (to add) — short-circuits in `-short` mode | _Missing today._ Future: `./codetwin --threshold 0.85 ./internal` exits 0 and prints a summary |
+
+### What "true integration" requires that unit tests don't catch
+
+- **Flag wiring:** does the CLI flag actually plumb through to the
+  internal package call? Unit tests on the helper don't catch a
+  typo in `flag.String(...)`.
+- **stdout/stderr discipline:** does the tool print the diff to
+  stdout and the rejection note to stderr? Round-trip tests that
+  call `BuildPatch` directly bypass the print routing.
+- **Exit codes:** does `--suggest <unknown-id>` exit 1, not 0?
+  Unknown-ID error returns are unit-tested at the `emitSuggestion`
+  level, but not via `os.Exit`.
+- **Cross-feature interaction:** `--since main --suggest-all
+  --json` combines a git-diff filter with the suggestion map. Each
+  half is unit-tested; the combined behaviour is not.
+- **JSON schema stability:** the `suggested_patch` field shape
+  is asserted on once in `TestBuildSuggestionMap_*_PopulatesPatch`,
+  but no test parses the actual `./codetwin --json` output and
+  checks every documented field is present.
+
+## Integration test plan per remaining bet
+
+### Bet #4 follow-ups (JS/TS, Rust, Java, Elixir emitters)
+
+Per language, before merging:
+
+- **Fixture-driven:** add `testdata/refactor/<lang>/{simple,medium,
+  advanced}/{a,b}.<ext>` and the equivalent `realworld-*` tier
+  exercising whatever the language-specific surface is (e.g.
+  `realworld-trait` for Rust, `realworld-static` for Java).
+- **Round-trip:** mirror `TestBuildPatch_PythonSimple_AppliesClean`
+  — synthesize, build patch, `git apply --check` in a tempdir.
+- **Subprocess:** `./codetwin --suggest <id> testdata/refactor/
+  <lang>/simple` exits 0 and prints a diff containing the helper
+  signature; `--suggest-all --json testdata/refactor/<lang>/simple
+  | jq '.pairs[0].suggested_patch.unified_diff'` is non-empty.
+- **Cross-language regression:** confirm the new emitter doesn't
+  perturb the Go/Python emitters by re-running their tier tests
+  unchanged.
+
+Elixir specifically also needs splitter coverage: function-level
+chunks must come out of `splitter.Split` before any emitter work
+starts. Add `internal/splitter/elixir_test.go` with the same
+shape as `python_test.go`.
+
+### Bet #5 — clone watchlist + drift alerts
+
+- **Unit:** baseline serialization round-trip (encode/decode), drift
+  detection on a synthetic `before/after` cluster pair.
+- **Fixture-driven:** `testdata/baseline/before/` and `after/` —
+  two snapshots of the same code where one cluster has gained a
+  member, one has lost a member, one has a member whose body
+  changed. Assert each drift event fires exactly once.
+- **Round-trip:** `--baseline f.json` writes a file that
+  `--baseline f.json` on a subsequent run can read; mismatched
+  schema versions surface a clear error.
+- **Subprocess:** end-to-end. `./codetwin --update-baseline f.json
+  testdata/baseline/before` then `./codetwin --baseline f.json
+  testdata/baseline/after` — assert the drift events appear in
+  stderr and the exit code is 1 (or whatever the gating contract
+  is).
+- **Self-host:** baseline against codetwin's own `internal/`,
+  re-run with no changes, confirm zero drift events.
+
+### Bet #6 — cross-repo / org-level scanning
+
+- **Fixture-driven:** `testdata/multirepo/svc-a/`, `svc-b/`,
+  `svc-c/` — each a small directory tree with one shared clone
+  family and unique code.
+- **Subprocess:** `./codetwin svc-a svc-b svc-c --json | jq
+  '.clusters[0].members'` returns members from at least two
+  repos; per-repo cluster grouping in the terminal output
+  visually separates the repos.
+- **Performance smoke test:** running on N=10 sibling clones of
+  `internal/` should complete in a sane time (target: cache hit on
+  second run, no exponential blowup with repo count).
+
+## Verification checklist (template for any future bet)
+
+1. `make test` — unit + fixture-driven layers green.
+2. `make build` — binary compiles.
+3. `./codetwin <new-flag> testdata/<fixture>` — new behavior
+   produces the documented output, including in `--json`.
+4. Subprocess test in `cmd/codetwin/*_subprocess_test.go` asserts
+   on stdout, stderr, and exit code for at least the happy path
+   and one rejection/error path.
+5. Self-host: `./codetwin <new-flag> ./internal` exits cleanly.
+6. Update `--skill` and `--guide` embedded text so Claude knows
+   about the new capability.
+7. Update this roadmap's status table and coverage block.

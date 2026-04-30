@@ -17,9 +17,9 @@ What sets codetwin apart from other clone detectors:
   `--sort age` for "newest clones first".
 - **Refactor suggestions** — once a pair is identified, `--suggest <pair-id>`
   emits a unified diff that adds a starter helper extracted from the matching
-  pair, with a comment block listing every divergence. Go-only in v1; non-Go
-  pairs report a structured `note` so a follow-up emitter has a clear
-  contract.
+  pair, with a comment block listing every divergence. Go and Python in v1;
+  pairs in other languages report a structured `note` so a follow-up emitter
+  has a clear contract.
 
 The git-aware features (`--since`, `--blame`, `--sort age`) require git on
 `PATH` and a git repository in the working directory; without them codetwin
@@ -124,7 +124,7 @@ codetwin --suggest <pair-id> ./src
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
-| `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair with the given 8-char ID. Go-only in v1. |
+| `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair with the given 8-char ID. Go and Python in v1. |
 | `--suggest-all` | false | With `--json`: populate `suggested_patch` on every visible pair. |
 | `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
 | `--guide` | false | Print the report interpretation guide and exit |

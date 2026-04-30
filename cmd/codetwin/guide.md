@@ -130,10 +130,11 @@ a git-dependent feature, so silent fallback would hide the real problem.
 
 `--suggest <pair-id>` emits a unified diff that *adds* a starter
 helper to the file containing snippet A. The helper is a literal copy
-of A's body, prefaced by a `// Divergences (B vs A):` comment listing
-exactly what differs. Codetwin doesn't rewrite the call sites — it
-plants a starting point so a human (or the Claude skill) can finish the
-extraction with full visibility on every divergence.
+of A's body, prefaced by a `Divergences (B vs A):` comment block
+listing exactly what differs (`//` for Go, `#` for Python). Codetwin
+doesn't rewrite the call sites — it plants a starting point so a human
+(or the Claude skill) can finish the extraction with full visibility
+on every divergence.
 
 A few things worth knowing:
 
@@ -146,10 +147,12 @@ A few things worth knowing:
 - **Pair IDs** are 8-char hex digests of `sha1(min(NameA,NameB) + "|"
   + max(NameA,NameB))`. They're stable across runs and order-invariant
   (the same pair has the same ID regardless of which side is "A").
-- **Why Go-only in v1.** The synthesizer needs language-specific logic
-  to spot the function header and emit a sensible helper name. Adding
-  Python/JS/TS/Rust/Java/Elixir is the natural follow-up; until then
-  non-Go pairs get a `note: unsupported language: ...` and no diff.
+- **Language coverage in v1.** Go and Python emit helpers; JS/TS/Rust/
+  Java/Elixir return a `note: unsupported language: ...` and no diff
+  until their per-language emitters land. The synthesizer needs
+  language-specific logic to spot the function header and produce a
+  sensible helper body — fixtures for the remaining languages are
+  already in place under `testdata/refactor/`.
 
 ## A note on config
 
