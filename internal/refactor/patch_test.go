@@ -126,6 +126,68 @@ func TestBuildPatch_PythonSimple_AppliesClean(t *testing.T) {
 	}
 }
 
+// TestBuildPatch_PythonDecoratedRealworld_AppliesClean is the
+// real-world counterpart of TestBuildPatch_PythonSimple_AppliesClean:
+// it runs through a fixture that has decorators on the source side,
+// confirming the appended helper round-trips through `git apply` even
+// when the original chunk includes lines (the decorators) that the
+// helper deliberately omits.
+func TestBuildPatch_PythonDecoratedRealworld_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-decorated")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/python/realworld-decorated/a.py")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.py")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.py: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.py", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s",
+			err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	got := string(patched)
+	if !strings.Contains(got, "def extracted_load_user_profile_deadbeef") {
+		t.Errorf("patched file missing helper. Content:\n%s", got)
+	}
+	// Confirm no decorator was carried forward onto the helper. If a
+	// decorator immediately precedes the helper's def line, our drop
+	// contract is broken.
+	if strings.Contains(got, "@cached\ndef extracted_") ||
+		strings.Contains(got, "@retry(attempts=3)\ndef extracted_") {
+		t.Errorf("helper appears to have inherited a decorator. Content:\n%s", got)
+	}
+}
+
 func TestBuildPatch_EmptySuggestion_ReturnsEmpty(t *testing.T) {
 	out, err := BuildPatch("/nonexistent/path", Suggestion{Note: "rejected: ..."})
 	if err != nil {
@@ -133,6 +195,51 @@ func TestBuildPatch_EmptySuggestion_ReturnsEmpty(t *testing.T) {
 	}
 	if out != "" {
 		t.Errorf("expected empty diff, got %q", out)
+	}
+}
+
+// TestBuildPatch_UnreadablePath_ReturnsError covers the read-error
+// branch: a non-empty Suggestion targeting a path that doesn't exist
+// should propagate the os.ReadFile error.
+func TestBuildPatch_UnreadablePath_ReturnsError(t *testing.T) {
+	_, err := BuildPatch("/nonexistent/codetwin/should/not/exist.go",
+		Suggestion{HelperSrc: "func helper() {}\n"})
+	if err == nil {
+		t.Fatal("expected error reading nonexistent path")
+	}
+	if !strings.Contains(err.Error(), "read ") {
+		t.Errorf("error %q lacks the `read ` prefix from BuildPatch", err)
+	}
+}
+
+// TestBuildPatch_HappyPath covers the readable-path + non-empty
+// suggestion branch (line 30): write a real file, call BuildPatch,
+// confirm the diff includes the helper.
+func TestBuildPatch_HappyPath(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "x.go")
+	if err := os.WriteFile(path, []byte("package x\n\nfunc Foo() {}\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	out, err := BuildPatch(path, Suggestion{HelperSrc: "func Helper() {}\n"})
+	if err != nil {
+		t.Fatalf("BuildPatch: %v", err)
+	}
+	if !strings.Contains(out, "+func Helper() {}") {
+		t.Errorf("diff missing helper line:\n%s", out)
+	}
+}
+
+// TestBuildAppendPatch_ShortFile_ContextClampsToZero covers the
+// `ctxStart < 0` branch (lines 59-61): a file with fewer than 3 lines
+// has the context window clamp at 0 instead of going negative.
+func TestBuildAppendPatch_ShortFile_ContextClampsToZero(t *testing.T) {
+	out := buildAppendPatch("x.go", "one line\n", "func Helper() {}\n")
+	if !strings.HasPrefix(out, "--- a/x.go\n+++ b/x.go\n@@ -1,") {
+		t.Errorf("expected hunk anchored at line 1 for short file, got:\n%s", out)
+	}
+	if !strings.Contains(out, " one line\n") {
+		t.Errorf("short-file context line missing:\n%s", out)
 	}
 }
 

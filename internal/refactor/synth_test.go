@@ -282,6 +282,72 @@ func TestSynthesize_CrossLanguage_Rejected(t *testing.T) {
 	}
 }
 
+// ── Real-world Python fixtures ───────────────────────────────────────────────
+//
+// The simple/medium/advanced tiers are toy fixtures. The
+// realworld-* tiers exercise patterns the toy fixtures don't:
+// `async def` (so the async branch in pythonHelperHeader runs through
+// the full Synthesize → BuildPatch path), and decorated functions
+// (verifying decorators are dropped from the helper header but show
+// up in the divergence comment block).
+
+func TestSynthesize_PythonRealworld_Async(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-async")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.HasPrefix(s.HelperName, "extracted_fetch_user_") {
+		t.Errorf("HelperName = %q, want extracted_fetch_user_… prefix", s.HelperName)
+	}
+	if !strings.Contains(s.HelperSrc, "async def extracted_fetch_user_") {
+		t.Errorf("helper missing `async def`. Source:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, `await client.get(f"/users/{user_id}")`) {
+		t.Errorf("helper missing original await body line. Source:\n%s", s.HelperSrc)
+	}
+	if s.Confidence < 0.5 {
+		t.Errorf("Confidence = %.2f, want >= 0.5 for 4-of-5-line overlap", s.Confidence)
+	}
+}
+
+// TestSynthesize_PythonRealworld_Decorated verifies the decorator-skip
+// contract end-to-end: the helper header drops every `@…` line, but
+// the divergence comment block surfaces the differing decorators so a
+// reviewer sees what was elided.
+func TestSynthesize_PythonRealworld_Decorated(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-decorated")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+
+	// Helper must NOT carry the decorator forward — we said so in the
+	// emitter doc, this confirms it.
+	helperLines := strings.Split(strings.TrimSpace(s.HelperSrc), "\n")
+	for _, l := range helperLines {
+		if strings.HasPrefix(l, "@") {
+			t.Errorf("helper carried a decorator forward: %q\nFull source:\n%s", l, s.HelperSrc)
+		}
+	}
+	if !strings.Contains(s.HelperSrc, "def extracted_load_user_profile_") {
+		t.Errorf("helper missing extracted def. Source:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, `audit.log("read_user", user_id=user_id)`) {
+		t.Errorf("helper missing original body line. Source:\n%s", s.HelperSrc)
+	}
+	// Divergence comment must surface the dropped decorators so the
+	// reviewer can decide whether they belong on the helper.
+	if !strings.Contains(s.HelperSrc, "@retry(attempts=3)") {
+		t.Errorf("divergence comment missing A's decorator. Source:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "@retry(attempts=5)") {
+		t.Errorf("divergence comment missing B's decorator. Source:\n%s", s.HelperSrc)
+	}
+}
+
 // ── Synthesize* defensive-branch coverage (Class A) ─────────────────────────
 //
 // These tests exercise rejection paths that the fixture pipeline can't
@@ -441,12 +507,27 @@ func TestPythonRebodyAsHelper_DefOnlyNoBody_ReturnsEmpty(t *testing.T) {
 }
 
 // TestPythonRebodyAsHelper_AllBlankBody covers the `minIndent < 0`
-// branch when the body has only blank lines.
+// branch when the body has only blank-but-non-empty lines (after the
+// outer TrimRight strips the truly trailing blanks). Whitespace-only
+// lines pass the splitter but trip the `TrimSpace(l) == ""` guard
+// inside the minIndent loop, leaving minIndent at -1.
 func TestPythonRebodyAsHelper_AllBlankBody(t *testing.T) {
-	body := pythonRebodyAsHelper("def foo():\n\n\n")
-	// Every body line was blank, so output is just blank lines.
+	body := pythonRebodyAsHelper("def foo():\n   \n\t\n")
+	// Every body line was blank-after-trim, so output is just blank
+	// lines.
 	if strings.TrimSpace(body) != "" {
 		t.Errorf("expected blanks-only body, got %q", body)
+	}
+}
+
+// TestPythonRebodyAsHelper_DecoratorBeforeDef hits the
+// blank/comment/decorator skip path inside pythonRebodyAsHelper
+// (which has its own def-finder loop separate from
+// pythonHelperHeader's).
+func TestPythonRebodyAsHelper_DecoratorBeforeDef(t *testing.T) {
+	body := pythonRebodyAsHelper("@deco\ndef foo():\n    return 1\n")
+	if !strings.Contains(body, "    return 1") {
+		t.Errorf("body did not survive decorator skip: %q", body)
 	}
 }
 
@@ -455,6 +536,197 @@ func TestPythonRebodyAsHelper_AllBlankBody(t *testing.T) {
 func TestPythonRebodyAsHelper_NoDefLine_ReturnsAsIs(t *testing.T) {
 	if got := pythonRebodyAsHelper("x = 1\ny = 2\n"); got != "" {
 		t.Errorf("expected empty body for no-def input, got %q", got)
+	}
+}
+
+// ── Class C: pre-existing defensive scaffolding ─────────────────────────────
+//
+// These cover the small utility functions whose edge-case branches
+// the higher-level tests skip past. They're not behavioral changes —
+// just closing the coverage gap.
+
+func TestSymbolForSnippet_WholeFileChunk_ReturnsEmpty(t *testing.T) {
+	s := scan.Snippet{Name: "wholefile.go"}
+	if got := SymbolForSnippet(s); got != "" {
+		t.Errorf("SymbolForSnippet on whole-file chunk = %q, want \"\"", got)
+	}
+}
+
+func TestGoReceiverType_EdgeCases(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+		want string
+	}{
+		{"plain function (no receiver)", "func Foo() {}", ""},
+		{"value receiver", "func (r Repo) Foo() {}", "Repo"},
+		{"pointer receiver normalised", "func (r *Repo) Foo() {}", "Repo"},
+		{"empty parens (parts==0)", "func () Foo() {}", ""},
+		{"no close paren anywhere", "func (r Repo missing", ""},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			if got := goReceiverType(c.code); got != c.want {
+				t.Errorf("goReceiverType(%q) = %q, want %q", c.code, got, c.want)
+			}
+		})
+	}
+}
+
+// TestContainsKeyword_IdentifierAdjacency walks the two reject branches
+// in containsKeyword: a keyword fragment preceded by an identifier
+// byte, and one followed by an identifier byte. Both should fall
+// through to the next occurrence rather than returning true.
+func TestContainsKeyword_IdentifierAdjacency(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		kw   string
+		want bool
+	}{
+		{"standalone return", "return errors.New(x)", "return", true},
+		{"return prefix-glued (returnValue)", "returnValue := 1", "return", false},
+		{"return suffix-glued (xreturn)", "fooreturn = 1", "return", false},
+		{"both glued then standalone", "myreturning; return x", "return", true},
+		{"keyword absent", "log.Fatal(x)", "return", false},
+		{"keyword at start of text", "return", "return", true},
+		{"keyword followed by identifier byte at end", "return1", "return", false},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			if got := containsKeyword(c.text, c.kw); got != c.want {
+				t.Errorf("containsKeyword(%q, %q) = %v, want %v", c.text, c.kw, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeHelperName_EmptySymbol_FallsBackToFn(t *testing.T) {
+	got := sanitizeHelperName("", "deadbeef")
+	if got != "extracted_fn_deadbeef" {
+		t.Errorf("sanitizeHelperName(\"\", \"deadbeef\") = %q, want extracted_fn_deadbeef", got)
+	}
+}
+
+func TestNonEmpty_FallbackBranch(t *testing.T) {
+	if got := nonEmpty("", "fallback"); got != "fallback" {
+		t.Errorf("nonEmpty(\"\", \"fallback\") = %q, want \"fallback\"", got)
+	}
+	if got := nonEmpty("real", "fallback"); got != "real" {
+		t.Errorf("nonEmpty(\"real\", \"fallback\") = %q, want \"real\"", got)
+	}
+}
+
+func TestFirstNonBlankLine_AllBlank_ReturnsEmpty(t *testing.T) {
+	if got := firstNonBlankLine("\n   \n\t\n"); got != "" {
+		t.Errorf("firstNonBlankLine on all-blank input = %q, want \"\"", got)
+	}
+}
+
+// TestGoRebodyAsHelper_NoBrace exercises the early-return path when
+// the snippet is somehow brace-less (defensive — the fixture pipeline
+// ensures Go chunks always have one). Returns the input unchanged
+// (with a trailing newline).
+func TestGoRebodyAsHelper_NoBrace(t *testing.T) {
+	got := goRebodyAsHelper("var x = 1\nvar y = 2")
+	if !strings.Contains(got, "var x = 1") || !strings.Contains(got, "var y = 2") {
+		t.Errorf("goRebodyAsHelper dropped no-brace input: %q", got)
+	}
+}
+
+func TestRejectAnonymousChunk_WholeFileChunk_Rejected(t *testing.T) {
+	// SymbolForSnippet returns "" for snippets whose Name lacks a
+	// space — i.e. whole-file chunks. rejectAnonymousChunk has its
+	// own message for this distinct from the goroutine/defer prefix
+	// path.
+	a := scan.Snippet{Name: "wholefile.go"}
+	b := scan.Snippet{Name: "wholefile.go"}
+	reason, ok := rejectAnonymousChunk(a, b)
+	if ok {
+		t.Fatal("expected rejection for whole-file chunk")
+	}
+	if !strings.Contains(reason, "top-level named function") {
+		t.Errorf("reason = %q, want 'top-level named function' message", reason)
+	}
+}
+
+func TestRejectMethodOnDifferentReceivers_SameReceiver_Accepts(t *testing.T) {
+	aCode := "func (r Repo) FetchA(id int) error { return nil }"
+	bCode := "func (r Repo) FetchB(id int) error { return nil }"
+	if _, ok := rejectMethodOnDifferentReceivers(aCode, bCode); !ok {
+		t.Error("expected acceptance when both methods share the same receiver type")
+	}
+	// And pointer/value normalisation: *Repo and Repo should match.
+	if _, ok := rejectMethodOnDifferentReceivers(aCode, "func (r *Repo) FetchB() {}"); !ok {
+		t.Error("expected acceptance when pointer- and value-receiver share underlying type")
+	}
+}
+
+func TestSanitizeHelperName_NonIdentChars_GetUnderscored(t *testing.T) {
+	got := sanitizeHelperName("goroutine@42", "deadbeef")
+	if got != "extracted_goroutine_42_deadbeef" {
+		t.Errorf("sanitizeHelperName = %q, want extracted_goroutine_42_deadbeef", got)
+	}
+}
+
+// TestGoHelperHeader_MethodReceiver_DroppedFromHeader exercises the
+// receiver-stripping branch (lines 429-433): when the snippet is a
+// method, the helper drops the receiver and emerges as a free
+// function with the helper name in place of the original method name.
+func TestGoHelperHeader_MethodReceiver_DroppedFromHeader(t *testing.T) {
+	got := goHelperHeader("func (r *Repo) Fetch(id int) error {\n\treturn nil\n}",
+		"extracted_Fetch_deadbeef")
+	if !strings.HasPrefix(got, "func extracted_Fetch_deadbeef(id int) error {") {
+		t.Errorf("receiver not dropped: %q", got)
+	}
+}
+
+// TestGoRebodyAsHelper_AfterBraceContent covers the `afterBrace != ""`
+// branch (lines 462-464): when the opening `{` shares a line with body
+// content (`func F() { x := 1`), that trailing content becomes the
+// first body line.
+func TestGoRebodyAsHelper_AfterBraceContent(t *testing.T) {
+	body := goRebodyAsHelper("func F() { x := 1\n\treturn x\n}")
+	if !strings.HasPrefix(body, "x := 1\n") {
+		t.Errorf("expected post-brace content as first body line, got %q", body)
+	}
+}
+
+// TestSynthesizePython_ConfidenceWithBLongerThanA mirrors the Go test
+// for the bLines > aLines branch in synthesizePython.
+func TestSynthesizePython_ConfidenceWithBLongerThanA(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.py:1-2 foo", Lang: tokenizer.Python,
+		Code: "def foo():\n    return 1",
+	}
+	b := scan.Snippet{
+		Name: "y.py:1-5 bar", Lang: tokenizer.Python,
+		Code: "def bar():\n    return 1\n    extra = 2\n    extra2 = 3\n    extra3 = 4",
+	}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line; alignment found none")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	// CommonLines is at most 2 (the def line and the `return 1` body
+	// line); bLines is 5. If aLines drove the denominator we'd see
+	// confidence ≥ 0.5; bLines driving it caps confidence at 2/5 = 0.4.
+	if s.Confidence >= 0.5 {
+		t.Errorf("Confidence = %v; expected B's line count to drive denominator", s.Confidence)
+	}
+}
+
+func TestFormatDivergenceComment_EmptyHoles_ReturnsEmpty(t *testing.T) {
+	if got := formatDivergenceComment(nil, "//"); got != "" {
+		t.Errorf("expected empty string for nil holes, got %q", got)
+	}
+	if got := formatDivergenceComment([]Hole{}, "#"); got != "" {
+		t.Errorf("expected empty string for empty holes, got %q", got)
 	}
 }
 
