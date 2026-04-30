@@ -94,6 +94,25 @@ func TestBuildMatrix_GivenLessThanTwoSnippets_When_Build_Then_ReturnsEmptyPairs(
 	}
 }
 
+func TestBuildMatrix_PopulatesLanguageOnPairs(t *testing.T) {
+	tokens := []string{"VAR", "=", "VAR", ".", "len", "(", ")", "for", "VAR", "in", "VAR", "VAR", "+=", "VAR"}
+	a := makeSnippet("a/sum.go", "/a.go", tokens)
+	a.Lang = "Go"
+	b := makeSnippet("b/sum.py", "/b.py", tokens)
+	b.Lang = "Python"
+	snips := []scan.Snippet{a, b}
+	vectors := vectorsFor(snips)
+
+	_, pairs := BuildMatrix(snips, vectors, 0, nil)
+
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	}
+	if pairs[0].LangA != "Go" || pairs[0].LangB != "Python" {
+		t.Errorf("pair langs = %q/%q, want Go/Python", pairs[0].LangA, pairs[0].LangB)
+	}
+}
+
 func TestBuildMatrix_GivenOnPairDoneCallback_When_Build_Then_TotalArgIsPairCount(t *testing.T) {
 	tokens := []string{"VAR", "=", "VAR", "+", "VAR"}
 	snips := []scan.Snippet{

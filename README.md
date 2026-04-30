@@ -5,6 +5,21 @@ across `.go`, `.js`, `.ts`, `.jsx`, `.tsx`, `.py`, `.java`, `.rs`, and
 `.ex`/`.exs` files. Function-level chunking, semantic + structural scoring,
 DBSCAN clustering, no external dependencies.
 
+What sets codetwin apart from other clone detectors:
+
+- **Cross-language clones** — finds duplicate logic across a Go service and a
+  TypeScript dashboard in the same monorepo (`--cross-lang-only`).
+- **PR-delta CI gating** — fails only on duplication a PR introduces, not the
+  whole tech-debt backlog (`--since main`). Lets teams ratchet down debt
+  without rewriting history first.
+- **Git provenance** — annotate every match with when, by whom, and which
+  endpoint is the original (`--blame`). Sort by introduction date with
+  `--sort age` for "newest clones first".
+
+The git-aware features (`--since`, `--blame`, `--sort age`) require git on
+`PATH` and a git repository in the working directory; without them codetwin
+runs the same in any directory.
+
 ## Install
 
 ```bash
@@ -67,6 +82,15 @@ codetwin --sort size --limit 5 ./src
 
 # Show everything including weak matches
 codetwin --verbose ./src
+
+# Cross-language only — duplicate logic across Go service + TS dashboard
+codetwin --cross-lang-only --threshold 0.50 ./
+
+# CI gate: fail on any new strong clone introduced since main
+codetwin --since main --threshold 0.85 --json ./src
+
+# Annotate findings with git provenance, newest clones first
+codetwin --blame --sort age --limit 10 ./src
 ```
 
 ## Flags
@@ -89,6 +113,9 @@ codetwin --verbose ./src
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
+| `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
+| `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
+| `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
 | `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
 | `--guide` | false | Print the report interpretation guide and exit |
 
@@ -135,6 +162,8 @@ using its natural interpretation:
 | `size`       | biggest snippets first         | most members first                |
 | `size-asc`   | smallest snippets first        | smallest clusters first           |
 | `name`       | alphabetical by file path      | alphabetical by first member      |
+| `age`        | newest pair first (when introduced) | (clusters fall back to score) |
+| `age-asc`    | oldest pair first              | (clusters fall back to score)     |
 
 `--limit N` caps each section at N items independently, applied **after**
 sort and threshold filtering — so `--limit 5` always yields up to 5 visible
@@ -257,6 +286,7 @@ codetwin/
     ├── config/                  # .codetwin.json loading + ignore matching
     ├── cache/                   # .codetwin-cache.bin persistence
     ├── scan/                    # Per-file pipeline + parallel orchestrator (split → tokenize → fingerprint)
+    ├── git/                     # Optional git integration: repo detection, diff parsing, blame
     └── pathutil/                # Lexical path helpers (Dedupe, Contains)
 ```
 
@@ -316,6 +346,16 @@ Per-file pipeline that turns a source file into one or more `Snippet`s
 across the file set. Sits between `cmd/codetwin/main.go` and the
 splitter/tokenizer/fingerprint packages, and consults `internal/cache` so
 unchanged files skip the work.
+
+**Git** (`internal/git`)
+Thin wrapper around the small set of git invocations the optional
+features need: `Open(dir)` discovers the repo root and surfaces
+`ErrGitNotInstalled` / `ErrNotARepo` so callers can degrade gracefully;
+`(*Repo).ChangedSince(ref)` runs `git diff --unified=0` and parses the
+hunks into a `path → []LineRange` map for the `--since` filter;
+`(*Repo).Blame(file, start, end)` aggregates `git blame --line-porcelain`
+into a single-record `BlameRange` for `--blame`. Used only when the
+relevant flag is set; codetwin is otherwise git-independent.
 
 **Pathutil** (`internal/pathutil`)
 Pure lexical path helpers. `Dedupe` collapses duplicate input paths and drops
@@ -423,4 +463,45 @@ codetwin --json --threshold 0.85 ./src | jq '.pairs | length' \
 # Generate a markdown digest of clusters, sorted by impact
 codetwin --json --sort size ./src \
   | jq -r '.clusters[] | "## Cluster \(.id+1) (\(.members|length) snippets)\n\n" + (.members | map("- `\(.)`") | join("\n"))'
+
+# CI gate that ratchets: fail only on duplication this PR introduces
+codetwin --since main --threshold 0.85 --json ./src \
+  | jq '.pairs | length' | xargs -I{} test {} -eq 0
+
+# Polyglot monorepo: find logic duplicated across languages
+codetwin --cross-lang-only --threshold 0.5 --preview ./
+
+# Triage: who introduced the freshest exact clone?
+codetwin --blame --sort age --threshold 0.95 --limit 1 --json ./src \
+  | jq '.pairs[0] | {a:.file_a,b:.file_b,intro:.provenance_b.first_date,by:.provenance_b.first_author}'
+```
+
+## Git-aware modes
+
+Three flags layer optional git integration on top of codetwin's
+otherwise-self-contained scan. They all require `git` on `PATH` and a
+git repository in the working directory; if either is missing, codetwin
+exits 1 with a clear error rather than silently degrading.
+
+- `--cross-lang-only` does **not** need git; included here for the
+  positioning narrative only.
+- `--since <ref>` filters pairs and clusters to those whose endpoints
+  overlap lines changed between `<ref>` and the current working tree
+  (uncommitted edits included). Use it as a CI gate that only complains
+  about new duplication.
+- `--blame` calls `git blame` once per snippet and attaches a
+  `Provenance` record (`first_commit`, `first_author`, `first_date`,
+  optionally `last_*`) to each pair. Adds a small per-snippet cost; pair
+  with `--sort age` to surface the freshest clones first.
+
+```bash
+# Sample errors when git or repo is missing
+$ codetwin --since main ./src
+error: --since requires running inside a git repository
+
+$ PATH=/var/empty codetwin --blame ./src
+error: --blame requires the git binary on PATH
+
+$ codetwin --since main --blame ./src
+error: --since and --blame require running inside a git repository
 ```

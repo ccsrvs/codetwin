@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Pair represents a similarity finding between two snippets.
@@ -20,6 +21,25 @@ type Pair struct {
 	Score      float64 // Combined
 	LinesA     int     // non-blank line count of snippet A's chunk
 	LinesB     int     // non-blank line count of snippet B's chunk
+	LangA      string  // detected language of snippet A (e.g. "Go", "Python"); empty when unknown
+	LangB      string  // detected language of snippet B; empty when unknown
+
+	// ProvenanceA / ProvenanceB carry git blame metadata for each
+	// endpoint, populated when --blame is on. Nil when blame wasn't
+	// computed for that snippet (no git, untracked file, blame off).
+	ProvenanceA *Provenance
+	ProvenanceB *Provenance
+}
+
+// Provenance is the per-snippet git blame summary: when (and by whom)
+// the snippet's lines were first introduced and most recently touched.
+type Provenance struct {
+	FirstCommit string
+	FirstAuthor string
+	FirstTime   time.Time
+	LastCommit  string
+	LastAuthor  string
+	LastTime    time.Time
 }
 
 // Cluster is a group of snippets identified as a refactoring family.
@@ -115,15 +135,18 @@ const (
 	SortSize     SortMode = "size"      // descending by size
 	SortSizeAsc  SortMode = "size-asc"  // ascending by size
 	SortName     SortMode = "name"      // alphabetical by NameA / first member
+	SortAge      SortMode = "age"       // newest pair first (max introduction date desc)
+	SortAgeAsc   SortMode = "age-asc"   // oldest pair first (max introduction date asc)
 )
 
 // Options controls rendering behaviour.
 type Options struct {
-	Plain     bool     // disable ANSI color codes (for CI / file output)
-	Threshold float64  // hide pairs below this score (unless Verbose)
-	Verbose   bool     // include pairs below threshold
-	Sort      SortMode // ordering for pairs and clusters; "" = SortScore
-	Limit     int      // cap pairs and clusters at N items each (0 = no limit)
+	Plain         bool     // disable ANSI color codes (for CI / file output)
+	Threshold     float64  // hide pairs below this score (unless Verbose)
+	Verbose       bool     // include pairs below threshold
+	Sort          SortMode // ordering for pairs and clusters; "" = SortScore
+	Limit         int      // cap pairs and clusters at N items each (0 = no limit)
+	CrossLangOnly bool     // keep only pairs whose two snippets have different, known languages
 
 	// Previews, when non-nil, maps a snippet name to a code excerpt with its
 	// originating start line. Entries with empty Text are skipped.
@@ -158,12 +181,16 @@ const (
 // always reflect the same set of findings.
 func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster) {
 	visiblePairs := pairs
-	if !opts.Verbose {
+	if !opts.Verbose || opts.CrossLangOnly {
 		visiblePairs = make([]Pair, 0, len(pairs))
 		for _, p := range pairs {
-			if p.Score >= opts.Threshold {
-				visiblePairs = append(visiblePairs, p)
+			if !opts.Verbose && p.Score < opts.Threshold {
+				continue
 			}
+			if opts.CrossLangOnly && (p.LangA == "" || p.LangB == "" || p.LangA == p.LangB) {
+				continue
+			}
+			visiblePairs = append(visiblePairs, p)
 		}
 	}
 
@@ -272,6 +299,24 @@ func cmpPairSizeAsc(a, b Pair) int   { return cmp.Compare(pairSize(a), pairSize(
 func cmpPairNameA(a, b Pair) int     { return cmp.Compare(a.NameA, b.NameA) }
 func cmpPairNameB(a, b Pair) int     { return cmp.Compare(a.NameB, b.NameB) }
 
+// cmpPairAgeDesc orders pairs by their introduction date — the newer
+// of the two endpoints' FirstTime — descending. A pair is "introduced"
+// when its second endpoint lands; the older endpoint is the original.
+// Pairs with no provenance sort to the end (treated as zero-time).
+func cmpPairAgeDesc(a, b Pair) int { return cmp.Compare(pairIntro(b).Unix(), pairIntro(a).Unix()) }
+func cmpPairAgeAsc(a, b Pair) int  { return cmp.Compare(pairIntro(a).Unix(), pairIntro(b).Unix()) }
+
+func pairIntro(p Pair) time.Time {
+	var t time.Time
+	if p.ProvenanceA != nil && p.ProvenanceA.FirstTime.After(t) {
+		t = p.ProvenanceA.FirstTime
+	}
+	if p.ProvenanceB != nil && p.ProvenanceB.FirstTime.After(t) {
+		t = p.ProvenanceB.FirstTime
+	}
+	return t
+}
+
 // Cluster comparators.
 func cmpClusterScoreAsc(a, b Cluster) int  { return cmp.Compare(a.Score, b.Score) }
 func cmpClusterScoreDesc(a, b Cluster) int { return cmp.Compare(b.Score, a.Score) }
@@ -297,6 +342,10 @@ func pairLessFunc(mode SortMode) func(a, b Pair) bool {
 		return lessChain(cmpPairSizeAsc)
 	case SortName:
 		return lessChain(cmpPairNameA, cmpPairNameB)
+	case SortAge:
+		return lessChain(cmpPairAgeDesc, cmpPairScoreDesc)
+	case SortAgeAsc:
+		return lessChain(cmpPairAgeAsc, cmpPairScoreDesc)
 	default: // SortScore or empty
 		return lessChain(cmpPairScoreDesc)
 	}
@@ -358,12 +407,14 @@ func printPairs(w io.Writer, pairs []Pair, opts Options) {
 			color(grey, opts),
 			color(cyan, opts), p.NameA,
 			color(reset, opts))
+		printProvenance(w, p.ProvenanceA, opts)
 		printPreview(w, p.NameA, opts)
 
 		fmt.Fprintf(w, "  %s  %s%s%s\n",
 			color(grey, opts),
 			color(cyan, opts), p.NameB,
 			color(reset, opts))
+		printProvenance(w, p.ProvenanceB, opts)
 		printPreview(w, p.NameB, opts)
 
 		fmt.Fprintf(w, "  %sstructural: %3.0f%%  semantic: %3.0f%%%s\n\n",
@@ -371,6 +422,36 @@ func printPairs(w io.Writer, pairs []Pair, opts Options) {
 			p.Structural*100, p.Semantic*100,
 			color(reset, opts))
 	}
+}
+
+// printProvenance emits a one-line "origin" summary under a snippet's
+// name: when it was first introduced, by whom, and (when distinct) when
+// it was last touched. No-op when prov is nil so callers can hand it
+// the raw Pair field unconditionally.
+func printProvenance(w io.Writer, prov *Provenance, opts Options) {
+	if prov == nil || prov.FirstCommit == "" {
+		return
+	}
+	first := prov.FirstTime.Format("2006-01-02")
+	short := shortSHA(prov.FirstCommit)
+	if prov.LastCommit != "" && prov.LastCommit != prov.FirstCommit {
+		fmt.Fprintf(w, "      %sintroduced %s by %s (%s); last touched %s by %s (%s)%s\n",
+			color(grey, opts),
+			first, prov.FirstAuthor, short,
+			prov.LastTime.Format("2006-01-02"), prov.LastAuthor, shortSHA(prov.LastCommit),
+			color(reset, opts))
+		return
+	}
+	fmt.Fprintf(w, "      %sintroduced %s by %s (%s)%s\n",
+		color(grey, opts),
+		first, prov.FirstAuthor, short, color(reset, opts))
+}
+
+func shortSHA(s string) string {
+	if len(s) <= 7 {
+		return s
+	}
+	return s[:7]
 }
 
 // printPreview emits a line-numbered code excerpt under the snippet name when

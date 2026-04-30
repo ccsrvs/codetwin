@@ -3,6 +3,7 @@ package report
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRender_NoPairs(t *testing.T) {
@@ -348,6 +349,182 @@ func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
 	visP, _ := Prepare(pairs, nil, Options{Sort: SortScore, Threshold: 0.5, Limit: 3})
 	if len(visP) != 2 {
 		t.Errorf("expected 2 pairs after threshold+limit, got %d", len(visP))
+	}
+}
+
+func TestRender_PrintsProvenanceWhenSet(t *testing.T) {
+	intro := time.Date(2024, 7, 15, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{{
+		NameA: "a.go SumA", NameB: "b.go SumB", Score: 0.9,
+		ProvenanceA: &Provenance{
+			FirstCommit: "deadbeefcafebabe1234",
+			FirstAuthor: "Alice Author",
+			FirstTime:   intro,
+		},
+		ProvenanceB: &Provenance{
+			FirstCommit: "feedfacefeedfacefeed",
+			FirstAuthor: "Bob Builder",
+			FirstTime:   intro,
+		},
+	}}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0})
+
+	out := buf.String()
+	wants := []string{
+		"introduced 2024-07-15 by Alice Author (deadbee)", // 7-char short SHA
+		"introduced 2024-07-15 by Bob Builder (feedfac)",
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("rendered output missing %q\n--- got ---\n%s", w, out)
+		}
+	}
+}
+
+func TestRender_PrintsLastTouchedWhenDistinct(t *testing.T) {
+	first := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	last := time.Date(2025, 6, 30, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{{
+		NameA: "a", NameB: "b", Score: 0.9,
+		ProvenanceA: &Provenance{
+			FirstCommit: "1111111aaaaaaaa",
+			FirstAuthor: "A",
+			FirstTime:   first,
+			LastCommit:  "2222222bbbbbbbb",
+			LastAuthor:  "B",
+			LastTime:    last,
+		},
+	}}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0})
+
+	out := buf.String()
+	want := "introduced 2023-01-01 by A (1111111); last touched 2025-06-30 by B (2222222)"
+	if !strings.Contains(out, want) {
+		t.Errorf("rendered output missing %q\n--- got ---\n%s", want, out)
+	}
+}
+
+func TestRender_OmitsProvenanceWhenNil(t *testing.T) {
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 0.9}}
+	var buf strings.Builder
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0})
+	if strings.Contains(buf.String(), "introduced") {
+		t.Errorf("output should not mention provenance when none set; got:\n%s", buf.String())
+	}
+}
+
+func TestShortSHA_TruncatesAndPasses(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"abc", "abc"},
+		{"1234567", "1234567"},
+		{"abcdef0123456789", "abcdef0"},
+	}
+	for _, c := range cases {
+		if got := shortSHA(c.in); got != c.want {
+			t.Errorf("shortSHA(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestPrepare_SortByAgeNewestPairsFirst(t *testing.T) {
+	t1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{
+		{NameA: "old", NameB: "x", Score: 0.5,
+			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
+		{NameA: "newest", NameB: "y", Score: 0.5,
+			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t3}},
+		{NameA: "mid", NameB: "z", Score: 0.5,
+			ProvenanceA: &Provenance{FirstTime: t2}, ProvenanceB: &Provenance{FirstTime: t1}},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
+	wantOrder := []string{"newest", "mid", "old"}
+	for i, w := range wantOrder {
+		if out[i].NameA != w {
+			t.Errorf("position %d: got NameA=%q, want %q", i, out[i].NameA, w)
+		}
+	}
+}
+
+func TestPrepare_SortByAgeAscOldestFirst(t *testing.T) {
+	t1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{
+		{NameA: "newer", NameB: "x", Score: 0.5,
+			ProvenanceA: &Provenance{FirstTime: t2}, ProvenanceB: &Provenance{FirstTime: t1}},
+		{NameA: "older", NameB: "y", Score: 0.5,
+			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortAgeAsc, Threshold: 0})
+	if out[0].NameA != "older" {
+		t.Errorf("expected older first, got %q", out[0].NameA)
+	}
+}
+
+func TestPrepare_SortByAgePairsWithoutProvenanceSortLast(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pairs := []Pair{
+		{NameA: "no-provenance", NameB: "x", Score: 0.5},
+		{NameA: "has-provenance", NameB: "y", Score: 0.5,
+			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
+	}
+	out, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
+	if out[0].NameA != "has-provenance" {
+		t.Errorf("expected provenance-bearing pair first, got %q", out[0].NameA)
+	}
+	if out[1].NameA != "no-provenance" {
+		t.Errorf("expected no-provenance pair last, got %q", out[1].NameA)
+	}
+}
+
+func TestPrepare_CrossLangOnlyKeepsOnlyDifferentLangs(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "same1", NameB: "same2", Score: 0.9, LangA: "Go", LangB: "Go"},
+		{NameA: "cross1", NameB: "cross2", Score: 0.7, LangA: "Go", LangB: "Python"},
+		{NameA: "cross3", NameB: "cross4", Score: 0.6, LangA: "TypeScript", LangB: "Python"},
+		{NameA: "same3", NameB: "same4", Score: 0.8, LangA: "Python", LangB: "Python"},
+	}
+	out, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	if len(out) != 2 {
+		t.Fatalf("expected 2 cross-language pairs, got %d", len(out))
+	}
+	for _, p := range out {
+		if p.LangA == p.LangB {
+			t.Errorf("cross-lang-only kept same-lang pair: %s/%s (lang=%s)", p.NameA, p.NameB, p.LangA)
+		}
+	}
+}
+
+func TestPrepare_CrossLangOnlyDropsPairsWithUnknownLang(t *testing.T) {
+	// Empty Lang means we don't know the language — we can't confirm it's a
+	// cross-lang match, so drop it under --cross-lang-only rather than
+	// surfacing a noisy "" / "Go" pair as if it were cross-language.
+	pairs := []Pair{
+		{NameA: "u1", NameB: "g1", Score: 0.9, LangA: "", LangB: "Go"},
+		{NameA: "u2", NameB: "u3", Score: 0.8, LangA: "", LangB: ""},
+		{NameA: "g2", NameB: "p1", Score: 0.7, LangA: "Go", LangB: "Python"},
+	}
+	out, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	if len(out) != 1 {
+		t.Fatalf("expected 1 pair (only the fully-typed cross-lang one), got %d", len(out))
+	}
+	if out[0].NameA != "g2" {
+		t.Errorf("expected the Go/Python pair, got %s/%s", out[0].NameA, out[0].NameB)
+	}
+}
+
+func TestPrepare_CrossLangOnlyOffKeepsAll(t *testing.T) {
+	pairs := []Pair{
+		{NameA: "same1", NameB: "same2", Score: 0.9, LangA: "Go", LangB: "Go"},
+		{NameA: "cross1", NameB: "cross2", Score: 0.7, LangA: "Go", LangB: "Python"},
+	}
+	out, _ := Prepare(pairs, nil, Options{Threshold: 0, Sort: SortScore})
+	if len(out) != 2 {
+		t.Fatalf("expected all 2 pairs when CrossLangOnly is off, got %d", len(out))
 	}
 }
 

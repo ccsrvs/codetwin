@@ -118,6 +118,8 @@ func BuildMatrix(
 						Score:      combined,
 						LinesA:     snippets[i].NonBlankLn,
 						LinesB:     snippets[j].NonBlankLn,
+						LangA:      string(snippets[i].Lang),
+						LangB:      string(snippets[j].Lang),
 					})
 				}
 				// Flush progress in batches per row to avoid hammering the

@@ -17,6 +17,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -33,6 +34,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/git"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
@@ -68,13 +70,16 @@ func main() {
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
-	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name")
+	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name | age | age-asc (age modes require --blame)")
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
 	minConfLines := flag.Int("min-confidence-lines", 0, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
+	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
+	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
+	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
 	flag.Usage = usage
@@ -155,6 +160,37 @@ func main() {
 	if len(files) < 2 {
 		fmt.Fprintln(os.Stderr, "error: need at least 2 source files to compare")
 		os.Exit(1)
+	}
+
+	// Resolve git up-front when --since or --blame are on so we fail
+	// fast (before any file processing) when git is missing or we're
+	// outside a repo. Both failure modes are explicit opt-in errors:
+	// the user asked for a git-dependent feature, so silent degradation
+	// would hide the real problem.
+	var gitRepo *git.Repo
+	var sinceDiff git.DiffMap
+	if *since != "" || *blame {
+		gitRepo, err = git.Open(".")
+		if err != nil {
+			label, verb := requestedGitFlags(*since, *blame)
+			switch {
+			case errors.Is(err, git.ErrGitNotInstalled):
+				fmt.Fprintf(os.Stderr, "error: %s %s the git binary on PATH\n", label, verb)
+			case errors.Is(err, git.ErrNotARepo):
+				fmt.Fprintf(os.Stderr, "error: %s %s running inside a git repository\n", label, verb)
+			default:
+				fmt.Fprintf(os.Stderr, "error: git: %v\n", err)
+			}
+			os.Exit(1)
+		}
+	}
+	if *since != "" {
+		sinceDiff, err = gitRepo.ChangedSince(*since)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: --since %q: %v\n", *since, err)
+			os.Exit(1)
+		}
+		debugf("--since %s: %d files changed", *since, len(sinceDiff))
 	}
 
 	showProgress := !*noProgress && isTTY
@@ -277,6 +313,18 @@ func main() {
 		debugf("ignore_pairs: dropped %d pairs", ignored)
 	}
 
+	if *since != "" {
+		var dropped int
+		pairs, dropped = filterPairsBySince(pairs, snippets, gitRepo.Root, sinceDiff)
+		debugf("--since: dropped %d pairs not overlapping diff", dropped)
+	}
+
+	if *blame {
+		provs := computeProvenance(snippets, gitRepo)
+		attachProvenance(pairs, provs)
+		debugf("--blame: provenance attached to %d snippets", len(provs))
+	}
+
 	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
 	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
 	debugf("DBSCAN: %d clusters", clusterResult.NumClusters)
@@ -307,12 +355,19 @@ func main() {
 	}
 	debugf("clusters built: %d", len(clusters))
 
+	if *since != "" {
+		before := len(clusters)
+		clusters = filterClustersBySince(clusters, snippets, gitRepo.Root, sinceDiff)
+		debugf("--since: dropped %d clusters with no member in the diff", before-len(clusters))
+	}
+
 	opts := report.Options{
-		Plain:     *plain,
-		Threshold: *threshold,
-		Verbose:   *verbose,
-		Sort:      report.SortMode(*sortMode),
-		Limit:     *limit,
+		Plain:         *plain,
+		Threshold:     *threshold,
+		Verbose:       *verbose,
+		Sort:          report.SortMode(*sortMode),
+		Limit:         *limit,
+		CrossLangOnly: *crossLangOnly,
 	}
 
 	// Sort + threshold filter + limit ONCE here in main.go, then build
@@ -432,12 +487,42 @@ type jsonOutput struct {
 }
 
 type jsonPair struct {
-	FileA      string  `json:"file_a"`
-	FileB      string  `json:"file_b"`
-	Score      float64 `json:"score"`
-	Structural float64 `json:"structural"`
-	Semantic   float64 `json:"semantic"`
-	Label      string  `json:"label"`
+	FileA       string           `json:"file_a"`
+	FileB       string           `json:"file_b"`
+	Score       float64          `json:"score"`
+	Structural  float64          `json:"structural"`
+	Semantic    float64          `json:"semantic"`
+	Label       string           `json:"label"`
+	LangA       string           `json:"lang_a,omitempty"`
+	LangB       string           `json:"lang_b,omitempty"`
+	ProvenanceA *jsonProvenance  `json:"provenance_a,omitempty"`
+	ProvenanceB *jsonProvenance  `json:"provenance_b,omitempty"`
+}
+
+type jsonProvenance struct {
+	FirstCommit string `json:"first_commit"`
+	FirstAuthor string `json:"first_author"`
+	FirstDate   string `json:"first_date"`
+	LastCommit  string `json:"last_commit,omitempty"`
+	LastAuthor  string `json:"last_author,omitempty"`
+	LastDate    string `json:"last_date,omitempty"`
+}
+
+func toJSONProvenance(p *report.Provenance) *jsonProvenance {
+	if p == nil {
+		return nil
+	}
+	out := &jsonProvenance{
+		FirstCommit: p.FirstCommit,
+		FirstAuthor: p.FirstAuthor,
+		FirstDate:   p.FirstTime.UTC().Format("2006-01-02"),
+	}
+	if p.LastCommit != "" && p.LastCommit != p.FirstCommit {
+		out.LastCommit = p.LastCommit
+		out.LastAuthor = p.LastAuthor
+		out.LastDate = p.LastTime.UTC().Format("2006-01-02")
+	}
+	return out
 }
 
 type jsonCluster struct {
@@ -468,6 +553,9 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 			FileA: p.NameA, FileB: p.NameB,
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
 			Label: report.JSONLabel(p.Score),
+			LangA: p.LangA, LangB: p.LangB,
+			ProvenanceA: toJSONProvenance(p.ProvenanceA),
+			ProvenanceB: toJSONProvenance(p.ProvenanceB),
 		})
 	}
 	for _, c := range clusters {
@@ -654,6 +742,129 @@ func compilePairIgnoreMatcher(cfg *config.Config) (*config.PairIgnoreMatcher, er
 	return config.CompileIgnorePairs(cfg.IgnorePairs)
 }
 
+// requestedGitFlags returns a human-readable label and matching verb
+// ("requires" / "require") for whichever git-dependent flags were set,
+// so error messages stay grammatical for both the one-flag and two-flag
+// cases.
+func requestedGitFlags(since string, blame bool) (label, verb string) {
+	switch {
+	case since != "" && blame:
+		return "--since and --blame", "require"
+	case since != "":
+		return "--since", "requires"
+	case blame:
+		return "--blame", "requires"
+	}
+	return "git-dependent flags", "require"
+}
+
+// computeProvenance runs git blame for each unique snippet and returns
+// a name → Provenance map. Untracked files and other recoverable blame
+// errors are silently skipped; the snippet just won't have provenance
+// attached. Catastrophic git errors print a one-line warning.
+func computeProvenance(snippets []scan.Snippet, repo *git.Repo) map[string]*report.Provenance {
+	out := make(map[string]*report.Provenance, len(snippets))
+	for _, s := range snippets {
+		if _, seen := out[s.Name]; seen {
+			continue
+		}
+		br, err := repo.Blame(s.Path, s.StartLine, s.EndLine)
+		if err != nil {
+			if !errors.Is(err, git.ErrFileNotTracked) {
+				fmt.Fprintf(os.Stderr, "warning: blame %s: %v\n", s.Name, err)
+			}
+			continue
+		}
+		out[s.Name] = &report.Provenance{
+			FirstCommit: br.FirstCommit,
+			FirstAuthor: br.FirstAuthor,
+			FirstTime:   br.FirstTime,
+			LastCommit:  br.LastCommit,
+			LastAuthor:  br.LastAuthor,
+			LastTime:    br.LastTime,
+		}
+	}
+	return out
+}
+
+// attachProvenance copies entries from a snippet-name keyed map onto
+// each pair's two endpoints. Pairs whose endpoints have no provenance
+// are left as-is (nil pointers).
+func attachProvenance(pairs []report.Pair, provs map[string]*report.Provenance) {
+	for i := range pairs {
+		if p, ok := provs[pairs[i].NameA]; ok {
+			pairs[i].ProvenanceA = p
+		}
+		if p, ok := provs[pairs[i].NameB]; ok {
+			pairs[i].ProvenanceB = p
+		}
+	}
+}
+
+// filterPairsBySince keeps only pairs where at least one snippet's source
+// range overlaps a line range in the supplied DiffMap. Snippets whose
+// path resolves outside repoRoot can never overlap and are treated as
+// non-touching.
+func filterPairsBySince(
+	pairs []report.Pair,
+	snippets []scan.Snippet,
+	repoRoot string,
+	diff git.DiffMap,
+) ([]report.Pair, int) {
+	idx := make(map[string]int, len(snippets))
+	for i, s := range snippets {
+		idx[s.Name] = i
+	}
+	kept := make([]report.Pair, 0, len(pairs))
+	dropped := 0
+	for _, p := range pairs {
+		ai, okA := idx[p.NameA]
+		bi, okB := idx[p.NameB]
+		if !okA || !okB {
+			dropped++
+			continue
+		}
+		a, b := snippets[ai], snippets[bi]
+		if diff.Touches(repoRoot, a.Path, a.StartLine, a.EndLine) ||
+			diff.Touches(repoRoot, b.Path, b.StartLine, b.EndLine) {
+			kept = append(kept, p)
+			continue
+		}
+		dropped++
+	}
+	return kept, dropped
+}
+
+// filterClustersBySince keeps only clusters where at least one member
+// snippet's source range overlaps the diff. Members are looked up by
+// name; unknown names are treated as non-touching.
+func filterClustersBySince(
+	clusters []report.Cluster,
+	snippets []scan.Snippet,
+	repoRoot string,
+	diff git.DiffMap,
+) []report.Cluster {
+	idx := make(map[string]int, len(snippets))
+	for i, s := range snippets {
+		idx[s.Name] = i
+	}
+	kept := make([]report.Cluster, 0, len(clusters))
+	for _, c := range clusters {
+		for _, m := range c.Members {
+			si, ok := idx[m]
+			if !ok {
+				continue
+			}
+			s := snippets[si]
+			if diff.Touches(repoRoot, s.Path, s.StartLine, s.EndLine) {
+				kept = append(kept, c)
+				break
+			}
+		}
+	}
+	return kept
+}
+
 // applyPairIgnores drops pairs that match the user's ignore_pairs and zeros
 // the corresponding matrix entries so DBSCAN sees the two snippets as
 // maximally distant and won't co-cluster them. Returns the surviving pairs
@@ -710,13 +921,22 @@ FLAGS:
   --min-pts int        DBSCAN min cluster size (default 2)
   --preview            show a short code excerpt for each finding
   --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)
-  --sort string        result ordering: score | score-asc | size | size-asc | name (default score)
+  --sort string        result ordering: score | score-asc | size | size-asc | name | age | age-asc
+                       (default score; age modes require --blame)
   --limit int          show only the top N pairs and N clusters (0 = no limit)
   --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off)
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
   --debug              print phase checkpoints with elapsed time to stderr
+  --cross-lang-only    report only pairs whose two snippets are in different languages
+                       (e.g. duplicate logic across Go service + TS dashboard)
+  --since string       PR-delta mode: keep only findings where ≥1 endpoint overlaps
+                       lines changed since <ref> (e.g. main, HEAD~5, abc123).
+                       Requires git on PATH and a git repository.
+  --blame              annotate each finding with git provenance (when introduced,
+                       by whom, last touched). Pairs --sort=age for "newest clones first".
+                       Requires git on PATH and a git repository.
   --skill              print the full skill guide and exit
   --guide              print the report interpretation guide and exit
 
