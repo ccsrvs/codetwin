@@ -556,15 +556,15 @@ func jsHeaderMatch(line string) (string, bool) {
 
 // ── Elixir ────────────────────────────────────────────────────────────────────
 
-var exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp)\s+(\w+)`)
+var exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp|defmacro|defmacrop)\s+(\w+)`)
 
-// splitElixir chunks an Elixir source file into per-`def`/`defp` blocks.
-// Each chunk runs from the def's header line through the matching `end`
-// keyword at the same indent level. Module wrappers (`defmodule`) are
-// not chunked; their inner defs are. v1 only supports the
-// `def name(args) do ... end` block form — the `do:` shorthand
-// (`def add(a, b), do: a + b`) and multi-clause guarded forms aren't
-// matched. Header lines must end with the bare `do` keyword.
+// splitElixir chunks an Elixir source file into per-def blocks. Each
+// chunk runs from the def's header line through either the matching
+// `end` keyword (block form: `def name(args) do … end`) or the last
+// continuation line of the body expression (shorthand form: `def
+// name(args), do: expr`). Module wrappers (`defmodule`) are not
+// chunked; their inner defs are. Recognised heads: `def`, `defp`,
+// `defmacro`, `defmacrop`.
 func splitElixir(code string) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
@@ -575,12 +575,8 @@ func splitElixir(code string) []Chunk {
 			i++
 			continue
 		}
-		if !exHeaderEndsWithDo(lines[i]) {
-			i++
-			continue
-		}
 		defIndent := indentLen(m[1])
-		end := exFindMatchingEnd(lines, i, defIndent)
+		end := exFindDefEnd(lines, i, defIndent)
 		if end < 0 {
 			i++
 			continue
@@ -596,9 +592,74 @@ func splitElixir(code string) []Chunk {
 	return chunks
 }
 
+// exFindDefEnd determines where a def chunk ends. The header itself
+// may span multiple lines (Phoenix controllers sometimes wrap wide
+// signatures, and `do:` shorthand bodies can be split across lines).
+// We scan forward from the def line until we find the body marker:
+//   - a line ending with bare `do` → block form, terminate at matching
+//     `end` keyword at the def's indent.
+//   - a line containing `, do:` followed by content → shorthand,
+//     terminate at the last continuation line whose indent exceeds the
+//     def's indent.
+//
+// Returns -1 when no body marker is found before the next sibling def
+// or `end` keyword at the def's indent (malformed input).
+func exFindDefEnd(lines []string, defLine, defIndent int) int {
+	for j := defLine; j < len(lines); j++ {
+		// Stop scanning if we hit a sibling def at the same indent (would
+		// indicate the current def has no recognisable body — malformed).
+		if j > defLine {
+			t := strings.TrimSpace(lines[j])
+			if t == "" {
+				continue
+			}
+			ind := indentLen(lines[j])
+			if ind <= defIndent && t != "do" && !strings.HasPrefix(t, "do:") && !exLineIsContinuation(t) {
+				return -1
+			}
+		}
+		if exHeaderEndsWithDo(lines[j]) {
+			return exFindMatchingEnd(lines, j, defIndent)
+		}
+		if exHeaderIsShorthand(lines[j]) {
+			return exFindShorthandBodyEnd(lines, j, defIndent)
+		}
+		// Special case: header ends with `,` and the next non-blank line
+		// starts with `do:` (split shorthand: `def f(x),\n  do: expr`).
+		// Detect the `do:` continuation here.
+		if strings.HasPrefix(strings.TrimSpace(lines[j]), "do:") && j > defLine {
+			return exFindShorthandBodyEnd(lines, j, defIndent)
+		}
+	}
+	return -1
+}
+
+// exLineIsContinuation reports whether a trimmed line looks like a
+// header-continuation line (params on their own lines, a bare `do`,
+// `do:` body start, etc.). Used to keep scanning when the def's header
+// wraps across multiple lines.
+func exLineIsContinuation(trimmed string) bool {
+	if trimmed == "do" || strings.HasPrefix(trimmed, "do:") {
+		return true
+	}
+	// Common continuation shapes: a closing `)` followed by `do` or `, do:`,
+	// a parameter line ending with `,`, etc. We accept any non-empty line
+	// that doesn't look like a sibling def or a top-level `end`.
+	if trimmed == "end" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "def ") ||
+		strings.HasPrefix(trimmed, "defp ") ||
+		strings.HasPrefix(trimmed, "defmacro ") ||
+		strings.HasPrefix(trimmed, "defmacrop ") {
+		return false
+	}
+	return true
+}
+
 // exHeaderEndsWithDo reports whether a `def` header line terminates
-// with the bare `do` keyword (block form). Skips the `do:` shorthand
-// and any continuation form that doesn't open a do/end block.
+// with the bare `do` keyword (block form), as opposed to the `, do:`
+// shorthand or a continuation that hasn't opened a do/end block yet.
 func exHeaderEndsWithDo(line string) bool {
 	t := strings.TrimRight(line, " \t")
 	if !strings.HasSuffix(t, " do") && t != "do" {
@@ -608,6 +669,42 @@ func exHeaderEndsWithDo(line string) bool {
 		return false
 	}
 	return true
+}
+
+// exHeaderIsShorthand reports whether a header line uses the
+// `, do: expr` form. The detection is strict — `, do:` must be followed
+// by something (not just `, do:` alone, which would be a typo). The
+// keyword `do:` may also appear as a map key in expressions, but `,
+// do:` after a closing `)` is distinctive enough that this matches
+// only function definitions in practice.
+func exHeaderIsShorthand(line string) bool {
+	idx := strings.Index(line, ", do:")
+	if idx < 0 {
+		return false
+	}
+	// Body must be non-empty after `, do:` (allowing whitespace + content).
+	rest := strings.TrimSpace(line[idx+len(", do:"):])
+	return rest != ""
+}
+
+// exFindShorthandBodyEnd locates the last line of a shorthand def's
+// body. The header line itself contains the body's start; the body
+// continues onto subsequent lines whose indent exceeds defIndent. The
+// chunk ends at the last continuation line, or the header line itself
+// if there is no continuation.
+func exFindShorthandBodyEnd(lines []string, defLine, defIndent int) int {
+	end := defLine
+	for j := defLine + 1; j < len(lines); j++ {
+		t := strings.TrimSpace(lines[j])
+		if t == "" {
+			continue
+		}
+		if indentLen(lines[j]) <= defIndent {
+			return end
+		}
+		end = j
+	}
+	return end
 }
 
 // exFindMatchingEnd walks forward from defLine looking for the first

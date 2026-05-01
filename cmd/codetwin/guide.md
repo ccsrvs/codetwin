@@ -168,10 +168,13 @@ A few things worth knowing:
   helpers carrying `&self` as an explicit parameter; when the body
   references `self`, the helper carries a `// NOTE: extracted as a
   free function with &self carried as an explicit parameter…`
-  comment. For Elixir, defs are emitted as a free `def name do … end`
-  block and ALWAYS carry a `# NOTE: appended at file scope; Elixir
-  defs must live inside a defmodule…` comment, since Elixir cannot
-  have free-standing defs.
+  comment. For Elixir, every common def shape is supported: `def`/`defp`/
+  `defmacro`/`defmacrop` block-form, `, do:` shorthand (single-line
+  and split forms), multi-line wrapping headers, pattern-matched
+  args, and `when` guards. The helper preserves the input's keyword
+  form and shorthand-vs-block style and ALWAYS carries a `# NOTE:
+  appended at file scope; Elixir defs must live inside a defmodule…`
+  comment, since Elixir cannot have free-standing defs.
 
 ## A note on config
 

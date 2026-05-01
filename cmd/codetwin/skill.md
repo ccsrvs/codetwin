@@ -174,12 +174,17 @@ an explicit parameter…` comment so the user knows to either bind a
 receiver at call sites (e.g. `extracted_helper(&store, key)`) or move
 the helper into an `impl` block.
 
-For Elixir, defs (and `defp` private defs) inside a `defmodule` are
-extracted as method-level chunks. The helper is emitted as a free
-`def name(args) do … end` block and ALWAYS carries a `# NOTE: appended
-at file scope; Elixir defs must live inside a defmodule…` comment —
-Elixir cannot have free-standing defs, so the user must always move
-the helper into an appropriate module before running.
+For Elixir, every common def shape is supported: `def`/`defp`/
+`defmacro`/`defmacrop` block-form (`do … end`), `, do:` shorthand
+(single-line and split forms), multi-line wrapping headers, pattern-
+matched args, and `when` guards. The helper preserves the input's
+keyword form and shorthand-vs-block style. It ALWAYS carries a
+`# NOTE: appended at file scope; Elixir defs must live inside a
+defmodule…` comment — Elixir cannot have free-standing defs, so the
+user must always move the helper into an appropriate module before
+running. Real-world idioms exercised in fixtures: GenServer callbacks
+with `@impl`, Phoenix-style multi-line headers, multi-clause pattern-
+matched defs, and `defmacro` DSL builders.
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
 pair, so a single run produces machine-readable suggestions across the

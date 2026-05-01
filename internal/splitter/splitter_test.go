@@ -631,6 +631,135 @@ end
 	}
 }
 
+// Given a def whose header wraps across multiple lines (Phoenix
+// controllers and Ecto changeset functions do this for wide
+// signatures), when the splitter runs, then the chunk includes the
+// full multi-line header plus the body. Elixir v2.
+func TestSplit_ElixirMultiLineHeader(t *testing.T) {
+	code := `defmodule Controller do
+  def update(
+    conn,
+    %{"id" => id, "user" => params}
+  ) do
+    user = Repo.get(User, id)
+    {:ok, _} = Repo.update(user, params)
+    redirect(conn, to: "/users/#{id}")
+  end
+
+  def index(conn, _), do: render(conn, "index.html")
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+	if chunks[0].Symbol != "update" || chunks[1].Symbol != "index" {
+		t.Errorf("expected [update index], got [%s %s]", chunks[0].Symbol, chunks[1].Symbol)
+	}
+	if !strings.Contains(chunks[0].Code, `%{"id" => id, "user" => params}`) {
+		t.Errorf("update chunk should include the multi-line header; got:\n%s", chunks[0].Code)
+	}
+	if !strings.Contains(chunks[0].Code, "redirect(conn") {
+		t.Errorf("update chunk should include the body; got:\n%s", chunks[0].Code)
+	}
+}
+
+// Given a `do:` shorthand whose body continues across multiple lines
+// (e.g. a long pipe chain), when the splitter runs, then the chunk
+// extends through the continuation lines (which sit at indent > def
+// indent) up to the next sibling def or end-of-module. Elixir v2.
+func TestSplit_ElixirDoShorthandMultiLine(t *testing.T) {
+	code := `defmodule Pipeline do
+  def transform(x),
+    do: x
+         |> Stream.map(&double/1)
+         |> Enum.to_list()
+
+  def other(x), do: x
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+	}
+	if chunks[0].Symbol != "transform" {
+		t.Errorf("first chunk Symbol = %q, want transform", chunks[0].Symbol)
+	}
+	if !strings.Contains(chunks[0].Code, "Enum.to_list()") {
+		t.Errorf("transform chunk should include the pipe chain continuation; got:\n%s", chunks[0].Code)
+	}
+	if chunks[0].EndLine < chunks[0].StartLine+3 {
+		t.Errorf("transform chunk should span ≥4 lines; got %d-%d", chunks[0].StartLine, chunks[0].EndLine)
+	}
+	if chunks[1].Symbol != "other" {
+		t.Errorf("second chunk Symbol = %q, want other", chunks[1].Symbol)
+	}
+}
+
+// Given an Elixir module with `def name(args), do: expr` shorthand
+// forms (both standalone and mixed with block-form defs), when the
+// splitter runs, then each shorthand is its own single-line chunk.
+// This is the most common form for one-liner GenServer callbacks,
+// Ecto changeset helpers, and view modules. Elixir v2.
+func TestSplit_ElixirDoShorthand(t *testing.T) {
+	code := `defmodule Cache do
+  def init(state), do: {:ok, state}
+  defp lookup(state, key), do: Map.get(state, key)
+
+  def handle_call({:get, key}, _from, state) do
+    {:reply, Map.get(state, key), state}
+  end
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	got := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		got = append(got, c.Symbol)
+	}
+	if len(got) != 3 || got[0] != "init" || got[1] != "lookup" || got[2] != "handle_call" {
+		t.Fatalf("expected [init lookup handle_call], got %v", got)
+	}
+	if !strings.Contains(chunks[0].Code, "{:ok, state}") {
+		t.Errorf("init chunk should contain its body; got: %q", chunks[0].Code)
+	}
+	if chunks[0].StartLine != 2 || chunks[0].EndLine != 2 {
+		t.Errorf("init chunk should be a single line (2-2); got %d-%d", chunks[0].StartLine, chunks[0].EndLine)
+	}
+}
+
+// Given an Elixir module with `defmacro`/`defmacrop` definitions
+// alongside `def`/`defp`, when the splitter runs, then all four kinds
+// are extracted as method-level chunks. Macro-heavy library code (DSLs,
+// Phoenix helpers, Ecto queries) relies on this. Elixir v2.
+func TestSplit_ElixirDefmacro(t *testing.T) {
+	code := `defmodule MyDsl do
+  defmacro define_route(path, body) do
+    quote do
+      route(unquote(path), unquote(body))
+    end
+  end
+
+  defmacrop sanitise(x) do
+    quote do
+      to_string(unquote(x))
+    end
+  end
+
+  def normal(x) do
+    x
+  end
+end
+`
+	chunks := Split("a.ex", code, tokenizer.Elixir)
+	got := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		got = append(got, c.Symbol)
+	}
+	if len(got) != 3 || got[0] != "define_route" || got[1] != "sanitise" || got[2] != "normal" {
+		t.Errorf("expected [define_route sanitise normal], got %v", got)
+	}
+}
+
 // Given an Elixir module containing a private `defp`, when the
 // splitter runs, then the private def is also extracted. Cycle 3.
 func TestSplit_ElixirDefp(t *testing.T) {

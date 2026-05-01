@@ -440,11 +440,12 @@ func exRebodyAsHelper(aCode string) string {
 	return strings.Join(body, "\n") + "\n"
 }
 
-// exHelperHeader rewrites the first recognisable Elixir `def`/`defp`
-// header of aCode to use helperName. Skips blank lines, line comments
-// (`#`), and module attributes (`@spec`, `@doc`, etc.) before locating
-// the def keyword. The `def` or `defp` keyword, parameter list, and
-// trailing `do` keyword are preserved verbatim. Returns ok=false when
+// exHelperHeader rewrites the first recognisable Elixir def header of
+// aCode to use helperName. Skips blank lines, line comments (`#`), and
+// module attributes (`@spec`, `@doc`, `@impl`, etc.) before locating
+// the def keyword. Recognised heads: `def`, `defp`, `defmacro`,
+// `defmacrop`. The keyword, parameter list, guards, and trailing `do`
+// or `, do:` body marker are preserved verbatim. Returns ok=false when
 // no def header is found.
 func exHelperHeader(aCode, helperName string) (string, bool) {
 	for _, l := range strings.Split(aCode, "\n") {
@@ -463,6 +464,12 @@ func exHelperHeader(aCode, helperName string) (string, bool) {
 		case strings.HasPrefix(t, "defp "):
 			keyword = "defp "
 			rest = t[len("defp "):]
+		case strings.HasPrefix(t, "defmacro "):
+			keyword = "defmacro "
+			rest = t[len("defmacro "):]
+		case strings.HasPrefix(t, "defmacrop "):
+			keyword = "defmacrop "
+			rest = t[len("defmacrop "):]
 		default:
 			return "", false
 		}

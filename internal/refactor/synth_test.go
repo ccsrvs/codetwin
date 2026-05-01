@@ -1,12 +1,24 @@
 package refactor
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
+
+// summariseChunks renders a slice of chunks for assertion error output.
+func summariseChunks(cs []splitter.Chunk) string {
+	out := strings.Builder{}
+	for _, c := range cs {
+		fmt.Fprintf(&out, "  L%d-%d %q\n", c.StartLine, c.EndLine, c.Symbol)
+	}
+	return out.String()
+}
 
 // TestSynthesize_GoAcceptTiers covers the simple/medium/advanced Go
 // fixtures. We assert that synthesis succeeds (Note is empty), the
@@ -930,6 +942,176 @@ func TestSynthesize_ElixirAlwaysCarriesModuleNote(t *testing.T) {
 	}
 	if !strings.Contains(s.HelperSrc, "defmodule") {
 		t.Errorf("expected NOTE to mention `defmodule`. HelperSrc:\n%s", s.HelperSrc)
+	}
+}
+
+// Given two modules where the duplicated logic lives inside
+// `defmacro`, when the splitter+synthesizer runs, then the macro is
+// chunked and a helper is emitted using `defmacro` (not `def`) so the
+// extracted form is reusable as a macro itself. Realworld v2 fixture.
+func TestSynthesize_ElixirDefmacro_HelperUsesDefmacro(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-defmacro",
+		func(c splitter.Chunk) bool { return c.Symbol == "trace" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "defmacro extracted_trace_") {
+		t.Errorf("helper should be a defmacro (not def); got:\n%s", s.HelperSrc)
+	}
+	for _, want := range []string{`"trace_a value=`, `"trace_b value=`} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("expected divergence to surface %q; got:\n%s", want, s.HelperSrc)
+		}
+	}
+}
+
+// Given two modules with multi-clause defs (parse/decode) where
+// each clause uses different patterns + guards + a do: shorthand
+// trailing clause, when the splitter chunks them, then each clause
+// becomes its own chunk and the synthesizer pairs equivalent clauses
+// across modules. Verifies that the splitter produces 4 chunks per
+// file (one per clause) and the synthesizer can produce a helper for
+// the error-handling clause where A logs "parse failed" and B logs
+// "decode failed". Realworld v2 fixture.
+func TestSynthesize_ElixirMultiClauseErrorClause(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-multiclause",
+		func(c splitter.Chunk) bool {
+			// Pick the {:error, reason} clause (the third clause in each
+			// file). The previous clauses share Symbol = parse / decode but
+			// the splitter emits each as its own chunk; we narrow by line
+			// range — the error clause is the third def, starting around
+			// line 10.
+			return c.StartLine >= 9 && c.StartLine <= 13
+		})
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, `"parse failed:`) {
+		t.Errorf("expected A's logger string in helper; got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, `"decode failed:`) {
+		t.Errorf("expected divergence to surface B's logger string; got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "{:error, reason}") {
+		t.Errorf("expected the pattern-matched arg to carry through to the helper; got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given the multi-clause fixture, when the splitter runs, then each
+// of the 4 def clauses (binary guard, integer guard, error pattern,
+// nil shorthand) becomes its own chunk. Pins the splitter's behaviour
+// on multi-clause idioms.
+func TestSplit_ElixirRealworldMultiClause_AllClauses(t *testing.T) {
+	t.Helper()
+	data, err := os.ReadFile("../../testdata/refactor/elixir/realworld-multiclause/a.ex")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	chunks := splitter.Split("a.ex", string(data), tokenizer.Elixir)
+	if len(chunks) != 4 {
+		t.Fatalf("expected 4 clauses, got %d (%v)", len(chunks), summariseChunks(chunks))
+	}
+	for _, c := range chunks {
+		if c.Symbol != "parse" {
+			t.Errorf("expected every clause symbol to be `parse`, got %q at line %d", c.Symbol, c.StartLine)
+		}
+	}
+}
+
+// Given two GenServer modules differing only in a logger string,
+// when the splitter+aligner+synthesizer pipeline runs on the
+// `handle_cast` chunks, then the helper preserves the block-form
+// header and surfaces the diverging Logger.info call. Realworld
+// regression fixture for v2 — exercises @impl, multi-line headers,
+// pattern matching in args, and Logger string interpolation.
+func TestSynthesize_ElixirGenServerHandleCast(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-genserver",
+		func(c splitter.Chunk) bool { return c.Symbol == "handle_cast" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "def extracted_handle_cast_") {
+		t.Errorf("expected helper named extracted_handle_cast_…; got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "user_cache put") {
+		t.Errorf("expected A's logger string in helper; got:\n%s", s.HelperSrc)
+	}
+	for _, want := range []string{"user_cache put", "order_cache put"} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("expected divergence to surface %q; got:\n%s", want, s.HelperSrc)
+		}
+	}
+}
+
+// Given the same GenServer fixture's `init` shorthand, when synthesis
+// runs, then the helper preserves the shorthand form. Init bodies are
+// often identical across GenServers — the alignment may have zero
+// holes, but synthesis should still produce a usable starter helper
+// (no rejection on identical bodies — only on no-common-lines, which
+// requires zero common spans).
+func TestSynthesize_ElixirGenServerInit_ShorthandPreserved(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-genserver",
+		func(c splitter.Chunk) bool { return c.Symbol == "init" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "def extracted_init_") {
+		t.Errorf("expected helper named extracted_init_…; got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "do: {:ok, state}") {
+		t.Errorf("expected shorthand body preserved; got:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a `do:` shorthand chunk, when synthesizing through the full
+// pipeline (header rewrite + rebody), then the helper preserves the
+// shorthand form and renames just the function. Elixir v2.
+func TestSynthesize_ElixirDoShorthand_HelperPreservesShorthand(t *testing.T) {
+	a := scan.Snippet{
+		Name: "x.ex:1-2 init", Lang: tokenizer.Elixir,
+		Code: "  def init(state),\n    do: {:ok, state}",
+	}
+	b := scan.Snippet{
+		Name: "y.ex:1-2 init", Lang: tokenizer.Elixir,
+		Code: "  def init(state),\n    do: {:ok, state, :hibernate}",
+	}
+	al := Align(a, b)
+	if al.CommonLines() == 0 {
+		t.Fatal("test setup expected at least one common line")
+	}
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "def extracted_init_") {
+		t.Errorf("HelperSrc should rename the function; got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "do: {:ok, state}") {
+		t.Errorf("HelperSrc should preserve the shorthand `do:` body; got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.HelperSrc, "(state),") {
+		t.Errorf("HelperSrc should preserve the `(state),` head + comma; got:\n%s", s.HelperSrc)
+	}
+	// The shorthand form must NOT have an `end` keyword on its own line —
+	// shorthand has no `end`. The trailing newline at the end of the
+	// helper is fine; a bare `end` line would indicate the rebody added
+	// block-form framing where it shouldn't.
+	for _, l := range strings.Split(s.HelperSrc, "\n") {
+		if strings.TrimSpace(l) == "end" {
+			t.Errorf("shorthand helper should not have a bare `end` line; got:\n%s", s.HelperSrc)
+		}
 	}
 }
 

@@ -589,6 +589,73 @@ func TestSuggest_ElixirRejectRaise_ExitsNonZeroWithNote(t *testing.T) {
 	}
 }
 
+// TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff: end-to-end
+// regression test for v2 Elixir capabilities. The realworld-genserver
+// fixture exercises @impl attributes, do: shorthand (`init`, `lookup`),
+// pattern-matched arg shapes, multi-line block-form callbacks
+// (`handle_call`, `handle_cast`), and nested `case`/`do` blocks. We
+// pick the `handle_cast` pair (which has a divergent Logger string)
+// and confirm --suggest produces a sensible helper.
+func TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/elixir/realworld-genserver"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+			FileB string `json:"file_b"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	if len(doc.Pairs) == 0 {
+		t.Fatalf("expected at least one pair on the realworld-genserver fixture; got:\n%s", jsonOut)
+	}
+	// Find the handle_cast pair (the one with the Logger divergence).
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if strings.Contains(p.FileA, "handle_cast") && strings.Contains(p.FileB, "handle_cast") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("expected a handle_cast/handle_cast pair; got:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "@@") {
+		t.Errorf("stdout missing hunk header. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "extracted_") {
+		t.Errorf("stdout missing extracted_… helper. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "# NOTE:") {
+		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	}
+}
+
 // TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote: the reject-throw
 // fixture must produce a note on stderr and exit code 1, NOT a diff on
 // stdout. This guards the rejection-routing contract documented in
