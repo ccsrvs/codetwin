@@ -308,7 +308,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	if opts.Flat {
 		printPairs(w, visiblePairs, opts)
 		printClusters(w, visibleClusters, opts)
-		printSummary(w, visiblePairs, visibleClusters, 0, 0, opts)
+		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, opts)
 		return
 	}
 
@@ -322,7 +322,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	for _, r := range relations {
 		crossCollapsed += r.Count
 	}
-	printSummary(w, shownPairs, visibleClusters, collapsed, crossCollapsed, opts)
+	printSummary(w, shownPairs, visiblePairs, visibleClusters, collapsed, crossCollapsed, opts)
 }
 
 // ClusterRelation aggregates the pairs whose endpoints sit in two
@@ -640,11 +640,15 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 	}
 }
 
-func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, collapsed, crossCollapsed int, opts Options) {
-	// pairs is already filtered+limited by Render, so each bucket count is a
-	// straightforward classification of what the reader sees.
+// printSummary reports the scan outcome. shown is what the pairs
+// section listed; allVisible is every pair above the threshold,
+// including those collapsed into clusters — the tier buckets classify
+// allVisible so "Exact clones" describes the scan, not just the
+// standalone leftovers (a repo whose exact clones all live inside
+// clusters would otherwise report "Exact clones 0").
+func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, opts Options) {
 	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
-	for _, p := range pairs {
+	for _, p := range allVisible {
 		switch {
 		case p.Score > 0.95:
 			exact++
@@ -664,7 +668,7 @@ func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, collapsed, cros
 	fmt.Fprintf(w, "%s%s%s\n",
 		color(grey, opts), strings.Repeat("─", 60), color(reset, opts))
 	fmt.Fprintf(w, "  %sPairs shown%s       %s%d%s\n",
-		color(grey, opts), color(reset, opts), color(cyan, opts), len(pairs), color(reset, opts))
+		color(grey, opts), color(reset, opts), color(cyan, opts), len(shown), color(reset, opts))
 	if collapsed > 0 {
 		fmt.Fprintf(w, "  %sIn-cluster pairs%s  %s%d%s %s(inside the clusters above; --flat lists them)%s\n",
 			color(grey, opts), color(reset, opts), color(cyan, opts), collapsed, color(reset, opts),

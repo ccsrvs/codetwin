@@ -1001,3 +1001,24 @@ func TestRender_OnlyClustersNoStandalonePairs_StillReports(t *testing.T) {
 		t.Errorf("cluster section missing:\n%s", out)
 	}
 }
+
+func TestRender_SummaryTiersIncludeCollapsedPairs(t *testing.T) {
+	// All three pairs are exact clones inside one cluster; the summary
+	// must still classify them even though the pairs section collapses
+	// them into the cluster.
+	pairs := []Pair{
+		{NameA: "a.go", NameB: "b.go", Score: 0.99},
+		{NameA: "a.go", NameB: "c.go", Score: 0.98},
+		{NameA: "b.go", NameB: "c.go", Score: 0.97},
+	}
+	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go", "c.go"}, Score: 0.98}}
+	var buf strings.Builder
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50})
+	out := buf.String()
+	if !strings.Contains(out, "Pairs shown       0") {
+		t.Errorf("all pairs collapsed, Pairs shown should be 0:\n%s", out)
+	}
+	if !strings.Contains(out, "Exact clones      3") {
+		t.Errorf("summary tiers should classify collapsed pairs (want 3 exact clones):\n%s", out)
+	}
+}

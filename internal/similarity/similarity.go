@@ -26,9 +26,9 @@ type Corpus struct {
 // literals are STR/NUM — so unigram histograms of any two functions
 // look alike (unrelated code routinely scores cosine 0.7–0.98, which
 // is where report noise comes from). Short n-grams restore sequence
-// information while staying far fuzzier than the k=14 winnowing
-// fingerprints, so the semantic layer still catches reordered or
-// partially rewritten logic.
+// information while staying far fuzzier than the much wider winnowing
+// fingerprints (fingerprint.DefaultK tokens per k-gram), so the
+// semantic layer still catches reordered or partially rewritten logic.
 const semanticNgram = 3
 
 // crossLangCanon maps language-specific keywords onto shared canonical
