@@ -1,8 +1,9 @@
 # codetwin roadmap — unique-niche bets
 
-_Last updated: 2026-04-30. Source: planning conversation that shipped
+_Last updated: 2026-07-02. Sources: planning conversation that shipped
 commits `159a298`, `59fe97f`, `f53a739` on
-`claude/explore-unique-features-4rInJ`._
+`claude/explore-unique-features-4rInJ`; detection-quality overhaul
+merged as PR #7 (`fix/matching-pipeline-review`)._
 
 ## Status at a glance
 
@@ -11,10 +12,11 @@ commits `159a298`, `59fe97f`, `f53a739` on
 | 1 | Git provenance | **Shipped** | `--blame`, `--sort age`, `--sort age-asc` |
 | 2 | PR-delta mode | **Shipped** | `--since <ref>` |
 | 3 | Cross-language as the headline | **Shipped** | `--cross-lang-only`, `lang_{a,b}` JSON |
-| 4 | Refactor patch emission | **Shipped (v1, Go)** | `--suggest <pair-id>`, `--suggest-all`, `id` + `suggested_patch` in JSON |
+| 4 | Refactor patch emission | **Shipped (all 6 languages)** | `--suggest <pair-id>`, `--suggest-all`, `id` + `suggested_patch` in JSON |
 | 5 | Clone watchlist + drift alerts | Not started | (proposed: `--baseline`) |
 | 6 | Cross-repo / org-level scanning | Not started | (existing CLI already accepts multiple roots; needs namespacing + per-repo cluster grouping) |
 | 7 | Behavioural / runtime equivalence | Flagged longshot | — |
+| — | Detection quality + report SNR (PR #7) | **Shipped** | `internal/bench` ground-truth benchmark, retuned scoring defaults, cluster-first report, `--flat` |
 
 ### Per-language emitter status (Bet #4)
 
@@ -40,9 +42,11 @@ provenance, refactor patches, PR-delta gating, or cross-language
 matching at the function level.
 
 Today's codetwin: function-level chunks across 8 languages, structural
-(Winnowing/Jaccard) + semantic (TF-IDF cosine) scoring, DBSCAN clusters,
-inverted-index pruning, per-file cache, Claude-skill packaged. CLI-only,
-one-shot, no external deps.
+(Winnowing/Jaccard, k=10 over whitespace-invariant token streams) +
+semantic (sublinear TF-IDF cosine over canonicalized token trigrams)
+scoring with language-aware blending, DBSCAN clusters, cluster-first
+terminal report, inverted-index pruning, per-file cache, Claude-skill
+packaged. CLI-only, one-shot, no external deps.
 
 ## Ranked unique-niche bets
 
@@ -215,6 +219,86 @@ this safely".
 **Fit:** Poor for a no-deps single binary. Needs language-specific
 sandboxes. Worth flagging only as a future research direction.
 
+## Detection quality + report SNR overhaul (PR #7, 2026-07-02)
+
+Not one of the original bets, but a prerequisite for all of them: a
+pipeline review found real bugs, and quantifying the "noisy defaults"
+complaint led to a scoring overhaul. Five commits on
+`fix/matching-pipeline-review`.
+
+**Bugs fixed (`69a43f0`):**
+- Winnowing short-stream gap — snippets with fewer k-grams than one
+  window got an *empty* fingerprint set and could never match
+  structurally, even identical copies.
+- Python splitter — a column-0 `#` comment inside a function body
+  terminated the chunk early, hiding the rest of the body.
+- Symlinked paths (macOS `/var` → `/private/var`) broke `--blame`
+  (error) and made `--since` silently drop every pair.
+
+**Tokenization (`7ee9dc3`):** punctuation is emitted as single-rune
+tokens so formatting never changes the token stream (`x=a+b` ==
+`x = a + b` == minified). `Jaccard(empty, empty)` is 0, not a vacuous
+1.0. Elixir Detect heuristic requires a word-boundary `do`.
+
+**Scoring (`583c1e8`):** the old defaults reported 171,969 pairs on
+codetwin's own repo — unigram TF-IDF over VAR-normalized streams
+scores *unrelated* code at cosine 0.7–0.98, and the 0.30 threshold sat
+below that floor. Changes, each validated against the new benchmark:
+- semantic terms are token **trigrams** with **sublinear TF** and an
+  **evidence floor** (< 4 terms → empty vector, cosine 0)
+- semantic stream drops punctuation and canonicalizes cross-language
+  keywords (`func`/`def`/`fn` → `FN`, `range` → `in`, `nil`/`None`/
+  `null` → `NIL`, …)
+- **language-aware blend**: same-language 0.5/0.5; cross-language
+  0.2 structural / 0.8 semantic (winnowing can't match across keyword
+  sets)
+- structural k 5 → 10 (denser token streams), default `--threshold`
+  0.30 → 0.50, cache schema Version 2
+
+Result: self-host 171,969 → ~1,700 pairs; gin (24k LOC) hand-verified
+at both ends — the 50–55% band surfaces gin's real `Bind`/`BindBody`
+copy-paste across four binding backends (3-line methods only the
+semantic layer can see).
+
+**Cluster-first report (`31a5ffc`, `3b92bc5`):** clusters render first
+with avg similarity; intra-cluster pairs collapse into the cluster;
+cross-cluster pairs aggregate into one `RELATED CLUSTERS` line per
+family pair; `SIMILARITY PAIRS` lists only pairs with an unclustered
+endpoint. `--flat` restores the flat listing; `--json` is always flat
+(CI contract unchanged). Summary tiers classify *all* visible pairs so
+collapsed exact clones still show in totals. On gin: 13,312 report
+lines → 3,348.
+
+### The benchmark is the tuning contract
+
+`internal/bench` + `testdata/bench/` is a labeled ground-truth
+benchmark: positives (every refactor fixture pair + formatting-variant
+/ renamed / cross-language cases), hard negatives (test stubs, HTTP
+handlers sharing only error-handling idiom, unrelated logic), and a
+noise-floor assertion (unrelated-pair p95 ≤ 0.30). **Any change to
+tokenizer/fingerprint/similarity must keep `TestBench_GroundTruth`
+green — tune against it, not eyeballed report output.** It logs a
+per-case score table and the worst noise pairs by name under `-v`.
+
+### Deferred follow-ups (P3s from the PR #7 review)
+
+- **`cache.Version` doesn't encode fingerprint k/w or tokenizer
+  schema** — a future `DefaultK` retune silently serves stale
+  fingerprints unless the version is manually bumped. Encode the
+  parameters in the version/key, or validate the cached per-chunk `K`
+  against `fingerprint.DefaultK` on load.
+- **`Unknown`↔`Unknown` language pairs get the cross-language 0.2/0.8
+  blend** in `BuildMatrix`. Unreachable today (scan gates on supported
+  extensions) but a latent trap; two unrecognized files are more
+  likely the *same* language.
+- **`buildPreviews` builds previews for collapsed intra-cluster pairs**
+  that the cluster-first layout never renders — wasted work with
+  `--preview` on big repos.
+- **Cross-paradigm cross-language matching is weak by design** — an
+  index loop vs `Enum.reduce` shares few trigrams even after keyword
+  canonicalization (integration tests assert ranking, not absolutes).
+  Deeper canonicalization of iteration idioms would be its own bet.
+
 ## Recommendation (original) and what shipped
 
 The original recommendation was **1 + 2 + 3** as the headline narrative:
@@ -271,24 +355,26 @@ priority is lifecycle (track clone families over time) or scale
 
 ## Coverage of shipped code
 
-After the Python emitter test pass (commits `d032c0d`, `c6ff2b6`,
-`d42f4d5`):
+After the PR #7 detection-quality overhaul (2026-07-02):
 
 | Package | Coverage |
 |---|---|
-| `internal/refactor` | **99.7%** (residual is one provably-unreachable defensive break) |
-| `internal/fingerprint` | 97.3% |
+| `internal/tokenizer` | **100.0%** |
+| `internal/refactor` | 99.1% |
+| `internal/fingerprint` | 97.6% |
+| `internal/similarity` | 96.9% |
+| `internal/git` | 96.7% |
 | `internal/pathutil` | 96.4% |
-| `internal/similarity` | 95.6% |
+| `internal/report` | 95.7% |
 | `internal/scan` | 94.3% |
-| `internal/tokenizer` | 94.4% |
+| `internal/splitter` | 94.2% |
 | `internal/config` | 93.9% |
-| `internal/git` | 93.8% |
 | `internal/cluster` | 93.2% |
-| `internal/report` | 91.7% |
-| `internal/splitter` | 90.3% |
-| `internal/cache` | 79.4% |
-| `cmd/codetwin` | 25.2% (`main()` body still un-unit-tested; new helpers at 75–100%) |
+| `internal/cache` | 89.7% |
+| `cmd/codetwin` | 25.1% (`main()` body still un-unit-tested; covered by subprocess tests, which don't count toward `-cover`) |
+
+(`internal/bench` reports no coverage — it is a test-only package; its
+`TestBench_GroundTruth` is the detection-quality gate described above.)
 
 The biggest standing gap is `cmd/codetwin/main.go`'s top-level
 orchestration: `main()`, `printJSON`, `applyConfigDefaults`,
