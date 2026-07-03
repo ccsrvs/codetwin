@@ -37,6 +37,10 @@ func TestDetect_FromHeuristic(t *testing.T) {
 		{"java public class", "public class Foo { System.out.println(\"hi\"); }", Java},
 		{"rust fn + let mut", "fn main() {\n    let mut x = 1;\n}", Rust},
 		{"python def with colon", "def foo(x):\n    return x", Python},
+		{"python def mentioning download stays python", "def fetch(url):\n    return download(url)", Python},
+		{"python def with docs identifier stays python", "def render(docs):\n    return docs[0]", Python},
+		{"elixir def with do block", "def hello(x) do\n  x\nend", Elixir},
+		{"elixir shorthand def", "def hello(x), do: x", Elixir},
 		{"javascript function keyword", "function foo() { return 1; }", JavaScript},
 		{"javascript const + arrow", "const f = () => 1;", JavaScript},
 		{"unknown short text", "hello world", Unknown},
@@ -297,13 +301,12 @@ func TestTokenizeWithLines_AssignsCorrectLineNumbers(t *testing.T) {
 	if len(tokens) != len(lines) {
 		t.Fatalf("tokens (%d) and lines (%d) length mismatch", len(tokens), len(lines))
 	}
-	// Expected tokens: def VAR  VAR NUM  return VAR
 	want := []struct {
 		tok  string
 		line int
 	}{
-		{"def", 1}, {"VAR", 1}, // def foo()
-		{"VAR", 2}, {"NUM", 2}, // x = 1
+		{"def", 1}, {"VAR", 1}, {"(", 1}, {")", 1}, {":", 1}, // def foo():
+		{"VAR", 2}, {"=", 2}, {"NUM", 2}, // x = 1
 		{"return", 3}, {"VAR", 3}, // return x
 	}
 	if len(tokens) != len(want) {
@@ -443,5 +446,47 @@ func TestTokenize_ElixirNormalizesSingleQuotedStrings(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected 'STR' token in Elixir output, got %v", tokens)
+	}
+}
+func TestTokenize_WhitespaceInsensitive(t *testing.T) {
+	// Dense and spaced formatting of the same logic must produce the
+	// same token stream — otherwise reformatted (or minified) clones
+	// fingerprint differently and never match.
+	cases := []struct {
+		name         string
+		dense, roomy string
+		lang         Language
+	}{
+		{"js assignment", "x=a+b;", "x = a + b ;", JavaScript},
+		{"js call", "f(x,y)", "f( x , y )", JavaScript},
+		{"go define", "x:=len(s)", "x := len( s )", Go},
+		{"python def", "def f(x):return x+1", "def f( x ) : return x + 1", Python},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dense := Tokenize(c.dense, c.lang)
+			roomy := Tokenize(c.roomy, c.lang)
+			if strings.Join(dense, " ") != strings.Join(roomy, " ") {
+				t.Errorf("dense %v != roomy %v", dense, roomy)
+			}
+		})
+	}
+}
+
+func TestTokenize_PunctuationIsSingleRuneTokens(t *testing.T) {
+	// Punctuation splits word runs and each rune stands alone — runs
+	// like `):` would re-introduce whitespace sensitivity.
+	got := Tokenize("a.b(c)", JavaScript)
+	want := []string{"VAR", ".", "VAR", "(", "VAR", ")"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("Tokenize(a.b(c)) = %v, want %v", got, want)
+	}
+}
+
+func TestTokenize_PunctuationCarriesSignal(t *testing.T) {
+	add := Tokenize("x = a + b", JavaScript)
+	sub := Tokenize("x = a - b", JavaScript)
+	if strings.Join(add, " ") == strings.Join(sub, " ") {
+		t.Errorf("a+b and a-b tokenized identically: %v", add)
 	}
 }

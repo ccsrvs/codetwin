@@ -12,8 +12,15 @@ package fingerprint
 import "math/bits"
 
 const (
-	DefaultK = 5 // k-gram size
-	DefaultW = 4 // window size
+	// DefaultK is the k-gram size. Tuned against the tokenizer's output
+	// density: the tokenizer emits punctuation runes as individual tokens
+	// (roughly doubling tokens per source line versus word-only streams),
+	// so k must be large enough that a k-gram spans several words of
+	// source. Too small and ubiquitous punctuation shapes like
+	// `( VAR , VAR )` dominate the fingerprint sets, inflating Jaccard
+	// similarity between unrelated functions.
+	DefaultK = 14
+	DefaultW = 4 // winnowing window size
 )
 
 // Set is the fingerprint of a document — a set of selected hashes.
@@ -124,10 +131,12 @@ func minHashAt(window []uint32) (uint32, int) {
 }
 
 // Jaccard returns the Jaccard similarity coefficient between two fingerprint sets.
-// Returns 1.0 when both sets are empty (vacuously equal).
+// Returns 0 when either set is empty: an empty fingerprint set carries no
+// evidence of similarity, and "vacuously identical" would report two
+// unrelated tiny snippets as a perfect structural match.
 func Jaccard(a, b Set) float64 {
 	if len(a) == 0 && len(b) == 0 {
-		return 1.0
+		return 0
 	}
 
 	intersection := 0

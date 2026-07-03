@@ -90,4 +90,3 @@ func TestOpen_GivenSubdirOfRepo_FindsRoot(t *testing.T) {
 		t.Errorf("Repo.Root = %q, want %q (after symlink resolution)", repo.Root, repoDir)
 	}
 }
-

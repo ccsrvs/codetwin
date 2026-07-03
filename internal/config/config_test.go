@@ -150,7 +150,7 @@ func TestIgnoreMatcher_StarGlob(t *testing.T) {
 		want bool
 	}{
 		{"foo_test.go", true},
-		{"src/bar_test.go", true},  // matches via basename
+		{"src/bar_test.go", true}, // matches via basename
 		{"src/baz/qux_test.go", true},
 		{"foo.go", false},
 		{"test.go", false},

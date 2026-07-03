@@ -181,10 +181,17 @@ func TestBuildMatrix_GivenOnPairDoneCallback_When_Build_Then_TotalArgIsPairCount
 }
 
 func TestBuildMatrix_IdenticalShortSnippetsGetStructuralCredit(t *testing.T) {
-	// 6 tokens — enough for k-grams (k=5) but fewer than one full
-	// winnowing window (w=4). Identical snippets must still share
+	// Enough tokens for exactly one k-gram — fewer than one full
+	// winnowing window. Identical snippets must still share
 	// fingerprints and score structural 1.0.
-	tokens := []string{"def", "VAR", "return", "VAR", "NUM", "VAR"}
+	tokens := make([]string, fingerprint.DefaultK)
+	for i := range tokens {
+		if i%2 == 0 {
+			tokens[i] = "VAR"
+		} else {
+			tokens[i] = "tok" + string(rune('a'+i))
+		}
+	}
 	snips := []scan.Snippet{
 		makeSnippet("a/short.py", "/a.py", tokens),
 		makeSnippet("b/short.py", "/b.py", tokens),

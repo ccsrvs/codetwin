@@ -28,8 +28,8 @@ func summariseChunks(cs []splitter.Chunk) string {
 // the helper-header `func extracted_…(`).
 func TestSynthesize_GoAcceptTiers(t *testing.T) {
 	cases := []struct {
-		dir          string
-		expectInSrc  []string // substrings that must appear in HelperSrc
+		dir           string
+		expectInSrc   []string // substrings that must appear in HelperSrc
 		minConfidence float64
 	}{
 		{
@@ -1931,7 +1931,6 @@ func TestSynthesize_JavaCrossLanguage_Rejected(t *testing.T) {
 		t.Errorf("expected cross-language rejection, got %q", s.Note)
 	}
 }
-
 
 func TestSynthesize_CrossLanguage_Rejected(t *testing.T) {
 	a, _ := loadSnippets(t, "../../testdata/refactor/go/simple")

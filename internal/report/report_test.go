@@ -689,7 +689,6 @@ func TestPairID_Distinct(t *testing.T) {
 	}
 }
 
-
 // ── Sort-comparator coverage gaps ────────────────────────────────────────────
 //
 // These tests target the 0%-covered comparators (cmpPairNameB,
@@ -849,7 +848,7 @@ func TestBuildMatchPreview_FirstTokOutOfRange(t *testing.T) {
 // clamps inside BuildMatchPreview.
 func TestBuildMatchPreview_EndTokClampedAndLineRangeClamped(t *testing.T) {
 	code := "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n" // 10 lines
-	tokenLines := []int{1, 2, 3, 4}            // 4 tokens
+	tokenLines := []int{1, 2, 3, 4}          // 4 tokens
 	// firstTok=3 (last valid token), lastTok=2 (smaller than firstTok)
 	// so the endTok = lastTok+k-1 path runs and the endTok<firstTok clamp fires.
 	// k=10 forces endTok past len(tokenLines), exercising the

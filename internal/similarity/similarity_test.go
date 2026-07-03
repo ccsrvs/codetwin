@@ -94,7 +94,7 @@ func TestCosineFromNormalized_MatchesCosine(t *testing.T) {
 		{Vector{"a": 1.0, "b": 2.0}, Vector{"a": 0.5, "c": 1.5}},
 		{Vector{"x": 3.0}, Vector{"x": 3.0}},
 		{Vector{"a": 1.0}, Vector{"b": 1.0}}, // orthogonal
-		{Vector{}, Vector{"a": 1.0}},          // empty
+		{Vector{}, Vector{"a": 1.0}},         // empty
 	}
 	for _, c := range cases {
 		want := Cosine(c.a, c.b)

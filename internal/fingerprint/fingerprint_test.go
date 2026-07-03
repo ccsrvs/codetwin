@@ -5,9 +5,18 @@ import (
 	"testing"
 )
 
+// seqTokens builds n distinct tokens ("t0", "t1", …) so tests scale with
+// DefaultK instead of hardcoding stream lengths.
+func seqTokens(n int) []string {
+	tokens := make([]string, n)
+	for i := range tokens {
+		tokens[i] = "t" + string(rune('0'+i/10)) + string(rune('0'+i%10))
+	}
+	return tokens
+}
+
 func TestGenerate_BasicTokens(t *testing.T) {
-	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
-	set := Generate(tokens, DefaultK, DefaultW)
+	set := Generate(seqTokens(2*DefaultK), DefaultK, DefaultW)
 	if len(set) == 0 {
 		t.Error("Generate returned empty set for non-trivial input")
 	}
@@ -22,7 +31,7 @@ func TestGenerate_ShortInputReturnsEmpty(t *testing.T) {
 }
 
 func TestGenerate_DeterministicForSameInput(t *testing.T) {
-	tokens := []string{"a", "b", "c", "d", "e", "f", "g"}
+	tokens := seqTokens(DefaultK + 2)
 	a := Generate(tokens, DefaultK, DefaultW)
 	b := Generate(tokens, DefaultK, DefaultW)
 	// Guard against the vacuous pass: Jaccard(empty, empty) == 1.0, so the
@@ -42,14 +51,10 @@ func TestGenerate_DeterministicForSameInput(t *testing.T) {
 // guarantee, snippets with k ≤ len(tokens) < k+w-1 tokens get an empty set
 // and can never match anything structurally — not even an identical copy.
 func TestGenerate_ShortStreamStillFingerprints(t *testing.T) {
-	// k=5, w=4: token counts 5..7 produce 1..3 k-grams — fewer than one
+	// Token counts k .. k+w-2 produce 1 .. w-1 k-grams — fewer than one
 	// full window.
 	for n := DefaultK; n < DefaultK+DefaultW-1; n++ {
-		tokens := make([]string, n)
-		for i := range tokens {
-			tokens[i] = string(rune('a' + i))
-		}
-		set := Generate(tokens, DefaultK, DefaultW)
+		set := Generate(seqTokens(n), DefaultK, DefaultW)
 		if len(set) == 0 {
 			t.Errorf("n=%d tokens: expected at least one fingerprint, got none", n)
 		}
@@ -57,23 +62,27 @@ func TestGenerate_ShortStreamStillFingerprints(t *testing.T) {
 }
 
 func TestGenerate_IdenticalShortStreamsMatch(t *testing.T) {
-	tokens := []string{"def", "VAR", "return", "VAR", "NUM"} // 5 tokens, 1 k-gram
+	tokens := seqTokens(DefaultK) // exactly one k-gram
 	a := Generate(tokens, DefaultK, DefaultW)
 	b := Generate(append([]string{}, tokens...), DefaultK, DefaultW)
 	if len(a) == 0 {
-		t.Fatal("expected non-empty fingerprint set for 5-token stream")
+		t.Fatal("expected non-empty fingerprint set for single-k-gram stream")
 	}
 	if got := Jaccard(a, b); got != 1.0 {
 		t.Errorf("identical short streams: Jaccard = %v, want 1.0", got)
 	}
-	other := Generate([]string{"if", "VAR", "for", "STR", "STR"}, DefaultK, DefaultW)
+	reversed := make([]string, len(tokens))
+	for i, tok := range tokens {
+		reversed[len(tokens)-1-i] = tok
+	}
+	other := Generate(reversed, DefaultK, DefaultW)
 	if got := Jaccard(a, other); got != 0.0 {
 		t.Errorf("different short streams: Jaccard = %v, want 0.0", got)
 	}
 }
 
 func TestGeneratePositional_ShortStreamMatchesGenerate(t *testing.T) {
-	tokens := []string{"a", "b", "c", "d", "e", "f"} // 2 k-grams < w
+	tokens := seqTokens(DefaultK + 1) // 2 k-grams < w
 	plain := Generate(tokens, DefaultK, DefaultW)
 	pos := GeneratePositional(tokens, DefaultK, DefaultW)
 	if len(plain) != 1 || len(pos.Set) != 1 {
@@ -104,7 +113,7 @@ func TestJaccard(t *testing.T) {
 		{"identical sets", Set{1: {}, 2: {}, 3: {}}, Set{1: {}, 2: {}, 3: {}}, 1.0},
 		{"disjoint sets", Set{1: {}, 2: {}}, Set{3: {}, 4: {}}, 0.0},
 		{"partial overlap (2 of 4)", Set{1: {}, 2: {}, 3: {}}, Set{2: {}, 3: {}, 4: {}}, 0.5},
-		{"both empty is vacuously 1.0", Set{}, Set{}, 1.0},
+		{"both empty carries no evidence", Set{}, Set{}, 0.0},
 		{"one empty", Set{1: {}, 2: {}}, Set{}, 0.0},
 	}
 	for _, tc := range cases {
@@ -117,7 +126,7 @@ func TestJaccard(t *testing.T) {
 }
 
 func TestGeneratePositional_SetMatchesGenerate(t *testing.T) {
-	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	tokens := seqTokens(2 * DefaultK)
 	plain := Generate(tokens, DefaultK, DefaultW)
 	pos := GeneratePositional(tokens, DefaultK, DefaultW)
 	if len(plain) != len(pos.Set) {
@@ -134,7 +143,7 @@ func TestGeneratePositional_SetMatchesGenerate(t *testing.T) {
 }
 
 func TestGeneratePositional_PositionsAreInRange(t *testing.T) {
-	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	tokens := seqTokens(2 * DefaultK)
 	pos := GeneratePositional(tokens, DefaultK, DefaultW)
 	maxPos := len(tokens) - DefaultK // last valid k-gram start
 	for hash, positions := range pos.Positions {
@@ -183,7 +192,7 @@ func TestMatchRange_SpansMatchingPositions(t *testing.T) {
 }
 
 func TestMatchRange_IdenticalInputsCoverFullStream(t *testing.T) {
-	tokens := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
+	tokens := seqTokens(2 * DefaultK)
 	pos := GeneratePositional(tokens, DefaultK, DefaultW)
 	first, last := MatchRange(pos, pos)
 	if first < 0 || last < first {

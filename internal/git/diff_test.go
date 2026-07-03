@@ -136,10 +136,10 @@ func TestDiffMap_TouchesIntersectsAnyRange(t *testing.T) {
 		"pkg/foo.go": {{Start: 10, End: 20}, {Start: 50, End: 60}},
 	}
 	cases := []struct {
-		name             string
-		path             string
-		start, end       int
-		want             bool
+		name       string
+		path       string
+		start, end int
+		want       bool
 	}{
 		{"overlap left edge", "/tmp/repo/pkg/foo.go", 5, 10, true},
 		{"overlap right edge", "/tmp/repo/pkg/foo.go", 20, 25, true},
@@ -193,9 +193,9 @@ func TestStripDiffPrefix_LeavesUnusualPrefixesIntact(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"b/foo.go", "foo.go"},
 		{"b/nested/a.go", "nested/a.go"},
-		{"foo.go", "foo.go"},                // no prefix at all
-		{"src/foo.go", "src/foo.go"},        // arbitrary --dst-prefix=src/
-		{"workdir/x/y", "workdir/x/y"},      // arbitrary --dst-prefix=workdir/
+		{"foo.go", "foo.go"},           // no prefix at all
+		{"src/foo.go", "src/foo.go"},   // arbitrary --dst-prefix=src/
+		{"workdir/x/y", "workdir/x/y"}, // arbitrary --dst-prefix=workdir/
 	}
 	for _, c := range cases {
 		if got := stripDiffPrefix(c.in); got != c.want {

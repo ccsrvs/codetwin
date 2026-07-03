@@ -40,7 +40,7 @@ type LineSpan struct {
 // one-sided (an inserted block of lines on only one side); the
 // corresponding Text is "" in that case.
 type Hole struct {
-	AStart, AEnd int    // 1-based, end exclusive in A.Code lines
+	AStart, AEnd int // 1-based, end exclusive in A.Code lines
 	BStart, BEnd int
 	AText, BText string // joined source lines, no trailing newline
 }
