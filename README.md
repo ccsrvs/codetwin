@@ -122,6 +122,7 @@ codetwin --suggest <pair-id> ./src
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
+| `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
 | `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair with the given 8-char ID. Go and Python in v1. |

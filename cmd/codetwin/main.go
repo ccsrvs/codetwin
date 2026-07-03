@@ -79,6 +79,7 @@ func main() {
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
+	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
 	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair (look up the 8-char pair ID in --json output). v1 supports Go, Python, and Java; other languages print a 'note' explaining why.")
@@ -371,6 +372,7 @@ func main() {
 		Sort:          report.SortMode(*sortMode),
 		Limit:         *limit,
 		CrossLangOnly: *crossLangOnly,
+		Flat:          *flat,
 	}
 
 	// Sort + threshold filter + limit ONCE here in main.go, then build
@@ -1058,6 +1060,8 @@ FLAGS:
   --sort string        result ordering: score | score-asc | size | size-asc | name | age | age-asc
                        (default score; age modes require --blame)
   --limit int          show only the top N pairs and N clusters (0 = no limit)
+  --flat               list every pair individually; by default pairs inside a
+                       cluster render once as the cluster (families first)
   --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off)
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin

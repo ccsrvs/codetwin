@@ -879,3 +879,125 @@ func TestPrintPreview_ZeroStartLineClampsToOne(t *testing.T) {
 		t.Errorf("zero-clamp branch did not fire, got:\n%s", out)
 	}
 }
+
+// ── Cluster-first rendering ─────────────────────────────────────────────
+
+func clusterFirstFixture() ([]Pair, []Cluster) {
+	pairs := []Pair{
+		// Intra-cluster: both endpoints in cluster 0.
+		{NameA: "fam1_a.go", NameB: "fam1_b.go", Score: 0.97},
+		{NameA: "fam1_a.go", NameB: "fam1_c.go", Score: 0.95},
+		{NameA: "fam1_b.go", NameB: "fam1_c.go", Score: 0.96},
+		// Cross-cluster: cluster 0 ↔ cluster 1.
+		{NameA: "fam1_a.go", NameB: "fam2_a.go", Score: 0.62},
+		{NameA: "fam1_b.go", NameB: "fam2_b.go", Score: 0.58},
+		// Half-clustered: one endpoint outside any cluster.
+		{NameA: "fam1_a.go", NameB: "loner.go", Score: 0.71},
+		// Fully unclustered.
+		{NameA: "solo_a.go", NameB: "solo_b.go", Score: 0.55},
+	}
+	clusters := []Cluster{
+		{ID: 0, Members: []string{"fam1_a.go", "fam1_b.go", "fam1_c.go"}, Score: 0.96},
+		{ID: 1, Members: []string{"fam2_a.go", "fam2_b.go"}, Score: 0.90},
+	}
+	return pairs, clusters
+}
+
+func TestSplitPairsByCluster_Partitions(t *testing.T) {
+	pairs, clusters := clusterFirstFixture()
+	outside, collapsed, relations := SplitPairsByCluster(pairs, clusters)
+
+	if collapsed != 3 {
+		t.Errorf("collapsed = %d, want 3 intra-cluster pairs", collapsed)
+	}
+	if len(outside) != 2 {
+		t.Fatalf("outside = %d pairs, want 2 (half-clustered + unclustered): %+v", len(outside), outside)
+	}
+	if len(relations) != 1 {
+		t.Fatalf("relations = %d, want 1 (cluster 0 ↔ cluster 1)", len(relations))
+	}
+	r := relations[0]
+	if r.A != 0 || r.B != 1 {
+		t.Errorf("relation IDs = %d ↔ %d, want 0 ↔ 1", r.A, r.B)
+	}
+	if r.Count != 2 {
+		t.Errorf("relation count = %d, want 2", r.Count)
+	}
+	if r.Max != 0.62 {
+		t.Errorf("relation max = %v, want 0.62", r.Max)
+	}
+}
+
+func TestRender_ClusterFirst_CollapsesIntraClusterPairs(t *testing.T) {
+	var buf strings.Builder
+	pairs, clusters := clusterFirstFixture()
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50})
+	out := buf.String()
+
+	// Intra-family pairs must not render as individual pair entries; the
+	// family members still appear once in the cluster listing.
+	if strings.Contains(out, "fam1_b.go\n") && strings.Count(out, "fam1_b.go") > 1 {
+		t.Errorf("intra-cluster member rendered more than once (pair not collapsed):\n%s", out)
+	}
+	if !strings.Contains(out, "RELATED CLUSTERS") {
+		t.Errorf("cross-cluster pairs should aggregate under RELATED CLUSTERS:\n%s", out)
+	}
+	if !strings.Contains(out, "Cluster 1 ↔ Cluster 2") {
+		t.Errorf("relation line missing (1-indexed IDs):\n%s", out)
+	}
+	// Half-clustered and unclustered pairs stay individually visible.
+	if !strings.Contains(out, "loner.go") || !strings.Contains(out, "solo_a.go") {
+		t.Errorf("pairs with an unclustered endpoint must stay listed:\n%s", out)
+	}
+	if !strings.Contains(out, "In-cluster pairs") || !strings.Contains(out, "Cross-cluster") {
+		t.Errorf("summary should report collapsed counts:\n%s", out)
+	}
+	// Clusters render before pairs.
+	if strings.Index(out, "REFACTORING CLUSTERS") > strings.Index(out, "SIMILARITY PAIRS") {
+		t.Errorf("clusters should render before pairs in cluster-first layout:\n%s", out)
+	}
+}
+
+func TestRender_Flat_ListsEveryPair(t *testing.T) {
+	var buf strings.Builder
+	pairs, clusters := clusterFirstFixture()
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50, Flat: true})
+	out := buf.String()
+
+	if strings.Contains(out, "RELATED CLUSTERS") {
+		t.Errorf("--flat must not aggregate cross-cluster pairs:\n%s", out)
+	}
+	if !strings.Contains(out, "Pairs shown       7") {
+		t.Errorf("--flat should list all 7 pairs:\n%s", out)
+	}
+	// Flat keeps the classic layout: pairs before clusters.
+	if strings.Index(out, "SIMILARITY PAIRS") > strings.Index(out, "REFACTORING CLUSTERS") {
+		t.Errorf("--flat should keep the pairs-first layout:\n%s", out)
+	}
+}
+
+func TestRender_ClusterAvgScoreShown(t *testing.T) {
+	var buf strings.Builder
+	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go"}, Score: 0.97}}
+	pairs := []Pair{{NameA: "a.go", NameB: "b.go", Score: 0.97}}
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50})
+	if !strings.Contains(buf.String(), "avg similarity  97%") {
+		t.Errorf("cluster line should include avg similarity:\n%s", buf.String())
+	}
+}
+
+func TestRender_OnlyClustersNoStandalonePairs_StillReports(t *testing.T) {
+	// Every pair is intra-cluster: the report must not print the
+	// "No similarities found" banner — the clusters ARE the findings.
+	var buf strings.Builder
+	pairs := []Pair{{NameA: "a.go", NameB: "b.go", Score: 0.97}}
+	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go"}, Score: 0.97}}
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50})
+	out := buf.String()
+	if strings.Contains(out, "No similarities found") {
+		t.Errorf("collapsed-only report should still show clusters:\n%s", out)
+	}
+	if !strings.Contains(out, "REFACTORING CLUSTERS") {
+		t.Errorf("cluster section missing:\n%s", out)
+	}
+}

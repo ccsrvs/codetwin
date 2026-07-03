@@ -72,6 +72,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --sort string           result ordering: score | score-asc | size | size-asc | name | age | age-asc
                         (default score; age modes require --blame)
 --limit int             show only the top N pairs and N clusters (0 = no limit)
+--flat                  list every pair individually; default report is cluster-first
+                        (intra-cluster pairs collapse into the cluster)
 --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off);
                             multiplier ramps from 0.5× at 0 lines to 1.0× at N
 --cross-lang-only       report only pairs whose two snippets are in different languages
