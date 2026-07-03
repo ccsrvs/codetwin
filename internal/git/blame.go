@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -41,11 +40,8 @@ func (r *Repo) Blame(absPath string, start, end int) (BlameRange, error) {
 	if start < 1 || end < start {
 		return BlameRange{}, fmt.Errorf("invalid blame range [%d, %d]", start, end)
 	}
-	rel, err := filepath.Rel(r.Root, absPath)
-	if err != nil {
-		return BlameRange{}, fmt.Errorf("path outside repo: %w", err)
-	}
-	if strings.HasPrefix(rel, "..") {
+	rel, ok := relWithinRoot(r.Root, absPath)
+	if !ok {
 		return BlameRange{}, fmt.Errorf("path outside repo: %s", absPath)
 	}
 

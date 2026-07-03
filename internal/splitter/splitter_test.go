@@ -1144,3 +1144,48 @@ func TestIndentLen_NonWhitespaceImmediatelyReturns(t *testing.T) {
 		})
 	}
 }
+
+func TestSplit_PythonColumn0CommentInsideBody(t *testing.T) {
+	code := `def process(items):
+    total = 0
+    for it in items:
+# TODO fix this later
+        total += it.value
+    return total
+
+def other():
+    pass
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "process" {
+		t.Fatalf("expected first chunk to be process, got %q", chunks[0].Symbol)
+	}
+	if !strings.Contains(chunks[0].Code, "return total") {
+		t.Errorf("process chunk truncated at the column-0 comment; body after it lost:\n%s", chunks[0].Code)
+	}
+	if chunks[1].Symbol != "other" {
+		t.Errorf("expected second chunk to be other, got %q", chunks[1].Symbol)
+	}
+}
+
+func TestSplit_PythonIndentedCommentBelowBodyIndent(t *testing.T) {
+	// A comment indented less than the body (but more than column 0) is
+	// still just a comment — it must not terminate the def.
+	code := `def outer():
+    if True:
+        x = 1
+  # half-indented comment
+        y = 2
+    return x + y
+`
+	chunks := Split("a.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d: %+v", len(chunks), chunks)
+	}
+	if !strings.Contains(chunks[0].Code, "return x + y") {
+		t.Errorf("outer chunk truncated at the low-indent comment:\n%s", chunks[0].Code)
+	}
+}

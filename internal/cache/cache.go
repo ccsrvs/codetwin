@@ -32,7 +32,7 @@ const Filename = ".codetwin-cache.bin"
 
 // Version is bumped whenever the cached schema or tokenizer/splitter output
 // format changes. Old entries with a different version are dropped on Load.
-const Version uint32 = 1
+const Version uint32 = 2
 
 // Chunk mirrors enough of the tokenizer + fingerprint output to reconstruct
 // a snippet without rerunning either. Tokens are stored as raw strings;

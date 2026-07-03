@@ -31,6 +31,10 @@ type PositionalSet struct {
 }
 
 // Generate builds a fingerprint Set from a token slice using Winnowing.
+//
+// Winnowing guarantees at least one fingerprint for any document that has at
+// least one k-gram: when the hash sequence is shorter than the window size w,
+// the whole sequence is treated as a single window.
 func Generate(tokens []string, k, w int) Set {
 	grams := kgrams(tokens, k)
 	if len(grams) == 0 {
@@ -43,6 +47,10 @@ func Generate(tokens []string, k, w int) Set {
 	}
 
 	fps := Set{}
+	if len(hashes) < w {
+		fps[minHash(hashes)] = struct{}{}
+		return fps
+	}
 	for i := 0; i <= len(hashes)-w; i++ {
 		window := hashes[i : i+w]
 		fps[minHash(window)] = struct{}{}
@@ -66,6 +74,12 @@ func GeneratePositional(tokens []string, k, w int) PositionalSet {
 
 	fps := Set{}
 	positions := map[uint32][]int{}
+	if len(hashes) < w {
+		h, off := minHashAt(hashes)
+		fps[h] = struct{}{}
+		positions[h] = append(positions[h], off)
+		return PositionalSet{Set: fps, Positions: positions, K: k}
+	}
 	for i := 0; i <= len(hashes)-w; i++ {
 		h, off := minHashAt(hashes[i : i+w])
 		fps[h] = struct{}{}

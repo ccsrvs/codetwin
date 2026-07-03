@@ -179,3 +179,27 @@ func TestBuildMatrix_GivenOnPairDoneCallback_When_Build_Then_TotalArgIsPairCount
 		t.Errorf("onPairDone total = %d, want 6", lastTotal)
 	}
 }
+
+func TestBuildMatrix_IdenticalShortSnippetsGetStructuralCredit(t *testing.T) {
+	// 6 tokens — enough for k-grams (k=5) but fewer than one full
+	// winnowing window (w=4). Identical snippets must still share
+	// fingerprints and score structural 1.0.
+	tokens := []string{"def", "VAR", "return", "VAR", "NUM", "VAR"}
+	snips := []scan.Snippet{
+		makeSnippet("a/short.py", "/a.py", tokens),
+		makeSnippet("b/short.py", "/b.py", tokens),
+	}
+	vectors := vectorsFor(snips)
+
+	matrix, pairs := BuildMatrix(snips, vectors, 0, nil)
+
+	if len(pairs) != 1 {
+		t.Fatalf("expected 1 pair, got %d", len(pairs))
+	}
+	if pairs[0].Structural != 1.0 {
+		t.Errorf("structural = %v, want 1.0 for identical short snippets", pairs[0].Structural)
+	}
+	if matrix[0][1] < 0.9 {
+		t.Errorf("matrix[0][1] = %v, want >= 0.9 for identical short snippets", matrix[0][1])
+	}
+}

@@ -164,7 +164,11 @@ func splitPython(code string) []Chunk {
 		sigEnd := pythonSignatureEndLine(lines, d.defLine)
 		for j := sigEnd + 1; j < len(lines); j++ {
 			line := lines[j]
-			if strings.TrimSpace(line) == "" {
+			trimmed := strings.TrimSpace(line)
+			// Blank lines and comment-only lines don't terminate a body:
+			// a `#` comment at column 0 in the middle of a function is
+			// legal Python and carries no indent information.
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 				continue
 			}
 			if indentLen(line) <= d.indent {

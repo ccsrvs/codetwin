@@ -25,8 +25,73 @@ func TestGenerate_DeterministicForSameInput(t *testing.T) {
 	tokens := []string{"a", "b", "c", "d", "e", "f", "g"}
 	a := Generate(tokens, DefaultK, DefaultW)
 	b := Generate(tokens, DefaultK, DefaultW)
+	// Guard against the vacuous pass: Jaccard(empty, empty) == 1.0, so the
+	// determinism assertion below only means something if the sets are
+	// non-empty.
+	if len(a) == 0 {
+		t.Fatal("Generate returned empty set for input with k-grams")
+	}
 	if Jaccard(a, b) != 1.0 {
 		t.Errorf("identical input produced non-identical fingerprints (Jaccard=%v)", Jaccard(a, b))
+	}
+}
+
+// A document with at least one k-gram must produce at least one fingerprint
+// (Schleimer et al. §2: winnowing selects at least one hash per window, and
+// a document shorter than one full window is itself a window). Without this
+// guarantee, snippets with k ≤ len(tokens) < k+w-1 tokens get an empty set
+// and can never match anything structurally — not even an identical copy.
+func TestGenerate_ShortStreamStillFingerprints(t *testing.T) {
+	// k=5, w=4: token counts 5..7 produce 1..3 k-grams — fewer than one
+	// full window.
+	for n := DefaultK; n < DefaultK+DefaultW-1; n++ {
+		tokens := make([]string, n)
+		for i := range tokens {
+			tokens[i] = string(rune('a' + i))
+		}
+		set := Generate(tokens, DefaultK, DefaultW)
+		if len(set) == 0 {
+			t.Errorf("n=%d tokens: expected at least one fingerprint, got none", n)
+		}
+	}
+}
+
+func TestGenerate_IdenticalShortStreamsMatch(t *testing.T) {
+	tokens := []string{"def", "VAR", "return", "VAR", "NUM"} // 5 tokens, 1 k-gram
+	a := Generate(tokens, DefaultK, DefaultW)
+	b := Generate(append([]string{}, tokens...), DefaultK, DefaultW)
+	if len(a) == 0 {
+		t.Fatal("expected non-empty fingerprint set for 5-token stream")
+	}
+	if got := Jaccard(a, b); got != 1.0 {
+		t.Errorf("identical short streams: Jaccard = %v, want 1.0", got)
+	}
+	other := Generate([]string{"if", "VAR", "for", "STR", "STR"}, DefaultK, DefaultW)
+	if got := Jaccard(a, other); got != 0.0 {
+		t.Errorf("different short streams: Jaccard = %v, want 0.0", got)
+	}
+}
+
+func TestGeneratePositional_ShortStreamMatchesGenerate(t *testing.T) {
+	tokens := []string{"a", "b", "c", "d", "e", "f"} // 2 k-grams < w
+	plain := Generate(tokens, DefaultK, DefaultW)
+	pos := GeneratePositional(tokens, DefaultK, DefaultW)
+	if len(plain) != 1 || len(pos.Set) != 1 {
+		t.Fatalf("expected exactly one fingerprint from short stream, got Generate=%d Positional=%d",
+			len(plain), len(pos.Set))
+	}
+	for h := range plain {
+		if _, ok := pos.Set[h]; !ok {
+			t.Errorf("hash %d in Generate but missing from GeneratePositional", h)
+		}
+	}
+	maxPos := len(tokens) - DefaultK
+	for hash, positions := range pos.Positions {
+		for _, p := range positions {
+			if p < 0 || p > maxPos {
+				t.Errorf("hash %d: position %d out of range [0, %d]", hash, p, maxPos)
+			}
+		}
 	}
 }
 
