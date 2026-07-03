@@ -1,6 +1,7 @@
 package similarity
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
@@ -169,14 +170,16 @@ func TestBuildMatrix_GivenOnPairDoneCallback_When_Build_Then_TotalArgIsPairCount
 	}
 	vectors := vectorsFor(snips)
 
-	var lastTotal int64
+	// The callback fires from worker goroutines, so it must be
+	// concurrent-safe — mirror production's atomic store.
+	var lastTotal atomic.Int64
 	BuildMatrix(snips, vectors, 0, func(_, total int64) {
-		lastTotal = total
+		lastTotal.Store(total)
 	})
 
 	// 4 snippets → C(4,2) = 6 pairs
-	if lastTotal != 6 {
-		t.Errorf("onPairDone total = %d, want 6", lastTotal)
+	if got := lastTotal.Load(); got != 6 {
+		t.Errorf("onPairDone total = %d, want 6", got)
 	}
 }
 

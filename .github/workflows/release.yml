@@ -1,0 +1,137 @@
+name: Release binaries
+
+# Dispatch-driven releases. A human picks a ref (default main); the workflow
+# computes the next semver from the last tag plus the chosen bump level,
+# cross-compiles the binaries for every target, and creates the tag + GitHub
+# release with auto-generated notes and assets attached in one atomic gh call
+# — so downstream watchers never see a release without its binaries.
+#
+# codetwin is CGO-free, so all targets cross-compile from a single Linux
+# runner with CGO_ENABLED=0.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit SHA to release"
+        required: true
+        default: "main"
+      bump:
+        description: "Semver level to bump for the next tag"
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: read
+
+jobs:
+  compute-version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - id: resolve
+        # Pin the rest of the run to a concrete SHA so a push to the branch
+        # mid-build doesn't shift what we're shipping.
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - id: tag_version
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
+        with:
+          # The dispatcher picks the bump level (default patch). default_bump
+          # is what the action falls back to absent #major/#minor/#patch
+          # commit tags, which we don't use — so this selection drives the
+          # next tag.
+          default_bump: ${{ inputs.bump }}
+          tag_prefix: "v"
+          dry_run: true
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  # One matrix job cross-compiles every target from Linux. setup-go sources
+  # the toolchain from go.mod and GOTOOLCHAIN=auto lets the shipped binary's
+  # embedded stdlib track CVE-driven toolchain bumps in this repo without a
+  # workflow edit. CGO_ENABLED=0 keeps the binary statically linked and makes
+  # cross-compilation trivial.
+  build:
+    needs: [compute-version]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.compute-version.outputs.sha }}
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Record Go toolchain
+        run: |
+          {
+            echo "## ${{ matrix.goos }}/${{ matrix.goarch }} build"
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| \`go version\` | \`$(go version)\` |"
+            echo "| \`GOTOOLCHAIN\` | \`$(go env GOTOOLCHAIN)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOTOOLCHAIN: auto
+          NEW_TAG: ${{ needs.compute-version.outputs.new_tag }}
+        run: |
+          mkdir -p artifacts
+          go build -trimpath -buildvcs=false \
+            -ldflags "-s -w -X main.buildVersion=${NEW_TAG}" \
+            -o "artifacts/codetwin-${NEW_TAG}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" \
+            ./cmd/codetwin
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: codetwin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: [compute-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create tag, release, and attach binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_TAG: ${{ needs.compute-version.outputs.new_tag }}
+          SHA: ${{ needs.compute-version.outputs.sha }}
+        run: |
+          # Tag + release + binaries in one atomic call so watchers never see
+          # a release without assets. Notes are GitHub's auto-generated ones.
+          gh release create "$NEW_TAG" \
+            --repo "${{ github.repository }}" \
+            --target "$SHA" \
+            --title "$NEW_TAG" \
+            --generate-notes \
+            artifacts/*

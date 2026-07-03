@@ -1,3 +1,3 @@
 module github.com/ccsrvs/codetwin
 
-go 1.26.1
+go 1.26.4
