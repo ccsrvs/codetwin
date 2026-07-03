@@ -45,7 +45,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 
 | Goal | Command |
 |---|---|
-| Default scan | `codetwin --threshold 0.40 <path>` |
+| Default scan | `codetwin <path>` |
 | Only strong clones | `codetwin --threshold 0.70 <path>` |
 | CI-safe plain text | `codetwin --plain --threshold 0.40 <path>` |
 | Machine-readable | `codetwin --json --threshold 0.40 <path>` |
@@ -60,7 +60,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 ### All flags
 
 ```
---threshold float       minimum score to report, 0.0–1.0 (default 0.30)
+--threshold float       minimum score to report, 0.0–1.0 (default 0.50)
 --plain                 no ANSI colors — use for piping or file output
 --json                  JSON output
 --verbose               show all pairs including weak similarities

@@ -19,7 +19,7 @@ const (
 	// source. Too small and ubiquitous punctuation shapes like
 	// `( VAR , VAR )` dominate the fingerprint sets, inflating Jaccard
 	// similarity between unrelated functions.
-	DefaultK = 14
+	DefaultK = 10
 	DefaultW = 4 // winnowing window size
 )
 

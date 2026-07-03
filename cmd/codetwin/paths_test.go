@@ -60,8 +60,8 @@ func TestCollectFiles_NoIgnoreMatcher(t *testing.T) {
 func TestCollectFiles_IgnoreFileGlob(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFiles(t, root, map[string]string{
-		"foo.go":      "package x\n",
-		"foo_test.go": "package x\n",
+		"foo.go":          "package x\n",
+		"foo_test.go":     "package x\n",
 		"sub/bar_test.go": "package x\n",
 	})
 	matcher, err := config.CompileIgnorePaths([]string{"*_test.go"})
@@ -83,9 +83,9 @@ func TestCollectFiles_IgnoreFileGlob(t *testing.T) {
 func TestCollectFiles_IgnoreDirectory(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFiles(t, root, map[string]string{
-		"src/a.go":         "package x\n",
-		"vendor/lib/x.go":  "package y\n",
-		"vendor/lib/y.go":  "package y\n",
+		"src/a.go":        "package x\n",
+		"vendor/lib/x.go": "package y\n",
+		"vendor/lib/y.go": "package y\n",
 	})
 	matcher, err := config.CompileIgnorePaths([]string{"vendor/**"})
 	if err != nil {

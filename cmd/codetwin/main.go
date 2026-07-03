@@ -62,7 +62,7 @@ var supportedExts = map[string]bool{
 }
 
 func main() {
-	threshold := flag.Float64("threshold", 0.30, "minimum similarity score to report (0.0–1.0)")
+	threshold := flag.Float64("threshold", 0.50, "minimum similarity score to report (0.0–1.0)")
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
@@ -1046,7 +1046,7 @@ USAGE:
   Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs
 
 FLAGS:
-  --threshold float    minimum score to report (default 0.30)
+  --threshold float    minimum score to report (default 0.50)
   --plain              no ANSI colors, suitable for pipes and CI
   --json               output as JSON
   --verbose            show all pairs including weak similarities

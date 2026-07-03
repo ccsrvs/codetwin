@@ -8,6 +8,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // PairNoiseFloor is the minimum combined score below which a pair is
@@ -94,7 +95,9 @@ func BuildMatrix(
 						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
 					}
 					semantic := CosineFromNormalized(vectors[i], vectors[j])
-					combined := Combined(structural, semantic, 0.5)
+					sameLang := snippets[i].Lang == snippets[j].Lang &&
+						snippets[i].Lang != tokenizer.Unknown
+					combined := CombinedForLangs(structural, semantic, sameLang)
 					// Length-aware confidence: dampen short-snippet matches
 					// before they reach the matrix so DBSCAN sees the same
 					// view of the world the report does. structural and
