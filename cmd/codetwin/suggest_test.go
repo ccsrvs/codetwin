@@ -103,7 +103,7 @@ func TestEmitSuggestion_FixtureGoSimple(t *testing.T) {
 		"../../testdata/refactor/go/simple/b.go",
 	)
 	pair := report.Pair{
-		ID: report.PairID(snips[0].Name, snips[1].Name),
+		ID:    report.PairID(snips[0].Name, snips[1].Name),
 		NameA: snips[0].Name, NameB: snips[1].Name,
 		LangA: "go", LangB: "go",
 	}
@@ -145,7 +145,7 @@ func TestBuildSuggestionMap_GoFixture_PopulatesPatch(t *testing.T) {
 		"../../testdata/refactor/go/simple/b.go",
 	)
 	pair := report.Pair{
-		ID: report.PairID(snips[0].Name, snips[1].Name),
+		ID:    report.PairID(snips[0].Name, snips[1].Name),
 		NameA: snips[0].Name, NameB: snips[1].Name,
 		LangA: "go", LangB: "go",
 	}
@@ -171,7 +171,7 @@ func TestBuildSuggestionMap_PythonFixture_PopulatesPatch(t *testing.T) {
 		"../../testdata/refactor/python/simple/b.py",
 	)
 	pair := report.Pair{
-		ID: report.PairID(snips[0].Name, snips[1].Name),
+		ID:    report.PairID(snips[0].Name, snips[1].Name),
 		NameA: snips[0].Name, NameB: snips[1].Name,
 		LangA: "python", LangB: "python",
 	}
@@ -203,7 +203,7 @@ func TestBuildSuggestionMap_JSFixture_PopulatesPatch(t *testing.T) {
 		"../../testdata/refactor/js/simple/b.js",
 	)
 	pair := report.Pair{
-		ID: report.PairID(snips[0].Name, snips[1].Name),
+		ID:    report.PairID(snips[0].Name, snips[1].Name),
 		NameA: snips[0].Name, NameB: snips[1].Name,
 		LangA: "javascript", LangB: "javascript",
 	}

@@ -12,8 +12,15 @@ package fingerprint
 import "math/bits"
 
 const (
-	DefaultK = 5 // k-gram size
-	DefaultW = 4 // window size
+	// DefaultK is the k-gram size. Tuned against the tokenizer's output
+	// density: the tokenizer emits punctuation runes as individual tokens
+	// (roughly doubling tokens per source line versus word-only streams),
+	// so k must be large enough that a k-gram spans several words of
+	// source. Too small and ubiquitous punctuation shapes like
+	// `( VAR , VAR )` dominate the fingerprint sets, inflating Jaccard
+	// similarity between unrelated functions.
+	DefaultK = 10
+	DefaultW = 4 // winnowing window size
 )
 
 // Set is the fingerprint of a document — a set of selected hashes.
@@ -31,6 +38,10 @@ type PositionalSet struct {
 }
 
 // Generate builds a fingerprint Set from a token slice using Winnowing.
+//
+// Winnowing guarantees at least one fingerprint for any document that has at
+// least one k-gram: when the hash sequence is shorter than the window size w,
+// the whole sequence is treated as a single window.
 func Generate(tokens []string, k, w int) Set {
 	grams := kgrams(tokens, k)
 	if len(grams) == 0 {
@@ -43,6 +54,10 @@ func Generate(tokens []string, k, w int) Set {
 	}
 
 	fps := Set{}
+	if len(hashes) < w {
+		fps[minHash(hashes)] = struct{}{}
+		return fps
+	}
 	for i := 0; i <= len(hashes)-w; i++ {
 		window := hashes[i : i+w]
 		fps[minHash(window)] = struct{}{}
@@ -66,6 +81,12 @@ func GeneratePositional(tokens []string, k, w int) PositionalSet {
 
 	fps := Set{}
 	positions := map[uint32][]int{}
+	if len(hashes) < w {
+		h, off := minHashAt(hashes)
+		fps[h] = struct{}{}
+		positions[h] = append(positions[h], off)
+		return PositionalSet{Set: fps, Positions: positions, K: k}
+	}
 	for i := 0; i <= len(hashes)-w; i++ {
 		h, off := minHashAt(hashes[i : i+w])
 		fps[h] = struct{}{}
@@ -110,10 +131,12 @@ func minHashAt(window []uint32) (uint32, int) {
 }
 
 // Jaccard returns the Jaccard similarity coefficient between two fingerprint sets.
-// Returns 1.0 when both sets are empty (vacuously equal).
+// Returns 0 when either set is empty: an empty fingerprint set carries no
+// evidence of similarity, and "vacuously identical" would report two
+// unrelated tiny snippets as a perfect structural match.
 func Jaccard(a, b Set) float64 {
 	if len(a) == 0 && len(b) == 0 {
-		return 1.0
+		return 0
 	}
 
 	intersection := 0

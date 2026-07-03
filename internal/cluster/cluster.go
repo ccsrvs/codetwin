@@ -8,7 +8,7 @@ const noise = -1
 // Result holds the cluster label for each input point.
 // Label == -1 means the point was classified as noise (no cluster).
 type Result struct {
-	Labels     []int
+	Labels      []int
 	NumClusters int
 }
 
@@ -17,8 +17,8 @@ type DistFunc func(i, j int) float64
 
 // DBSCAN clusters n points using the provided distance function.
 //
-//   eps     — maximum distance for two points to be considered neighbors
-//   minPts  — minimum number of neighbors to form a core point
+//	eps     — maximum distance for two points to be considered neighbors
+//	minPts  — minimum number of neighbors to form a core point
 func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 	labels := make([]int, n)
 	for i := range labels {

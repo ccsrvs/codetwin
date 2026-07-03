@@ -213,8 +213,8 @@ func TestUpdateRange_DirectBranchCoverage(t *testing.T) {
 	t.Run("later record replaces Last, leaves First", func(t *testing.T) {
 		var br BlameRange
 		have := false
-		updateRange(&br, &have, "sha2", "bob", t2)     // bootstrap
-		updateRange(&br, &have, "sha3", "carol", t3)   // later
+		updateRange(&br, &have, "sha2", "bob", t2)   // bootstrap
+		updateRange(&br, &have, "sha3", "carol", t3) // later
 		if br.LastCommit != "sha3" {
 			t.Errorf("later time should replace Last, got LastCommit=%q", br.LastCommit)
 		}

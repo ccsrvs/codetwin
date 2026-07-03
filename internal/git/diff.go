@@ -41,11 +41,8 @@ func (r *Repo) ChangedSince(ref string) (DiffMap, error) {
 // relative to repoRoot before lookup; paths outside the repo (or files
 // not in the diff) return false.
 func (m DiffMap) Touches(repoRoot, absPath string, start, end int) bool {
-	rel, err := filepath.Rel(repoRoot, absPath)
-	if err != nil {
-		return false
-	}
-	if strings.HasPrefix(rel, "..") {
+	rel, ok := relWithinRoot(repoRoot, absPath)
+	if !ok {
 		return false
 	}
 	rel = filepath.ToSlash(rel)

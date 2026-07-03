@@ -105,7 +105,7 @@ codetwin --suggest <pair-id> ./src
 
 | Flag | Default | Description |
 |---|---|---|
-| `--threshold` | `0.30` | Minimum score to report (0.0–1.0) |
+| `--threshold` | `0.50` | Minimum score to report (0.0–1.0) |
 | `--plain` | false | Disable ANSI colors (CI-safe) |
 | `--json` | false | JSON output |
 | `--verbose` | false | Show all pairs including weak |
@@ -122,6 +122,7 @@ codetwin --suggest <pair-id> ./src
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
+| `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
 | `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair with the given 8-char ID. Go and Python in v1. |
@@ -139,7 +140,12 @@ codetwin --suggest <pair-id> ./src
 | > 45% | Refactor target | Evaluate shared abstraction |
 | < 45% | Weak similarity | Probably coincidental |
 
-Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF)`.
+Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF
+over token trigrams)` for same-language pairs. Cross-language pairs use
+`0.2 × structural + 0.8 × semantic`: winnowing fingerprints hash raw keyword
+sequences, so identical logic in two languages shares almost no fingerprints,
+and the semantic layer — which canonicalizes cross-language keywords
+(`func`/`def`/`fn`, `nil`/`None`/`null`, …) — carries the weight instead.
 For a longer walk-through of what the score means, what the
 `structural`/`semantic` sub-scores below each pair tell you, and how
 pairs differ from clusters, run `codetwin --guide`.

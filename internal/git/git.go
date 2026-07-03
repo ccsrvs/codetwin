@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -59,6 +60,28 @@ func Open(dir string) (*Repo, error) {
 		return nil, ErrNotARepo
 	}
 	return &Repo{Root: root}, nil
+}
+
+// relWithinRoot resolves absPath relative to root. When the naive
+// filepath.Rel escapes the root, both sides are retried with symlinks
+// resolved — `git rev-parse --show-toplevel` returns a fully resolved
+// path (e.g. /private/var on macOS) while callers hand us paths built
+// with filepath.Abs, which preserves symlinks (e.g. /var). The second
+// return is false when absPath is outside the repo either way.
+func relWithinRoot(root, absPath string) (string, bool) {
+	if rel, err := filepath.Rel(root, absPath); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel, true
+	}
+	resolvedRoot, errRoot := filepath.EvalSymlinks(root)
+	resolvedPath, errPath := filepath.EvalSymlinks(absPath)
+	if errRoot != nil || errPath != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	return rel, true
 }
 
 // run executes a git subcommand inside the repo and returns its stdout

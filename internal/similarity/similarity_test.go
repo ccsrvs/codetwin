@@ -6,23 +6,68 @@ import (
 )
 
 func TestNewCorpus_RareTermsHaveHigherIDF(t *testing.T) {
+	// Terms are token n-grams: "a b c" appears in all three docs,
+	// "x y z" in only one → the rare n-gram gets the higher IDF.
 	streams := [][]string{
 		{"a", "b", "c"},
-		{"a", "d"},
-		{"a", "b"},
+		{"a", "b", "c", "d"},
+		{"a", "b", "c", "x", "y", "z"},
 	}
 	c := NewCorpus(streams)
-	// 'a' appears in all 3 docs, 'c' in only 1 → c should have higher IDF
-	if c.idf["a"] >= c.idf["c"] {
-		t.Errorf("rare term should have higher IDF: idf[a]=%v idf[c]=%v", c.idf["a"], c.idf["c"])
+	common := "a\x00b\x00c"
+	rare := "x\x00y\x00z"
+	if c.idf[common] == 0 || c.idf[rare] == 0 {
+		t.Fatalf("expected both n-gram terms in corpus: idf[%q]=%v idf[%q]=%v",
+			common, c.idf[common], rare, c.idf[rare])
+	}
+	if c.idf[common] >= c.idf[rare] {
+		t.Errorf("rare term should have higher IDF: idf[common]=%v idf[rare]=%v",
+			c.idf[common], c.idf[rare])
 	}
 }
 
 func TestVectorize_NonEmpty(t *testing.T) {
-	c := NewCorpus([][]string{{"a", "b"}, {"b", "c"}})
-	v := c.Vectorize([]string{"a", "b", "b"})
+	tokens := []string{"a", "b", "c", "d", "e", "f", "g"}
+	c := NewCorpus([][]string{tokens})
+	v := c.Vectorize(tokens)
 	if len(v) == 0 {
 		t.Error("Vectorize returned empty vector for non-empty tokens")
+	}
+}
+
+func TestVectorize_BelowEvidenceFloorIsEmpty(t *testing.T) {
+	// A stream yielding fewer than semanticMinTerms n-gram terms has too
+	// little evidence for cosine to mean anything — the vector must be
+	// empty so the pair falls back to structural-only scoring.
+	c := NewCorpus([][]string{{"a", "b", "c"}})
+	if v := c.Vectorize([]string{"a", "b", "c"}); len(v) != 0 {
+		t.Errorf("expected empty vector below the evidence floor, got %v", v)
+	}
+}
+
+func TestVectorize_DropsPunctuationTokens(t *testing.T) {
+	// Punctuation tokens must not influence the semantic vector: two
+	// streams identical except for punctuation vectorize identically.
+	base := []string{"if", "VAR", "return", "VAR", "NUM", "for", "VAR"}
+	withPunct := []string{"if", "(", "VAR", ")", "return", "VAR", "+", "NUM", "for", "VAR"}
+	c := NewCorpus([][]string{base, withPunct})
+	va := Normalize(c.Vectorize(base))
+	vb := Normalize(c.Vectorize(withPunct))
+	if got := CosineFromNormalized(va, vb); got < 0.999 {
+		t.Errorf("punctuation changed the semantic vector: cosine = %v, want 1.0", got)
+	}
+}
+
+func TestVectorize_CrossLanguageKeywordsCanonicalized(t *testing.T) {
+	// `func`/`def` and `range`/`in` collapse to shared canonical tokens,
+	// so equivalent Go and Python streams vectorize identically.
+	golang := []string{"func", "VAR", "VAR", "VAR", "for", "_", "VAR", "range", "VAR", "VAR", "VAR", "return", "VAR"}
+	python := []string{"def", "VAR", "VAR", "VAR", "for", "_", "VAR", "in", "VAR", "VAR", "VAR", "return", "VAR"}
+	c := NewCorpus([][]string{golang, python})
+	va := Normalize(c.Vectorize(golang))
+	vb := Normalize(c.Vectorize(python))
+	if got := CosineFromNormalized(va, vb); got < 0.999 {
+		t.Errorf("canonicalized cross-language streams should vectorize equal: cosine = %v", got)
 	}
 }
 
@@ -94,7 +139,7 @@ func TestCosineFromNormalized_MatchesCosine(t *testing.T) {
 		{Vector{"a": 1.0, "b": 2.0}, Vector{"a": 0.5, "c": 1.5}},
 		{Vector{"x": 3.0}, Vector{"x": 3.0}},
 		{Vector{"a": 1.0}, Vector{"b": 1.0}}, // orthogonal
-		{Vector{}, Vector{"a": 1.0}},          // empty
+		{Vector{}, Vector{"a": 1.0}},         // empty
 	}
 	for _, c := range cases {
 		want := Cosine(c.a, c.b)

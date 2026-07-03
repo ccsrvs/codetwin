@@ -183,7 +183,10 @@ func Detect(filename, code string) Language {
 		return Go
 	case strings.Contains(code, "fn ") && strings.Contains(code, "let mut"):
 		return Rust
-	case strings.Contains(code, "defmodule") || strings.Contains(code, "def ") && strings.Contains(code, "do"):
+	// `do` must appear as its own word: a bare substring check would
+	// classify Python code mentioning `download` or `docs` as Elixir.
+	case strings.Contains(code, "defmodule") ||
+		strings.Contains(code, "def ") && elixirDoRe.MatchString(code):
 		return Elixir
 	case strings.Contains(code, "def ") && strings.Contains(code, ":"):
 		return Python
@@ -196,6 +199,8 @@ func Detect(filename, code string) Language {
 
 	return Unknown
 }
+
+var elixirDoRe = regexp.MustCompile(`\bdo\b`)
 
 // Normalize strips comments, replaces literals and identifiers with canonical
 // tokens, and collapses whitespace. Returns the normalized string.
@@ -303,19 +308,34 @@ func TokenizeWithLines(code string, lang Language, opts ...Option) ([]string, []
 			}
 			return "VAR"
 		})
-		raw := strings.FieldsFunc(normalizedLine, func(r rune) bool {
-			return unicode.IsSpace(r)
-		})
-		for _, t := range raw {
-			t = strings.TrimFunc(t, func(r rune) bool {
-				return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
-			})
-			if t == "" {
-				continue
+		// Emit word runs (identifiers, keywords, STR/NUM/VAR) and each
+		// punctuation rune as its own token; whitespace only separates.
+		// Formatting never changes the token stream — `f(x)`, `f( x )`,
+		// and minified code all tokenize identically — while operators
+		// and brackets keep contributing structural signal. Punctuation
+		// must be single-rune tokens: runs like `):` would re-introduce
+		// whitespace sensitivity (`f(x):` vs `f(x) :`).
+		var word strings.Builder
+		flushWord := func() {
+			if word.Len() > 0 {
+				tokens = append(tokens, word.String())
+				lineNums = append(lineNums, i+1)
+				word.Reset()
 			}
-			tokens = append(tokens, t)
-			lineNums = append(lineNums, i+1)
 		}
+		for _, r := range normalizedLine {
+			switch {
+			case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_':
+				word.WriteRune(r)
+			case unicode.IsSpace(r):
+				flushWord()
+			default:
+				flushWord()
+				tokens = append(tokens, string(r))
+				lineNums = append(lineNums, i+1)
+			}
+		}
+		flushWord()
 	}
 	return tokens, lineNums
 }

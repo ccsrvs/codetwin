@@ -46,21 +46,33 @@ Reading the combinations:
 | structural low, semantic high | "Functionally similar but written differently" — same problem, different shape. Often the most interesting refactor target, less interesting as a literal clone. |
 | both moderate | Usually noise from shared idioms — test scaffolding, lifecycle methods. `--min-confidence-lines` exists to demote these. |
 
-## Pairs vs clusters
+## Clusters, relations, and pairs
 
-The report has two sections.
-
-**SIMILARITY PAIRS** are individual two-snippet matches above the
-threshold. Each pair is one finding, scored independently.
+The terminal report is cluster-first and has up to three sections.
 
 **REFACTORING CLUSTERS** are families of similar snippets grouped by
 DBSCAN. A cluster requires at least `--min-pts` (default 2) mutually
 similar snippets within distance `--eps` (default 0.45). One cluster =
-one refactoring task that consolidates several files at once.
+one refactoring task that consolidates several files at once. A family
+of n members implies n·(n-1)/2 pairs; those pairs are collapsed into
+the cluster instead of being listed individually (the summary counts
+them as "In-cluster pairs").
+
+**RELATED CLUSTERS** aggregates pairs that bridge two different
+clusters — `Cluster 3 ↔ Cluster 7 — 44 pairs, up to 61%` means the two
+families resemble each other and might consolidate together.
+
+**SIMILARITY PAIRS** lists the remaining individual matches: pairs
+where at least one endpoint belongs to no cluster. Each is one finding,
+scored independently.
 
 Address clusters first when triaging — they represent the highest-value
 consolidation opportunities. A pair that doesn't appear in any cluster
 is an isolated duplicate that doesn't generalize beyond two callers.
+
+`--flat` restores the flat pre-collapse listing (every pair
+individually, pairs before clusters). `--json` output is always flat —
+machine consumers see every pair regardless.
 
 ## What moves the labels
 

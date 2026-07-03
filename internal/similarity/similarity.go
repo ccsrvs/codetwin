@@ -8,6 +8,8 @@ package similarity
 import (
 	"math"
 	"sort"
+	"strings"
+	"unicode"
 )
 
 // Vector is a sparse TF-IDF weighted term vector.
@@ -19,6 +21,78 @@ type Corpus struct {
 	n   int
 }
 
+// semanticNgram is the term width for the TF-IDF layer. Normalized
+// token streams have almost no vocabulary — identifiers are all VAR,
+// literals are STR/NUM — so unigram histograms of any two functions
+// look alike (unrelated code routinely scores cosine 0.7–0.98, which
+// is where report noise comes from). Short n-grams restore sequence
+// information while staying far fuzzier than the much wider winnowing
+// fingerprints (fingerprint.DefaultK tokens per k-gram), so the
+// semantic layer still catches reordered or partially rewritten logic.
+const semanticNgram = 3
+
+// crossLangCanon maps language-specific keywords onto shared canonical
+// tokens so the semantic n-grams of equivalent logic line up across
+// languages (`func`/`def`/`fn` all open a function; `nil`/`None`/`null`
+// are the same concept). Applied only to the semantic stream — the
+// structural fingerprints keep the raw tokens.
+var crossLangCanon = map[string]string{
+	"func": "FN", "def": "FN", "fn": "FN", "function": "FN", "defp": "FN",
+	"elif": "ELIF", "elsif": "ELIF",
+	"nil": "NIL", "None": "NIL", "null": "NIL", "undefined": "NIL",
+	"True": "true", "False": "false",
+	"raise": "THROW", "throw": "THROW", "panic": "THROW",
+	"except": "CATCH", "catch": "CATCH", "rescue": "CATCH",
+	"range": "in", // Go's `for … := range xs` ≈ Python's `for … in xs`
+	"let":   "VARDECL", "var": "VARDECL", "const": "VARDECL",
+}
+
+// semanticStream filters and canonicalizes a token stream for the
+// TF-IDF layer: punctuation tokens are dropped (pure syntax, different
+// in every language) and keywords collapse to cross-language canonical
+// forms. The structural layer sees none of this.
+func semanticStream(tokens []string) []string {
+	out := make([]string, 0, len(tokens))
+	for _, t := range tokens {
+		if !containsWordRune(t) {
+			continue // punctuation-only token
+		}
+		if c, ok := crossLangCanon[t]; ok {
+			t = c
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func containsWordRune(s string) bool {
+	for _, r := range s {
+		if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// semanticTerms converts a token stream into the terms the TF-IDF
+// layer operates on: overlapping n-grams (joined with '\x00') over the
+// canonicalized, punctuation-free semantic stream. Streams shorter
+// than the n-gram width collapse to a single whole-stream term.
+func semanticTerms(tokens []string) []string {
+	tokens = semanticStream(tokens)
+	if len(tokens) == 0 {
+		return nil
+	}
+	if len(tokens) < semanticNgram {
+		return []string{strings.Join(tokens, "\x00")}
+	}
+	terms := make([]string, 0, len(tokens)-semanticNgram+1)
+	for i := 0; i+semanticNgram <= len(tokens); i++ {
+		terms = append(terms, strings.Join(tokens[i:i+semanticNgram], "\x00"))
+	}
+	return terms
+}
+
 // NewCorpus builds IDF weights from a collection of token streams.
 // Call this once on all snippets, then use Vectorize per snippet.
 func NewCorpus(tokenStreams [][]string) *Corpus {
@@ -26,7 +100,7 @@ func NewCorpus(tokenStreams [][]string) *Corpus {
 	df := make(map[string]int)
 	for _, tokens := range tokenStreams {
 		seen := make(map[string]bool)
-		for _, t := range tokens {
+		for _, t := range semanticTerms(tokens) {
 			if !seen[t] {
 				df[t]++
 				seen[t] = true
@@ -43,14 +117,23 @@ func NewCorpus(tokenStreams [][]string) *Corpus {
 	return &Corpus{idf: idf, n: n}
 }
 
+// semanticMinTerms is the minimum n-gram term count for a snippet to
+// produce a semantic vector at all. A vector with one or two terms
+// makes cosine a coin flip — two trivial snippets that happen to share
+// their only term score a perfect 1.0. Below this floor the semantic
+// layer reports "no evidence" (empty vector → cosine 0) and the
+// structural layer alone decides.
+const semanticMinTerms = 4
+
 // Vectorize produces a TF-IDF vector for a single token stream.
 func (c *Corpus) Vectorize(tokens []string) Vector {
-	if len(tokens) == 0 {
+	terms := semanticTerms(tokens)
+	if len(terms) < semanticMinTerms {
 		return Vector{}
 	}
 
 	tf := make(map[string]float64)
-	for _, t := range tokens {
+	for _, t := range terms {
 		tf[t]++
 	}
 
@@ -60,7 +143,11 @@ func (c *Corpus) Vectorize(tokens []string) Vector {
 		if idfVal == 0 {
 			idfVal = 1.0 // unseen term: treat as IDF=1
 		}
-		vec[term] = (count / float64(len(tokens))) * idfVal
+		// Sublinear TF: a boilerplate n-gram repeated five times is
+		// evidence of one shared idiom, not five shared behaviours.
+		// Raw counts let repeated idioms dominate the vector mass and
+		// pull unrelated functions together.
+		vec[term] = (1 + math.Log(count)) * idfVal
 	}
 	return vec
 }
@@ -145,6 +232,25 @@ func Cosine(a, b Vector) float64 {
 func Combined(structural, semantic, structuralWeight float64) float64 {
 	semanticWeight := 1.0 - structuralWeight
 	return structural*structuralWeight + semantic*semanticWeight
+}
+
+// CrossLangStructuralWeight is the structural weight for pairs whose
+// snippets are in different languages. Winnowing fingerprints hash raw
+// keyword sequences, so structurally identical logic in two languages
+// shares almost no fingerprints — an even blend would cap every
+// cross-language pair near 0.5 no matter how similar the logic. The
+// canonicalized semantic layer is the reliable cross-language signal,
+// so it carries most of the weight.
+const CrossLangStructuralWeight = 0.2
+
+// CombinedForLangs blends structural and semantic scores with
+// language-aware weights: an even split when both snippets are the
+// same language, semantic-dominant when they differ.
+func CombinedForLangs(structural, semantic float64, sameLang bool) float64 {
+	if sameLang {
+		return Combined(structural, semantic, 0.5)
+	}
+	return Combined(structural, semantic, CrossLangStructuralWeight)
 }
 
 // LengthDampen scales a similarity score down when the smaller snippet

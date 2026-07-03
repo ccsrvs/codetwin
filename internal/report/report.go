@@ -169,6 +169,13 @@ type Options struct {
 	Limit         int      // cap pairs and clusters at N items each (0 = no limit)
 	CrossLangOnly bool     // keep only pairs whose two snippets have different, known languages
 
+	// Flat lists every pair individually, the pre-cluster-first
+	// behaviour. By default the terminal report is cluster-first: a
+	// clone family of n members implies n·(n-1)/2 pairs, so families
+	// render once as clusters and their internal pairs are collapsed
+	// out of the pairs section. JSON output is always flat.
+	Flat bool
+
 	// Previews, when non-nil, maps a snippet name to a code excerpt with its
 	// originating start line. Entries with empty Text are skipped.
 	Previews map[string]Preview
@@ -281,20 +288,129 @@ func (h *topKHeap[T]) Pop() any {
 // have already prepared their data (e.g. shared between text and JSON
 // output) can call printPairs/printClusters/printSummary directly, but the
 // usual flow is to let Render do everything.
+//
+// The default layout is cluster-first: clone families render as clusters
+// at the top, and pairs whose two endpoints belong to the same cluster
+// are collapsed out of the pairs section — a family of n members implies
+// n·(n-1)/2 pairs, and listing them individually buries everything else.
+// Options.Flat restores the flat everything-is-a-pair listing.
 func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	visiblePairs, visibleClusters := Prepare(pairs, clusters, opts)
 
 	printHeader(w, opts)
 
-	if len(visiblePairs) == 0 {
+	if len(visiblePairs) == 0 && len(visibleClusters) == 0 {
 		fmt.Fprintf(w, "\n%s  No similarities found above threshold %.0f%%%s\n\n",
 			color(green, opts), opts.Threshold*100, color(reset, opts))
 		return
 	}
 
-	printPairs(w, visiblePairs, opts)
+	if opts.Flat {
+		printPairs(w, visiblePairs, opts)
+		printClusters(w, visibleClusters, opts)
+		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, opts)
+		return
+	}
+
+	shownPairs, collapsed, relations := SplitPairsByCluster(visiblePairs, visibleClusters)
 	printClusters(w, visibleClusters, opts)
-	printSummary(w, visiblePairs, visibleClusters, opts)
+	printRelations(w, relations, opts)
+	if len(shownPairs) > 0 {
+		printPairs(w, shownPairs, opts)
+	}
+	crossCollapsed := 0
+	for _, r := range relations {
+		crossCollapsed += r.Count
+	}
+	printSummary(w, shownPairs, visiblePairs, visibleClusters, collapsed, crossCollapsed, opts)
+}
+
+// ClusterRelation aggregates the pairs whose endpoints sit in two
+// different clusters. A pair of families with n and m members can
+// produce up to n·m such pairs; one relation line represents them all.
+type ClusterRelation struct {
+	A, B  int // Cluster.ID of the two families, A < B
+	Count int // number of pairs between them
+	Max   float64
+}
+
+// SplitPairsByCluster partitions pairs into three groups: pairs fully
+// represented by one cluster (both endpoints in the same cluster —
+// dropped, counted in collapsed), pairs bridging two clusters
+// (aggregated per cluster pair into relations, sorted by Max
+// descending), and pairs with at least one unclustered endpoint
+// (returned in outside — the only pairs still worth listing one by
+// one, since a clustered endpoint is already visible in its family).
+func SplitPairsByCluster(pairs []Pair, clusters []Cluster) (outside []Pair, collapsed int, relations []ClusterRelation) {
+	memberOf := make(map[string]int) // name → index into clusters
+	for i, c := range clusters {
+		for _, m := range c.Members {
+			memberOf[m] = i
+		}
+	}
+	type key struct{ a, b int }
+	rel := make(map[key]*ClusterRelation)
+	outside = make([]Pair, 0, len(pairs))
+	for _, p := range pairs {
+		ia, okA := memberOf[p.NameA]
+		ib, okB := memberOf[p.NameB]
+		switch {
+		case okA && okB && ia == ib:
+			collapsed++
+		case okA && okB:
+			if ia > ib {
+				ia, ib = ib, ia
+			}
+			k := key{ia, ib}
+			r, ok := rel[k]
+			if !ok {
+				// Clusters arrive sorted by score, not ID, so order the
+				// displayed IDs explicitly.
+				a, b := clusters[ia].ID, clusters[ib].ID
+				if a > b {
+					a, b = b, a
+				}
+				r = &ClusterRelation{A: a, B: b}
+				rel[k] = r
+			}
+			r.Count++
+			if p.Score > r.Max {
+				r.Max = p.Score
+			}
+		default:
+			outside = append(outside, p)
+		}
+	}
+	relations = make([]ClusterRelation, 0, len(rel))
+	for _, r := range rel {
+		relations = append(relations, *r)
+	}
+	sort.Slice(relations, func(i, j int) bool {
+		if relations[i].Max != relations[j].Max {
+			return relations[i].Max > relations[j].Max
+		}
+		if relations[i].A != relations[j].A {
+			return relations[i].A < relations[j].A
+		}
+		return relations[i].B < relations[j].B
+	})
+	return outside, collapsed, relations
+}
+
+// printRelations renders one line per pair of related clusters.
+func printRelations(w io.Writer, relations []ClusterRelation, opts Options) {
+	if len(relations) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "%s%s RELATED CLUSTERS%s\n\n",
+		color(bold, opts), color(white, opts), color(reset, opts))
+	for _, r := range relations {
+		_, clr := classify(r.Max)
+		fmt.Fprintf(w, "  %sCluster %d ↔ Cluster %d%s — %d pairs, %sup to %3.0f%%%s\n",
+			color(green, opts), r.A+1, r.B+1, color(reset, opts), r.Count,
+			color(clr, opts), r.Max*100, color(reset, opts))
+	}
+	fmt.Fprintln(w)
 }
 
 // lessChain composes int-returning comparators into a less function. The
@@ -507,8 +623,15 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 		color(bold, opts), color(white, opts), color(reset, opts))
 
 	for _, c := range clusters {
-		fmt.Fprintf(w, "  %sCluster %d%s — %d snippets\n",
-			color(green, opts), c.ID+1, color(reset, opts), len(c.Members))
+		if c.Score > 0 {
+			_, clr := classify(c.Score)
+			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s\n",
+				color(green, opts), c.ID+1, color(reset, opts), len(c.Members),
+				color(clr, opts), c.Score*100, color(reset, opts))
+		} else {
+			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets\n",
+				color(green, opts), c.ID+1, color(reset, opts), len(c.Members))
+		}
 		for _, m := range c.Members {
 			fmt.Fprintf(w, "    %s·%s %s\n", color(grey, opts), color(reset, opts), m)
 			printPreview(w, m, opts)
@@ -517,11 +640,15 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 	}
 }
 
-func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
-	// pairs is already filtered+limited by Render, so each bucket count is a
-	// straightforward classification of what the reader sees.
+// printSummary reports the scan outcome. shown is what the pairs
+// section listed; allVisible is every pair above the threshold,
+// including those collapsed into clusters — the tier buckets classify
+// allVisible so "Exact clones" describes the scan, not just the
+// standalone leftovers (a repo whose exact clones all live inside
+// clusters would otherwise report "Exact clones 0").
+func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, opts Options) {
 	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
-	for _, p := range pairs {
+	for _, p := range allVisible {
 		switch {
 		case p.Score > 0.95:
 			exact++
@@ -541,7 +668,17 @@ func printSummary(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	fmt.Fprintf(w, "%s%s%s\n",
 		color(grey, opts), strings.Repeat("─", 60), color(reset, opts))
 	fmt.Fprintf(w, "  %sPairs shown%s       %s%d%s\n",
-		color(grey, opts), color(reset, opts), color(cyan, opts), len(pairs), color(reset, opts))
+		color(grey, opts), color(reset, opts), color(cyan, opts), len(shown), color(reset, opts))
+	if collapsed > 0 {
+		fmt.Fprintf(w, "  %sIn-cluster pairs%s  %s%d%s %s(inside the clusters above; --flat lists them)%s\n",
+			color(grey, opts), color(reset, opts), color(cyan, opts), collapsed, color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
+	if crossCollapsed > 0 {
+		fmt.Fprintf(w, "  %sCross-cluster%s     %s%d%s %s(aggregated under RELATED CLUSTERS; --flat lists them)%s\n",
+			color(grey, opts), color(reset, opts), color(cyan, opts), crossCollapsed, color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
 	fmt.Fprintf(w, "  %sExact clones%s      %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(red, opts), exact, color(reset, opts))
 	fmt.Fprintf(w, "  %sNear clones%s       %s%d%s\n",
