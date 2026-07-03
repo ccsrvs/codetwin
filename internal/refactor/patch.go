@@ -42,10 +42,7 @@ func BuildPatch(pathA string, s Suggestion) (string, error) {
 // this, git apply's view of the file diverges from ours and the hunk
 // fails to match.
 func buildAppendPatch(pathA, fileContent, helperSrc string) string {
-	trimmed := fileContent
-	if strings.HasSuffix(trimmed, "\n") {
-		trimmed = trimmed[:len(trimmed)-1]
-	}
+	trimmed := strings.TrimSuffix(fileContent, "\n")
 	var fileLines []string
 	if trimmed != "" {
 		fileLines = strings.Split(trimmed, "\n")

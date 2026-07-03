@@ -61,6 +61,10 @@ var supportedExts = map[string]bool{
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
 }
 
+// buildVersion is stamped by the release workflow via
+// `-ldflags "-X main.buildVersion=<tag>"`; local builds report "dev".
+var buildVersion = "dev"
+
 func main() {
 	threshold := flag.Float64("threshold", 0.50, "minimum similarity score to report (0.0–1.0)")
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
@@ -86,9 +90,14 @@ func main() {
 	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair. Off by default — synthesis adds work proportional to pair count.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
+	showVersion := flag.Bool("version", false, "print the codetwin version and exit")
 	flag.Usage = usage
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(buildVersion)
+		return
+	}
 	if *skill {
 		fmt.Print(skillBody)
 		return
@@ -699,7 +708,10 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(out)
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintf(os.Stderr, "error: writing JSON output: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // ── File collection ───────────────────────────────────────────────────────────
@@ -1077,6 +1089,7 @@ FLAGS:
                        Requires git on PATH and a git repository.
   --skill              print the full skill guide and exit
   --guide              print the report interpretation guide and exit
+  --version            print the codetwin version and exit
 
 EXAMPLES:
   codetwin ./src

@@ -1,0 +1,106 @@
+name: Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Checks run on every PR (any branch) and on pushes/merges to main. Restricting
+# push to main means feature branches are covered by their PR run only, so we
+# don't double-fire push + pull_request on the same feature-branch ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # setup-go reads the toolchain from go.mod; codetwin has no private
+      # module dependencies.
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: latest
+
+      - name: Build
+        run: go build ./...
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Tests + coverage
+        run: gotestsum --junitfile junit.xml -- -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      # ---- PR-only signals -----------------------------------------------
+      # These steps post comments / annotations only when triggered by a PR.
+      # `if: always()` lets them run even when an earlier step failed, so the
+      # author sees coverage and failures annotated in the diff.
+
+      - name: Coverage comment (PR)
+        if: github.event_name == 'pull_request' && always()
+        # PR number / repo are passed via env (not interpolated into the script)
+        # so the step can't become an expression-injection sink.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ ! -f coverage.out ]; then
+            echo "no coverage.out — skipping coverage comment"
+            exit 0
+          fi
+          TOTAL=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}')
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "## Go Coverage — ${TOTAL}"
+
+      - name: Annotate test failures (PR)
+        if: github.event_name == 'pull_request' && always()
+        uses: mikepenz/action-junit-report@3a81627bfac62268172037048872e8ebd4207e6d # v6.4.1
+        with:
+          report_paths: junit.xml
+          check_name: Test Report
+          require_tests: false
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-report
+          path: coverage.out
+
+  govulncheck:
+    # Go vulnerability scan. Runs in BINARY mode (reachability on the built
+    # binary) because the source/symbol mode has panicked on generics under
+    # recent Go toolchains; codetwin uses generics in internal/report.
+    # Fails the job on vulnerabilities our code actually calls; the vuln DB
+    # is fetched fresh at run time.
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build binary for scanning
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o codetwin ./cmd/codetwin
+      - name: govulncheck (binary mode)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 -mode binary ./codetwin

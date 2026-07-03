@@ -1,0 +1,22 @@
+# golangci-lint v2 configuration.
+#
+# v2 removed the v1 default exclusions, so without this file errcheck
+# flags every `defer f.Close()` and `fmt.Fprintf(w, …)` — the
+# std-error-handling preset restores the standard carve-outs while
+# keeping errcheck active for errors that actually matter.
+version: "2"
+
+linters:
+  exclusions:
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+  settings:
+    staticcheck:
+      checks:
+        # QF* are staticcheck's "quickfix" style suggestions (De Morgan
+        # rewrites, tagged-switch conversions); too opinionated to gate CI.
+        - all
+        - -QF*

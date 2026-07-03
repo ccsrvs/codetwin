@@ -596,7 +596,7 @@ func gitInit(t *testing.T, dir string) {
 		"-c", "gpg.format=openpgp",
 	}
 	for _, args := range [][]string{
-		append([]string{"init", "--quiet"}),
+		{"init", "--quiet"},
 		append(append([]string{}, cfgFlags...), "add", "."),
 		append(append([]string{}, cfgFlags...), "commit", "--quiet", "-m", "init"),
 	} {
