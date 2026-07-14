@@ -4,10 +4,11 @@ package splitter
 // languages emit a KindClass chunk covering the whole class body IN
 // ADDITION to the method chunks inside it; the same-file nesting filter
 // and the kind gate downstream keep the container/part overlap out of
-// reports. Elixir `defmodule` blocks are the container equivalent and
-// get the same treatment. Go/Rust (struct+methodset grouping — methods
-// live outside the type block) are out of scope; see
-// docs/comparative-algorithms-review.md §5.2.
+// reports. Elixir `defmodule` blocks and Rust `impl` blocks are the
+// container equivalents and get the same treatment. Go has no
+// contiguous container — methods live outside the type block — so its
+// "class" chunk is a SYNTHETIC group: the struct decl plus its in-file
+// methodset, joined in file order, under the covering line range.
 
 import (
 	"strings"
@@ -371,11 +372,79 @@ func TestSplit_JSClassExpressionNotEmittedAsClassChunk(t *testing.T) {
 	}
 }
 
-func TestSplit_GoEmitsNoClassChunks(t *testing.T) {
-	// Go "class-level" would mean struct+methodset symbol grouping
-	// (methods live outside the type block) — out of scope for
-	// span-based class chunks; noted as a follow-up in
-	// docs/comparative-algorithms-review.md §5.2.
+// ── Go struct+methodset groups ────────────────────────────────────────────────
+
+func TestSplit_GoMethodsetGroupedAcrossInterleavedFunc(t *testing.T) {
+	// Go methods live OUTSIDE the type block, so the class chunk is a
+	// SYNTHETIC group: type decl + every in-file method of the type,
+	// joined in file order. The covering range [StartLine, EndLine]
+	// necessarily CONTAINS the unrelated function interleaved between
+	// the methods, but its source is excluded from Code — the range
+	// over-approximates (documented: --since/blame degrade gracefully),
+	// the text does not. Pointer and value receivers unify into one
+	// group.
+	code := `package p
+
+type Counter struct {
+	n int
+}
+
+func (c *Counter) Add(x int) int {
+	c.n += x
+	return c.n
+}
+
+func unrelatedHelper(s string) string {
+	return s + s
+}
+
+func (c Counter) Total() int {
+	return c.n
+}
+`
+	chunks := Split("c.go", code, tokenizer.Go)
+	classes, funcs := chunksByKind(chunks)
+	if len(classes) != 1 {
+		t.Fatalf("expected 1 group chunk, got %d: %+v", len(classes), classes)
+	}
+	g := classes[0]
+	if g.Symbol != "Counter" {
+		t.Errorf("group symbol = %q, want Counter", g.Symbol)
+	}
+	// Covering range: type decl (line 3) through last method end (line 18).
+	if g.StartLine != 3 || g.EndLine != 18 {
+		t.Errorf("group range = %d-%d, want 3-18 (covering, includes the interleaved helper's lines)", g.StartLine, g.EndLine)
+	}
+	for _, want := range []string{"type Counter struct", "func (c *Counter) Add", "func (c Counter) Total"} {
+		if !strings.Contains(g.Code, want) {
+			t.Errorf("group Code must contain %q, got:\n%s", want, g.Code)
+		}
+	}
+	if strings.Contains(g.Code, "unrelatedHelper") {
+		t.Errorf("group Code must exclude the interleaved unrelated function, got:\n%s", g.Code)
+	}
+	if got := g.Name(); got != "c.go:3-18 Counter" {
+		t.Errorf("group Name() = %q, want %q", got, "c.go:3-18 Counter")
+	}
+	// Function chunks are unchanged: methods and the helper all emit.
+	var symbols []string
+	for _, f := range funcs {
+		symbols = append(symbols, f.Symbol)
+	}
+	want := []string{"Add", "unrelatedHelper", "Total"}
+	if len(symbols) != len(want) {
+		t.Fatalf("function chunks = %v, want %v", symbols, want)
+	}
+	for i := range want {
+		if symbols[i] != want[i] {
+			t.Errorf("function chunk %d = %q, want %q", i, symbols[i], want[i])
+		}
+	}
+}
+
+func TestSplit_GoSingleMethodTypeNotGrouped(t *testing.T) {
+	// Mirror of Elixir's ≥2-defs rule: a single-method type's group
+	// would just duplicate the method finding plus decl boilerplate.
 	goCode := `package p
 
 type Counter struct {
@@ -389,7 +458,216 @@ func (c *Counter) Add(x int) int {
 `
 	classes, _ := chunksByKind(Split("c.go", goCode, tokenizer.Go))
 	if len(classes) != 0 {
-		t.Errorf("Go must not emit class chunks, got %+v", classes)
+		t.Errorf("a 1-method type must not be grouped, got %+v", classes)
+	}
+}
+
+func TestSplit_GoInterfaceTypeNotGrouped(t *testing.T) {
+	// Interfaces have no methodset in-file (methods can't be declared
+	// on an interface receiver), so no group forms.
+	goCode := `package p
+
+type Store interface {
+	Get(k string) string
+	Put(k, v string)
+}
+
+func alpha(x int) int {
+	return x + 1
+}
+
+func beta(x int) int {
+	return x + 2
+}
+`
+	classes, _ := chunksByKind(Split("s.go", goCode, tokenizer.Go))
+	if len(classes) != 0 {
+		t.Errorf("interface types must not be grouped, got %+v", classes)
+	}
+}
+
+func TestSplit_GoMethodsWithoutInFileDeclNotGrouped(t *testing.T) {
+	// Grouping is decl-anchored: the Go "class" is the struct decl PLUS
+	// its in-file methods, so a methods-only file (type declared in a
+	// sibling file — a common Go layout) gets no group. Documented
+	// limitation: it keeps the chunk count proportional to type
+	// definitions rather than to every file that adds a method.
+	goCode := `package p
+
+func (c *Counter) Add(x int) int {
+	c.n += x
+	return c.n
+}
+
+func (c *Counter) Sub(x int) int {
+	c.n -= x
+	return c.n
+}
+`
+	classes, _ := chunksByKind(Split("c.go", goCode, tokenizer.Go))
+	if len(classes) != 0 {
+		t.Errorf("methods without an in-file type decl must not be grouped, got %+v", classes)
+	}
+}
+
+func TestSplit_GoGenericTypeAndReceiversGrouped(t *testing.T) {
+	code := `package p
+
+type Pair[K comparable, V any] struct {
+	k K
+	v V
+}
+
+func (p *Pair[K, V]) Key() K {
+	return p.k
+}
+
+func (p Pair[K, V]) Value() V {
+	return p.v
+}
+`
+	classes, _ := chunksByKind(Split("p.go", code, tokenizer.Go))
+	if len(classes) != 1 || classes[0].Symbol != "Pair" {
+		t.Fatalf("expected 1 group chunk for the generic type Pair, got %+v", classes)
+	}
+	if classes[0].StartLine != 3 || classes[0].EndLine != 14 {
+		t.Errorf("group range = %d-%d, want 3-14", classes[0].StartLine, classes[0].EndLine)
+	}
+}
+
+// ── Rust impl spans ───────────────────────────────────────────────────────────
+
+func TestSplit_RustImplSpanEmittedAlongsideFns(t *testing.T) {
+	code := `pub struct Point {
+    x: i64,
+    y: i64,
+}
+
+impl Point {
+    pub fn manhattan(&self) -> i64 {
+        self.x.abs() + self.y.abs()
+    }
+
+    fn scale(&mut self, k: i64) {
+        self.x *= k;
+        self.y *= k;
+    }
+}
+
+fn free_fn(v: i64) -> i64 {
+    v * 2
+}
+`
+	chunks := Split("p.rs", code, tokenizer.Rust)
+	classes, funcs := chunksByKind(chunks)
+	if len(classes) != 1 {
+		t.Fatalf("expected 1 impl chunk, got %d: %+v", len(classes), chunks)
+	}
+	cl := classes[0]
+	if cl.Symbol != "Point" {
+		t.Errorf("impl chunk symbol = %q, want Point", cl.Symbol)
+	}
+	if cl.StartLine != 6 || cl.EndLine != 15 {
+		t.Errorf("impl span = %d-%d, want 6-15 (through the closing brace)", cl.StartLine, cl.EndLine)
+	}
+	if !strings.Contains(cl.Code, "fn scale") {
+		t.Errorf("impl chunk should contain its fns, got:\n%s", cl.Code)
+	}
+	var symbols []string
+	for _, f := range funcs {
+		symbols = append(symbols, f.Symbol)
+	}
+	want := []string{"manhattan", "scale", "free_fn"}
+	if len(symbols) != len(want) {
+		t.Fatalf("fn chunks = %v, want %v", symbols, want)
+	}
+	for i := range want {
+		if symbols[i] != want[i] {
+			t.Errorf("fn chunk %d = %q, want %q", i, symbols[i], want[i])
+		}
+	}
+}
+
+func TestSplit_RustTraitImplSymbolIsTypeName(t *testing.T) {
+	// `impl Trait for Foo` carries the TYPE name as symbol — so an
+	// inherent impl and a trait impl of the same type share a symbol
+	// (their chunk Names stay distinct via the line ranges).
+	code := `impl Display for Point {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
+}
+
+impl Point {
+    fn norm(&self) -> i64 {
+        self.x + self.y
+    }
+}
+`
+	classes, _ := chunksByKind(Split("p.rs", code, tokenizer.Rust))
+	if len(classes) != 2 {
+		t.Fatalf("expected 2 impl chunks, got %d: %+v", len(classes), classes)
+	}
+	if classes[0].Symbol != "Point" || classes[1].Symbol != "Point" {
+		t.Errorf("impl symbols = %q, %q; want Point, Point (type name, not trait)", classes[0].Symbol, classes[1].Symbol)
+	}
+	if classes[0].StartLine != 1 || classes[0].EndLine != 5 {
+		t.Errorf("trait impl span = %d-%d, want 1-5", classes[0].StartLine, classes[0].EndLine)
+	}
+}
+
+func TestSplit_RustGenericImplHandled(t *testing.T) {
+	code := `impl<T: Clone> Wrapper<T> {
+    fn get(&self) -> &T {
+        &self.value
+    }
+}
+
+impl<T> From<T> for Holder<T> {
+    fn from(value: T) -> Self {
+        Holder { value }
+    }
+}
+`
+	classes, _ := chunksByKind(Split("g.rs", code, tokenizer.Rust))
+	if len(classes) != 2 {
+		t.Fatalf("expected 2 impl chunks, got %d: %+v", len(classes), classes)
+	}
+	if classes[0].Symbol != "Wrapper" {
+		t.Errorf("generic inherent impl symbol = %q, want Wrapper", classes[0].Symbol)
+	}
+	if classes[1].Symbol != "Holder" {
+		t.Errorf("generic trait impl symbol = %q, want Holder (type, not trait)", classes[1].Symbol)
+	}
+}
+
+func TestSplit_RustImplInsideFnBodyNotEmitted(t *testing.T) {
+	// fn chunks jump past their bodies, so an impl declared inside a
+	// function is not emitted — same rule as a JS class inside a
+	// function body or an Elixir defmodule inside a def.
+	code := `fn build() -> i64 {
+    struct Local {
+        v: i64,
+    }
+    impl Local {
+        fn get(&self) -> i64 {
+            self.v
+        }
+        fn set(&mut self, v: i64) {
+            self.v = v;
+        }
+    }
+    let l = Local { v: 3 };
+    l.get()
+}
+`
+	chunks := Split("b.rs", code, tokenizer.Rust)
+	classes, funcs := chunksByKind(chunks)
+	if len(classes) != 0 {
+		t.Errorf("impl inside a fn body must not be emitted, got %+v", classes)
+	}
+	if len(funcs) != 1 || funcs[0].Symbol != "build" {
+		t.Errorf("fn chunks = %+v, want just [build]", funcs)
 	}
 }
 

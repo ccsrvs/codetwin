@@ -3,12 +3,14 @@ package scan
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/cache"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -98,6 +100,74 @@ func TestProcessFile_GivenSecondCall_When_CacheWarm_Then_ReturnsEquivalentSnippe
 		if first[i].NonBlankLn != second[i].NonBlankLn {
 			t.Errorf("snippet %d: NonBlankLn differs", i)
 		}
+	}
+}
+
+// TestProcessFile_GoMethodsetGroupSurvivesCacheDiskRoundTrip: Go
+// struct+methodset group chunks carry JOINED, non-contiguous Code
+// (type decl + methods, interleaved source excluded), so a cache
+// round-trip through gob encode/decode on disk must reproduce every
+// field byte-identically — a warm run that reconstructed the group
+// differently (re-joined, re-ordered, truncated) would silently change
+// scores between cold and warm scans.
+func TestProcessFile_GoMethodsetGroupSurvivesCacheDiskRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	src := `package p
+
+type Counter struct {
+	n int
+}
+
+func (c *Counter) Add(x int) int {
+	c.n += x
+	return c.n
+}
+
+func interleaved(s string) string {
+	return s + s
+}
+
+func (c Counter) Total() int {
+	return c.n
+}
+`
+	path := writeFile(t, dir, "counter.go", src)
+
+	cold := cache.New()
+	first, warn := ProcessFile(path, 1, nil, cold, "", GranularityFunction)
+	if warn != "" {
+		t.Fatalf("cold run warning: %s", warn)
+	}
+	if err := cold.Save(dir); err != nil {
+		t.Fatalf("cache save: %v", err)
+	}
+	warm, err := cache.Load(dir)
+	if err != nil {
+		t.Fatalf("cache load: %v", err)
+	}
+	second, warn := ProcessFile(path, 1, nil, warm, "", GranularityFunction)
+	if warn != "" {
+		t.Fatalf("warm run warning: %s", warn)
+	}
+
+	if !reflect.DeepEqual(first, second) {
+		t.Errorf("warm-run snippets differ from cold-run snippets:\ncold: %+v\nwarm: %+v", first, second)
+	}
+	var group *Snippet
+	for i := range second {
+		if second[i].Kind == splitter.KindClass {
+			group = &second[i]
+		}
+	}
+	if group == nil {
+		t.Fatal("expected a class-kind group snippet from the Go file")
+	}
+	if !strings.Contains(group.Code, "type Counter struct") ||
+		!strings.Contains(group.Code, "func (c Counter) Total") {
+		t.Errorf("warm group Code lost content:\n%s", group.Code)
+	}
+	if strings.Contains(group.Code, "interleaved") {
+		t.Errorf("warm group Code must still exclude interleaved source:\n%s", group.Code)
 	}
 }
 
