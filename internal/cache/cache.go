@@ -48,7 +48,12 @@ const Filename = ".codetwin-cache.bin"
 // schema) are folded in via SchemaTag, so retuning any of them
 // invalidates the cache without a manual bump here. Reserve Version
 // bumps for changes to the cache's own storage format.
-const Version uint32 = 3
+//
+// v4: added Chunk.Kind and class-span chunks for Python/Java/JS
+// (§5.2 class-level granularity). Entries written by earlier versions
+// were split without class chunks, so they must be invalidated
+// wholesale — a stale entry would silently drop class findings.
+const Version uint32 = 4
 
 // SchemaTag encodes every algorithm parameter whose change makes cached
 // per-file output stale: the cache storage version, the fingerprint
@@ -76,6 +81,7 @@ func schemaTag(cacheVersion uint32, k, w, fpSchema, tokSchema int) string {
 type Chunk struct {
 	Name       string
 	Lang       string
+	Kind       string // mirrors splitter.Chunk.Kind ("function" or "class")
 	StartLine  int
 	EndLine    int
 	Code       string

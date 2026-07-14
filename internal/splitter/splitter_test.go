@@ -45,12 +45,12 @@ def top_level():
     pass
 `
 	chunks := Split("a.py", code, tokenizer.Python)
-	// Expect: __init__, method, top_level (class itself isn't a def, skipped)
+	// Expect: the class span (§5.2), then its methods, then top_level.
 	got := make([]string, len(chunks))
 	for i, c := range chunks {
 		got[i] = c.Symbol
 	}
-	want := []string{"__init__", "method", "top_level"}
+	want := []string{"Foo", "__init__", "method", "top_level"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
@@ -206,24 +206,28 @@ func TestSplit_PythonDecoratorOnMethod(t *testing.T) {
         return x + 1
 `
 	chunks := Split("a.py", code, tokenizer.Python)
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
+	// chunks[0] is the Foo class span (§5.2); the decorated methods follow.
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks (class + 2 methods), got %d: %+v", len(chunks), chunks)
 	}
-	if chunks[0].Symbol != "value" {
-		t.Errorf("first chunk should be 'value', got %q", chunks[0].Symbol)
+	if chunks[0].Symbol != "Foo" || chunks[0].Kind != KindClass {
+		t.Errorf("first chunk should be the Foo class span, got %q (%s)", chunks[0].Symbol, chunks[0].Kind)
 	}
-	if !strings.Contains(chunks[0].Code, "@property") {
-		t.Errorf("@property missing from value chunk:\n%s", chunks[0].Code)
+	if chunks[1].Symbol != "value" {
+		t.Errorf("second chunk should be 'value', got %q", chunks[1].Symbol)
 	}
-	if chunks[1].Symbol != "helper" {
-		t.Errorf("second chunk should be 'helper', got %q", chunks[1].Symbol)
+	if !strings.Contains(chunks[1].Code, "@property") {
+		t.Errorf("@property missing from value chunk:\n%s", chunks[1].Code)
 	}
-	if !strings.Contains(chunks[1].Code, "@staticmethod") {
-		t.Errorf("@staticmethod missing from helper chunk:\n%s", chunks[1].Code)
+	if chunks[2].Symbol != "helper" {
+		t.Errorf("third chunk should be 'helper', got %q", chunks[2].Symbol)
+	}
+	if !strings.Contains(chunks[2].Code, "@staticmethod") {
+		t.Errorf("@staticmethod missing from helper chunk:\n%s", chunks[2].Code)
 	}
 	// The @property line shouldn't bleed into helper's chunk.
-	if strings.Contains(chunks[1].Code, "@property") {
-		t.Errorf("helper chunk should not contain @property:\n%s", chunks[1].Code)
+	if strings.Contains(chunks[2].Code, "@property") {
+		t.Errorf("helper chunk should not contain @property:\n%s", chunks[2].Code)
 	}
 }
 
@@ -512,9 +516,9 @@ class Widget {
 		got[i] = c.Symbol
 	}
 	// Class methods are extracted at method granularity — matching the
-	// Python and Java splitters. Detection then operates on individual
-	// methods rather than swallowing the entire class as one chunk.
-	want := []string{"App", "useFoo", "render"}
+	// Python and Java splitters — and the class itself is also emitted
+	// as a class-span chunk (§5.2), compared only against other classes.
+	want := []string{"App", "useFoo", "Widget", "render"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
@@ -548,7 +552,7 @@ func TestSplit_JavaScriptClassMethods(t *testing.T) {
 	for i, c := range chunks {
 		got[i] = c.Symbol
 	}
-	want := []string{"constructor", "fetch", "parse"}
+	want := []string{"UserService", "constructor", "fetch", "parse"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
@@ -783,11 +787,11 @@ end
 	}
 }
 
-func TestSplit_JavaInterfaceStubsFallBackToWholeFile(t *testing.T) {
+func TestSplit_JavaInterfaceStubsYieldOnlyTheTypeSpan(t *testing.T) {
 	// An interface containing only abstract method stubs (no bodies) has
-	// no `{`-balanced chunks for splitJava to extract, so the splitter
-	// emits zero chunks and Split's outer fallback returns the whole
-	// file as one anonymous chunk.
+	// no method chunks to extract; since §5.2 the interface itself is
+	// emitted as a class-span chunk (its stub list is comparable against
+	// other type spans, and only against those).
 	code := `package com.foo;
 public interface Foo {
   void bar();
@@ -795,8 +799,14 @@ public interface Foo {
 }
 `
 	chunks := Split("Foo.java", code, tokenizer.Java)
-	if len(chunks) != 1 || chunks[0].Symbol != "" {
-		t.Errorf("Java interface stubs should fall back to a single whole-file chunk, got %+v", chunks)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk (the interface span), got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Foo" || chunks[0].Kind != KindClass {
+		t.Errorf("expected the Foo interface as a class-kind chunk, got %+v", chunks[0])
+	}
+	if chunks[0].StartLine != 2 || chunks[0].EndLine != 5 {
+		t.Errorf("interface span = %d-%d, want 2-5", chunks[0].StartLine, chunks[0].EndLine)
 	}
 }
 
@@ -820,7 +830,7 @@ public class Calculator {
 	for i, c := range chunks {
 		got[i] = c.Symbol
 	}
-	want := []string{"add", "describe"}
+	want := []string{"Calculator", "add", "describe"}
 	if len(got) != len(want) {
 		t.Fatalf("expected chunks %v, got %v", want, got)
 	}
@@ -851,11 +861,14 @@ public class Point {
 }
 `
 	chunks := Split("Point.java", code, tokenizer.Java)
-	if len(chunks) != 1 {
-		t.Fatalf("expected 1 chunk for the constructor, got %d: %+v", len(chunks), chunks)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks (class span + constructor), got %d: %+v", len(chunks), chunks)
 	}
-	if chunks[0].Symbol != "Point" {
-		t.Errorf("expected constructor symbol 'Point', got %q", chunks[0].Symbol)
+	if chunks[0].Symbol != "Point" || chunks[0].Kind != KindClass {
+		t.Errorf("expected the Point class span first, got %+v", chunks[0])
+	}
+	if chunks[1].Symbol != "Point" || chunks[1].Kind != KindFunction {
+		t.Errorf("expected constructor chunk 'Point', got %+v", chunks[1])
 	}
 }
 
@@ -879,7 +892,7 @@ public class Util {
 	for i, c := range chunks {
 		got[i] = c.Symbol
 	}
-	want := []string{"filter", "count"}
+	want := []string{"Util", "filter", "count"}
 	if len(got) != len(want) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
@@ -890,11 +903,10 @@ public class Util {
 	}
 }
 
-func TestSplit_JavaFieldsAndTypeDeclsNotMatched(t *testing.T) {
+func TestSplit_JavaFieldsAndTypeDeclsNotMatchedAsMethods(t *testing.T) {
 	// Fields lack `(`; type declarations are filtered out before the
-	// method regex runs. Both kinds of non-method members should yield
-	// zero method-chunks here, so the file falls back to a whole-file
-	// chunk via Split's outer guard.
+	// method regex runs. Neither may produce a method chunk — the only
+	// chunk here is the class span itself (§5.2).
 	code := `package com.foo;
 public class Container {
     private static final int CONSTANT = 42;
@@ -903,8 +915,11 @@ public class Container {
 }
 `
 	chunks := Split("Container.java", code, tokenizer.Java)
-	if len(chunks) != 1 || chunks[0].Symbol != "" {
-		t.Errorf("class with only fields should fall back to whole-file chunk; got %+v", chunks)
+	if len(chunks) != 1 {
+		t.Fatalf("expected only the class span, got %d: %+v", len(chunks), chunks)
+	}
+	if chunks[0].Symbol != "Container" || chunks[0].Kind != KindClass {
+		t.Errorf("expected the Container class span, got %+v", chunks[0])
 	}
 }
 
@@ -933,11 +948,14 @@ public class Loops {
 }
 `
 	chunks := Split("Loops.java", code, tokenizer.Java)
-	if len(chunks) != 1 {
-		t.Fatalf("expected 1 chunk (just `run`), got %d: %+v", len(chunks), chunks)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks (class span + `run`), got %d: %+v", len(chunks), chunks)
 	}
-	if chunks[0].Symbol != "run" {
-		t.Errorf("expected symbol 'run', got %q", chunks[0].Symbol)
+	if chunks[0].Symbol != "Loops" || chunks[0].Kind != KindClass {
+		t.Errorf("expected the Loops class span first, got %+v", chunks[0])
+	}
+	if chunks[1].Symbol != "run" {
+		t.Errorf("expected symbol 'run', got %q", chunks[1].Symbol)
 	}
 }
 

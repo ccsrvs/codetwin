@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -28,6 +29,12 @@ type Suggestion struct {
 func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 	if a.Lang != b.Lang {
 		return Suggestion{Note: "rejected: cross-language extraction not supported in v1"}
+	}
+	// Class-span pairs (§5.2): extracting a whole class into a helper
+	// function is meaningless — point the user at the method pairs the
+	// splitter also emitted inside the class.
+	if a.Kind == splitter.KindClass || b.Kind == splitter.KindClass {
+		return Suggestion{Note: "rejected: class-level pair — extraction targets functions/methods; run --suggest on the method pairs inside the class"}
 	}
 	switch a.Lang {
 	case tokenizer.Go:

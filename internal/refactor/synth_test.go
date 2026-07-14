@@ -2473,3 +2473,18 @@ func validGoIdent(s string) bool {
 	}
 	return true
 }
+
+// TestSynthesize_ClassPairRejectedWithNote: class-span pairs (§5.2) are
+// rejected up front — extracting a whole class into a helper function
+// is meaningless; the note points at the method pairs inside.
+func TestSynthesize_ClassPairRejectedWithNote(t *testing.T) {
+	a := scan.Snippet{Lang: tokenizer.Python, Kind: splitter.KindClass, Code: "class A:\n    pass"}
+	b := scan.Snippet{Lang: tokenizer.Python, Kind: splitter.KindClass, Code: "class B:\n    pass"}
+	s := Synthesize(a, b, "deadbeef", Alignment{})
+	if s.HelperSrc != "" {
+		t.Errorf("expected no helper for a class pair, got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.Note, "class-level pair") {
+		t.Errorf("Note = %q, want a class-level rejection", s.Note)
+	}
+}

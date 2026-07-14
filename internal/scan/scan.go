@@ -70,6 +70,11 @@ type Snippet struct {
 	// given by the caller (usually relative to the scan root) so
 	// unrelated directory names above the repo can't misclassify.
 	IsTest bool
+
+	// Kind mirrors splitter.Chunk.Kind: class-span chunks carry
+	// splitter.KindClass, everything else splitter.KindFunction.
+	// BuildMatrix only scores same-kind pairs against each other.
+	Kind splitter.ChunkKind
 }
 
 // ProcessFiles runs the per-file split → tokenize → fingerprint pipeline
@@ -193,6 +198,7 @@ func ProcessFile(
 				Fps:        positionalFromCache(c),
 				LexTerms:   c.LexTerms,
 				IsTest:     isTest,
+				Kind:       kindFromCache(c.Kind),
 			})
 		}
 		return out, ""
@@ -222,6 +228,7 @@ func ProcessFile(
 		entryChunks = append(entryChunks, cache.Chunk{
 			Name:       name,
 			Lang:       string(lang),
+			Kind:       string(ch.Kind),
 			StartLine:  ch.StartLine,
 			EndLine:    ch.EndLine,
 			Code:       ch.Code,
@@ -250,6 +257,7 @@ func ProcessFile(
 			Fps:        ps,
 			LexTerms:   lexTerms,
 			IsTest:     isTest,
+			Kind:       ch.Kind,
 		})
 	}
 
@@ -263,6 +271,15 @@ func ProcessFile(
 // positionalFromCache reconstructs a fingerprint.PositionalSet from a
 // cached chunk. The Set is rebuilt from the flat hash list; Positions
 // and K survive serialization unchanged.
+// kindFromCache maps a cached kind string back to a splitter.ChunkKind,
+// defaulting to KindFunction for entries that predate the field.
+func kindFromCache(k string) splitter.ChunkKind {
+	if k == string(splitter.KindClass) {
+		return splitter.KindClass
+	}
+	return splitter.KindFunction
+}
+
 func positionalFromCache(c cache.Chunk) fingerprint.PositionalSet {
 	set := make(fingerprint.Set, len(c.Hashes))
 	for _, h := range c.Hashes {

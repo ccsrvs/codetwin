@@ -190,6 +190,23 @@ whole files usually exceed the `--min-confidence-lines` floor. Function
 mode remains the right default for "which helpers should be extracted";
 file mode answers "which files should be merged."
 
+## Class-level findings
+
+For Python, Java, and JS/TS, classes are chunked twice: once per method
+and once as a whole class span (named `path:start-end ClassName`). A
+class↔class finding means the *container* matches — a copied class,
+renamed, possibly with its methods reordered — which method-level
+pairs alone underreport (each method pair looks small and independent).
+Class chunks are only ever compared against other class chunks: a class
+never pairs with a loose function or a single method across files
+(container-vs-part comparisons are dilution noise, not clones), and a
+class never pairs with its own methods (same-file nesting suppression).
+So when you see both a class↔class finding and several method pairs
+between the same two files, they're the same duplication reported at
+two granularities: fix it at the class level. `--suggest` on a class
+pair is rejected with a note — extraction targets functions/methods,
+so run it on the method pairs inside.
+
 ## Test code segregation (default)
 
 Files matching each language's test convention (`*_test.go`,
