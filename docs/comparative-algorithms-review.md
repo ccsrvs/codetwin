@@ -16,10 +16,28 @@ with the commands shown._
 > demoted by the evidence gate); materialized pairs 83% → ~4% of all
 > comparisons. `TestBench_GroundTruth` green throughout, with a new
 > `negative-short` bench category pinning the short-snippet contract.
-> **R6 is now implemented** as a label-only band modifier (structural
-> twins; lexical floor 0.20 pinned by a new `bench/twins` category and
-> renamed-positive guards — see the README's "Structural twins"
-> section). R3 and §5's granularity work remain open.
+>
+> **Release N+1 (same date):** R3 and R6 are implemented test-first —
+> each landed its failing bench contract before the fix. **R3**: same-
+> language pairs with structural < 0.20 are capped at 0.45 (linear
+> ramp-out by 0.35), pinned by the new `bench/negative-idiom` category;
+> semantic-only same-language pairs on the self-scan went 110 → 0 while
+> all `synthesize*` production findings survive. **R6**: a label-only
+> band modifier — pairs > 0.85 whose raw-code vocabulary overlap
+> (lexical Jaccard) is below 0.20 render as **structural twins** rather
+> than exact/near clones; pinned by the new `bench/twins` category plus
+> explicit rename-invariance guards (`go-renamed`, `python-renamed`,
+> and the new `go-renamed-rich` must never demote). Combined effect on
+> the default self-scan: **34 pairs / 8 clusters**, all production
+> findings.
+>
+> **§5.3 block-level detection is now grounded**: `testdata/bench/blocks`
+> (5 positives, 3 boilerplate negatives) + `TestBlockClones_GroundTruth`
+> define the acceptance contract (skipped until the detector lands), and
+> `TestBlockClones_FixturesAreInvisibleAtFunctionLevel` runs live to
+> enforce that every positive stays under the function-level threshold.
+> The detector implementation (§5.3) and §5.1/§5.2 granularity modes
+> remain open.
 
 ## Executive summary
 
