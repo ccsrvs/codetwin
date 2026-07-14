@@ -480,10 +480,7 @@ func buildPreviews(
 	snippets []scan.Snippet,
 	previewLines int,
 ) map[string]report.Preview {
-	nameIdx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		nameIdx[s.Name] = i
-	}
+	nameIdx := snippetIndex(snippets)
 
 	visible := make(map[int]struct{})
 	for _, p := range visiblePairs {
@@ -702,10 +699,7 @@ func emitBlockSuggestion(bc report.BlockClone, snippets []scan.Snippet) error {
 // rendered anyway.
 func buildSuggestionMap(pairs []report.Pair, snippets []scan.Snippet) map[string]jsonPatch {
 	out := make(map[string]jsonPatch, len(pairs))
-	byName := make(map[string]scan.Snippet, len(snippets))
-	for _, s := range snippets {
-		byName[s.Name] = s
-	}
+	byName := snippetsByName(snippets)
 	for _, p := range pairs {
 		a, okA := byName[p.NameA]
 		b, okB := byName[p.NameB]
@@ -714,40 +708,53 @@ func buildSuggestionMap(pairs []report.Pair, snippets []scan.Snippet) map[string
 		}
 		al := refactor.Align(a, b)
 		sug := refactor.Synthesize(a, b, p.ID, al)
-		patch := jsonPatch{
-			HelperName: sug.HelperName,
-			Confidence: sug.Confidence,
-			Note:       sug.Note,
-		}
-		if sug.HelperSrc != "" {
-			diff, err := refactor.BuildPatch(a.Path, sug)
-			if err != nil {
-				patch.Note = "error: " + err.Error()
-			} else {
-				patch.UnifiedDiff = diff
-			}
-		}
-		out[p.ID] = patch
+		out[p.ID] = suggestionPatch(sug, func() (string, error) {
+			return refactor.BuildPatch(a.Path, sug)
+		})
 	}
 	return out
 }
 
-func findPairByID(id string, pairs []report.Pair) (report.Pair, bool) {
-	for _, p := range pairs {
-		if p.ID == id {
-			return p, true
+// suggestionPatch packages a Suggestion as a jsonPatch, attaching the
+// unified diff when synthesis produced a helper (a diff-build error
+// replaces the Note). Shared by the pair and block --suggest-all
+// builders.
+func suggestionPatch(sug refactor.Suggestion, buildDiff func() (string, error)) jsonPatch {
+	patch := jsonPatch{
+		HelperName: sug.HelperName,
+		Confidence: sug.Confidence,
+		Note:       sug.Note,
+	}
+	if sug.HelperSrc != "" {
+		diff, err := buildDiff()
+		if err != nil {
+			patch.Note = "error: " + err.Error()
+		} else {
+			patch.UnifiedDiff = diff
 		}
 	}
-	return report.Pair{}, false
+	return patch
+}
+
+// findByKey returns the first item whose key equals want — the shared
+// linear-lookup shape behind findPairByID, findBlockByID, and
+// findSnippet.
+func findByKey[T any](items []T, want string, key func(T) string) (T, bool) {
+	for _, it := range items {
+		if key(it) == want {
+			return it, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+func findPairByID(id string, pairs []report.Pair) (report.Pair, bool) {
+	return findByKey(pairs, id, func(p report.Pair) string { return p.ID })
 }
 
 func findSnippet(name string, snippets []scan.Snippet) (scan.Snippet, bool) {
-	for _, s := range snippets {
-		if s.Name == name {
-			return s, true
-		}
-	}
-	return scan.Snippet{}, false
+	return findByKey(snippets, name, func(s scan.Snippet) string { return s.Name })
 }
 
 // ── JSON output ───────────────────────────────────────────────────────────────
@@ -1057,34 +1064,46 @@ func applyConfigDefaults(
 	}
 }
 
+// compileIfAny is the shared shape of the compile*(cfg) wrappers below:
+// an empty rule list yields the zero (nil) result with no error, so
+// callers can plumb the result through without nil checks; otherwise
+// compile runs on the rules.
+func compileIfAny[R, T any](rules []R, compile func([]R) (T, error)) (T, error) {
+	if len(rules) == 0 {
+		var zero T
+		return zero, nil
+	}
+	return compile(rules)
+}
+
 // compileIgnoreMatcher returns a (possibly nil-safe) matcher built from
 // cfg.IgnorePaths. A nil cfg yields a nil matcher whose Match method is a
 // no-op.
 func compileIgnoreMatcher(cfg *config.Config) (*config.IgnoreMatcher, error) {
-	if cfg == nil || len(cfg.IgnorePaths) == 0 {
+	if cfg == nil {
 		return nil, nil
 	}
-	return config.CompileIgnorePaths(cfg.IgnorePaths)
+	return compileIfAny(cfg.IgnorePaths, config.CompileIgnorePaths)
 }
 
 // compileStripPatterns compiles cfg.IgnorePatterns to regexes. Errors are
 // returned alongside the patterns that DID compile so the caller can warn
 // and continue rather than fail the run.
 func compileStripPatterns(cfg *config.Config) ([]*regexp.Regexp, error) {
-	if cfg == nil || len(cfg.IgnorePatterns) == 0 {
+	if cfg == nil {
 		return nil, nil
 	}
-	return config.CompileIgnorePatterns(cfg.IgnorePatterns)
+	return compileIfAny(cfg.IgnorePatterns, config.CompileIgnorePatterns)
 }
 
 // compilePairIgnoreMatcher returns a matcher built from cfg.IgnorePairs.
 // nil-safe: a nil cfg or empty list yields a nil matcher whose Match is a
 // no-op, so callers can plumb the result through without nil checks.
 func compilePairIgnoreMatcher(cfg *config.Config) (*config.PairIgnoreMatcher, error) {
-	if cfg == nil || len(cfg.IgnorePairs) == 0 {
+	if cfg == nil {
 		return nil, nil
 	}
-	return config.CompileIgnorePairs(cfg.IgnorePairs)
+	return compileIfAny(cfg.IgnorePairs, config.CompileIgnorePairs)
 }
 
 // requestedGitFlags returns a human-readable label and matching verb
@@ -1146,15 +1165,44 @@ func attachProvenance(pairs []report.Pair, provs map[string]*report.Provenance) 
 	}
 }
 
+// snippetIndex maps each snippet's name to its position in snippets —
+// the lookup scaffolding shared by every routine that resolves
+// pair/cluster endpoints back to snippets by name (buildPreviews, the
+// --since filters, applyPairIgnores).
+func snippetIndex(snippets []scan.Snippet) map[string]int {
+	idx := make(map[string]int, len(snippets))
+	for i, s := range snippets {
+		idx[s.Name] = i
+	}
+	return idx
+}
+
+// snippetsByName maps each snippet's name to the snippet itself, for
+// the suggestion and preview builders that need the full value.
+func snippetsByName(snippets []scan.Snippet) map[string]scan.Snippet {
+	byName := make(map[string]scan.Snippet, len(snippets))
+	for _, s := range snippets {
+		byName[s.Name] = s
+	}
+	return byName
+}
+
+// snippetTestFlags maps each snippet's name to its test-file
+// classification, shared by markTestPairs and markTestOnlyClusters.
+func snippetTestFlags(snippets []scan.Snippet) map[string]bool {
+	isTest := make(map[string]bool, len(snippets))
+	for _, s := range snippets {
+		isTest[s.Name] = s.IsTest
+	}
+	return isTest
+}
+
 // markTestPairs sets each pair's IsTestA/IsTestB from the endpoint
 // snippets' test-file classification (scan.IsTestFile on the scanned
 // path). Presentation metadata only: report.Prepare uses the flags to
 // suppress test↔test pairs by default; scores are untouched.
 func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
-	isTest := make(map[string]bool, len(snippets))
-	for _, s := range snippets {
-		isTest[s.Name] = s.IsTest
-	}
+	isTest := snippetTestFlags(snippets)
 	for i := range pairs {
 		pairs[i].IsTestA = isTest[pairs[i].NameA]
 		pairs[i].IsTestB = isTest[pairs[i].NameB]
@@ -1166,10 +1214,7 @@ func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
 // reflects the final member lists (low-cohesion splitting may have
 // regrouped members). Same presentation-only contract as markTestPairs.
 func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
-	isTest := make(map[string]bool, len(snippets))
-	for _, s := range snippets {
-		isTest[s.Name] = s.IsTest
-	}
+	isTest := snippetTestFlags(snippets)
 	for i := range clusters {
 		allTest := len(clusters[i].Members) > 0
 		for _, m := range clusters[i].Members {
@@ -1192,10 +1237,7 @@ func filterPairsBySince(
 	repoRoot string,
 	diff git.DiffMap,
 ) ([]report.Pair, int) {
-	idx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		idx[s.Name] = i
-	}
+	idx := snippetIndex(snippets)
 	kept := make([]report.Pair, 0, len(pairs))
 	dropped := 0
 	for _, p := range pairs {
@@ -1225,10 +1267,7 @@ func filterClustersBySince(
 	repoRoot string,
 	diff git.DiffMap,
 ) []report.Cluster {
-	idx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		idx[s.Name] = i
-	}
+	idx := snippetIndex(snippets)
 	kept := make([]report.Cluster, 0, len(clusters))
 	for _, c := range clusters {
 		for _, m := range c.Members {
@@ -1260,10 +1299,7 @@ func applyPairIgnores(
 	if matcher == nil || len(pairs) == 0 {
 		return pairs, 0
 	}
-	nameIdx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		nameIdx[s.Name] = i
-	}
+	nameIdx := snippetIndex(snippets)
 	kept := make([]report.Pair, 0, len(pairs))
 	ignored := 0
 	for _, p := range pairs {

@@ -419,13 +419,15 @@ func PrepareBlocks(blocks []BlockClone, opts Options) ([]BlockClone, int) {
 		}
 		visible = append(visible, b)
 	}
-	visible = sortAndLimit(visible, blockLess, opts.Limit)
+	visible = sortAndLimit(visible, BlockLess, opts.Limit)
 	return visible, suppressed
 }
 
-// blockLess orders block clones best-first: higher containment, then
-// bigger block (min-side non-blank lines), then range names.
-func blockLess(a, b BlockClone) bool {
+// BlockLess orders block clones best-first: higher containment, then
+// bigger block (min-side non-blank lines), then range names. Exported
+// so the CLI's pre-dedup ordering (sortBlockClones) and PrepareBlocks
+// share one definition of "best".
+func BlockLess(a, b BlockClone) bool {
 	if a.Containment != b.Containment {
 		return a.Containment > b.Containment
 	}

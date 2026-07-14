@@ -96,31 +96,11 @@ func dedupeBlockClones(bcs []report.BlockClone) []report.BlockClone {
 	return kept
 }
 
-// sortBlockClones orders findings best-first: containment descending,
-// then min-side block size descending, then range names — the same
-// ordering report.PrepareBlocks uses, applied here so dedup keeps the
-// strongest representative of each overlap group.
+// sortBlockClones orders findings best-first using report.BlockLess —
+// the same ordering report.PrepareBlocks uses, applied here so dedup
+// keeps the strongest representative of each overlap group.
 func sortBlockClones(bcs []report.BlockClone) {
-	less := func(a, b report.BlockClone) bool {
-		if a.Containment != b.Containment {
-			return a.Containment > b.Containment
-		}
-		am, bm := a.LinesA, b.LinesA
-		if a.LinesB < am {
-			am = a.LinesB
-		}
-		if b.LinesB < bm {
-			bm = b.LinesB
-		}
-		if am != bm {
-			return am > bm
-		}
-		if ra, rb := a.RangeNameA(), b.RangeNameA(); ra != rb {
-			return ra < rb
-		}
-		return a.RangeNameB() < b.RangeNameB()
-	}
-	sort.SliceStable(bcs, func(i, j int) bool { return less(bcs[i], bcs[j]) })
+	sort.SliceStable(bcs, func(i, j int) bool { return report.BlockLess(bcs[i], bcs[j]) })
 }
 
 func rangesOverlap(aStart, aEnd, bStart, bEnd int) bool {
@@ -162,10 +142,7 @@ func addBlockPreviews(
 	if len(blocks) == 0 {
 		return
 	}
-	byName := make(map[string]scan.Snippet, len(snippets))
-	for _, s := range snippets {
-		byName[s.Name] = s
-	}
+	byName := snippetsByName(snippets)
 	for _, b := range blocks {
 		if s, ok := byName[b.ChunkA]; ok {
 			previews[b.RangeNameA()] = report.BuildBlockPreview(
@@ -220,31 +197,15 @@ func buildBlockSuggestionMap(blocks []report.BlockClone, snippets []scan.Snippet
 		if err != nil {
 			continue
 		}
-		patch := jsonPatch{
-			HelperName: sug.HelperName,
-			Confidence: sug.Confidence,
-			Note:       sug.Note,
-		}
-		if sug.HelperSrc != "" {
-			diff, err := refactor.BuildPatchInsertAfter(hostA.Path, hostA.EndLine, sug)
-			if err != nil {
-				patch.Note = "error: " + err.Error()
-			} else {
-				patch.UnifiedDiff = diff
-			}
-		}
-		out[bc.ID] = patch
+		out[bc.ID] = suggestionPatch(sug, func() (string, error) {
+			return refactor.BuildPatchInsertAfter(hostA.Path, hostA.EndLine, sug)
+		})
 	}
 	return out
 }
 
 func findBlockByID(id string, blocks []report.BlockClone) (report.BlockClone, bool) {
-	for _, b := range blocks {
-		if b.ID == id {
-			return b, true
-		}
-	}
-	return report.BlockClone{}, false
+	return findByKey(blocks, id, func(b report.BlockClone) string { return b.ID })
 }
 
 // jsonBlockClone is the `partial_clones` array element schema.
