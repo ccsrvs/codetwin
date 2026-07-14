@@ -325,18 +325,18 @@ These were carved out of the v1 emitter implementations and remain
 worth pursuing if a real-world fixture surfaces or a user requests
 them:
 
-- **Elixir `@spec` / `@doc` propagation** — module attributes sitting
-  above a def are skipped by `exHelperHeader` and not carried into the
-  emitted helper. If the contract or docstring is part of the
-  duplication's value, it should propagate. (Multi-clause defs
-  inherit any preceding `@spec` because Elixir attaches it to the
-  function name, not the individual clause — propagation needs to be
-  symbol-scoped, not chunk-scoped.)
-- **Elixir multi-clause grouping** — currently each `def parse(...)`
-  clause is its own chunk (good for clone detection at clause
-  granularity). The next-level feature would be the option to group
-  adjacent clauses by symbol so `--suggest` could produce a single
-  multi-clause helper. Pure ergonomics; no correctness gap.
+- **Elixir `@spec` / `@doc` propagation** — **Shipped.** The emitter
+  now re-reads the source file at synthesis time and carries the
+  symbol-scoped @doc/@spec block above the def's first clause into
+  the helper (@spec renamed to the helper's name, heredocs verbatim,
+  conflicting B-spec surfaced as a one-line `# NOTE:`); see
+  `exGroupForSnippet` and the `realworld-spec` fixture tier.
+- **Elixir multi-clause grouping** — **Shipped.** At synthesis time
+  (`--suggest`/`--suggest-all` only — detection chunks stay
+  clause-granular) adjacent sibling clauses of the endpoint symbol
+  (same name + arity, contiguous apart from blanks/comments/
+  attributes) are emitted as one multi-clause helper, renamed
+  consistently; clause-count mismatch adds a `# NOTE:` line.
 - **Auto-insertion inside the enclosing `defmodule`** — Elixir and
   Java helpers both append at file scope and ask the user to relocate.
   Detecting the chunk's parent container and inserting before its

@@ -2582,8 +2582,15 @@ func TestSynthesize_ElixirMultiClauseGrouping_AllClauses(t *testing.T) {
 	if strings.Contains(s.HelperSrc, "clauses, B has") {
 		t.Errorf("equal clause counts must not produce a clause-count NOTE. Source:\n%s", s.HelperSrc)
 	}
-	if strings.Contains(s.HelperSrc, "def parse") {
-		t.Errorf("no clause may keep the original name. Source:\n%s", s.HelperSrc)
+	// No CODE line may keep the original name (the divergence comment
+	// legitimately quotes the original headers).
+	for _, l := range strings.Split(s.HelperSrc, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			continue
+		}
+		if strings.Contains(l, "def parse") {
+			t.Errorf("clause kept the original name: %q. Source:\n%s", l, s.HelperSrc)
+		}
 	}
 }
 

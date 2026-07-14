@@ -347,28 +347,61 @@ func rsBodyReferencesSelf(code string) bool {
 // before running. (Mirrors Java's "appended at file scope" contract,
 // adapted for Elixir's module-context requirement.)
 //
+// Two symbol-scoped extensions run before the shared literal-copy
+// contract (both resolve via exGroupForSnippet, which re-reads the
+// snippet's source file and falls back to today's single-clause
+// behaviour when it can't):
+//   - @doc/@spec propagation — the attribute block above the symbol's
+//     FIRST clause is carried into the helper, with the @spec's
+//     function name rewritten to the helper's name. Conflicting A/B
+//     specs carry A's and add a one-line `# NOTE:`.
+//   - multi-clause grouping — when the endpoint symbol has adjacent
+//     sibling clauses (same name + arity, contiguous apart from
+//     trivia), the helper carries every clause, renamed consistently.
+//     Both sides group independently; the divergence comment compares
+//     the grouped bodies, and a clause-count mismatch is a `# NOTE:`,
+//     not a rejection. Detection chunks stay clause-granular.
+//
 // Rejection rules:
 //   - Alignment must have at least one common span.
 //   - Holes must agree on `raise`/`throw`/`exit` presence — Elixir
 //     has no `return`/`break`/`continue` (functions return their last
 //     expression; iteration is recursive).
-//   - The chunk must have a recognisable `def`/`defp` header.
+//   - Every clause must have a recognisable `def`/`defp` header.
 func synthesizeElixir(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
+	ga := exGroupForSnippet(a)
+	gb := exGroupForSnippet(b)
+	grouped := len(ga.clauses) > 1 || len(gb.clauses) > 1
+
+	codeA, codeB := a.Code, b.Code
+	useAl := al
+	if grouped {
+		// Re-align over the grouped bodies so the divergence comment,
+		// rejections, and confidence all describe what the helper
+		// actually carries.
+		codeA = strings.Join(ga.clauses, "\n\n")
+		codeB = strings.Join(gb.clauses, "\n\n")
+		useAl = Align(scan.Snippet{Code: codeA}, scan.Snippet{Code: codeB})
+	}
+
+	if len(useAl.Common) == 0 {
 		return Suggestion{Note: "rejected: no common lines between snippets"}
 	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(useAl.Holes,
 		[]string{"raise", "throw", "exit"}); !ok {
 		return Suggestion{Note: reason}
 	}
 
 	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
-	header, ok := exHelperHeader(a.Code, helperName)
-	if !ok {
-		return Suggestion{Note: "rejected: snippet has no recognisable Elixir def header"}
+	headers := make([]string, len(ga.clauses))
+	for i, cl := range ga.clauses {
+		h, ok := exHelperHeader(cl, helperName)
+		if !ok {
+			return Suggestion{Note: "rejected: snippet has no recognisable Elixir def header"}
+		}
+		headers[i] = h
 	}
-	body := exRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "#")
+	divergence := formatDivergenceComment(useAl.Holes, "#")
 
 	src := strings.Builder{}
 	src.WriteString("# codetwin: starter helper extracted from " +
@@ -380,22 +413,55 @@ func synthesizeElixir(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 	src.WriteString("# NOTE: appended at file scope; Elixir defs must live inside a\n")
 	src.WriteString("# defmodule — move this def into the appropriate module (or\n")
 	src.WriteString("# extract to a shared helper module) before compiling.\n")
+	if len(ga.clauses) != len(gb.clauses) {
+		src.WriteString(fmt.Sprintf("# NOTE: A has %d clauses, B has %d\n",
+			len(ga.clauses), len(gb.clauses)))
+	}
+	aSpec := exFirstAttr(ga.attrs, "spec")
+	bSpec := exFirstAttr(gb.attrs, "spec")
+	if aSpec != nil && bSpec != nil && exSpecKey(aSpec) != exSpecKey(bSpec) {
+		src.WriteString("# NOTE: B's @spec diverges: " +
+			oneLine(strings.Join(bSpec.lines, "\n")) + "\n")
+	}
 	if divergence != "" {
 		src.WriteString(divergence)
 	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
+	for _, at := range ga.attrs {
+		ls := at.lines
+		if at.kind == "spec" && len(ls) > 0 {
+			ls = append([]string{exRenameSpec(ls[0], helperName)}, ls[1:]...)
+		}
+		for _, l := range ls {
+			src.WriteString(l)
+			src.WriteString("\n")
+		}
+	}
+	if !grouped {
+		// Single-clause path: byte-identical to the pre-grouping emitter
+		// (modulo any attribute block above).
+		src.WriteString(headers[0])
+		src.WriteString("\n")
+		src.WriteString(exRebodyAsHelper(a.Code))
+	} else {
+		for i, cl := range ga.clauses {
+			if i > 0 {
+				src.WriteString("\n")
+			}
+			clause := headers[i] + "\n" + exRebodyAsHelper(cl)
+			src.WriteString(strings.TrimRight(clause, "\n"))
+			src.WriteString("\n")
+		}
+	}
 
 	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	aLines := strings.Count(strings.TrimRight(codeA, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(codeB, "\n"), "\n") + 1
 	maxLines := aLines
 	if bLines > maxLines {
 		maxLines = bLines
 	}
 	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
+		confidence = float64(useAl.CommonLines()) / float64(maxLines)
 	}
 
 	return Suggestion{
