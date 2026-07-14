@@ -20,7 +20,6 @@ import (
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 const (
@@ -241,7 +240,9 @@ type scored struct {
 func pairScore(a, b scan.Snippet, va, vb similarity.NormalizedVector) scored {
 	structural := fingerprint.Jaccard(a.Fps.Set, b.Fps.Set)
 	semantic := similarity.CosineFromNormalized(va, vb)
-	sameLang := a.Lang == b.Lang && a.Lang != tokenizer.Unknown
+	// Mirrors BuildMatrix: Unknown↔Unknown counts as same-language
+	// (two unclassifiable files are more likely the same language).
+	sameLang := a.Lang == b.Lang
 	return scored{structural, semantic, similarity.CombinedForLangs(structural, semantic, sameLang)}
 }
 

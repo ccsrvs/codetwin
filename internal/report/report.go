@@ -295,6 +295,21 @@ const (
 	white  = "\033[97m"
 )
 
+// isCrossLang reports whether a pair of language labels is a confirmed
+// cross-language match. Pairs involving an unclassified snippet — Lang
+// "" or the tokenizer's Unknown sentinel string — are NOT cross-language:
+// we can't confirm the languages differ, and two unclassifiable files are
+// more likely the SAME language (BuildMatrix blends Unknown↔Unknown as
+// same-language for the same reason). The string literal mirrors
+// tokenizer.Unknown; report stays free of internal imports.
+func isCrossLang(langA, langB string) bool {
+	const unknown = "unknown" // == string(tokenizer.Unknown)
+	if langA == "" || langB == "" || langA == unknown || langB == unknown {
+		return false
+	}
+	return langA != langB
+}
+
 // Prepare applies the report pipeline to raw pairs+clusters: filter by
 // Options.Threshold (unless Verbose), suppress test↔test pairs and
 // test-only clusters (unless Options.IncludeTests), then sort by
@@ -321,7 +336,7 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster,
 			if !opts.Verbose && p.Score < opts.Threshold {
 				continue
 			}
-			if opts.CrossLangOnly && (p.LangA == "" || p.LangB == "" || p.LangA == p.LangB) {
+			if opts.CrossLangOnly && !isCrossLang(p.LangA, p.LangB) {
 				continue
 			}
 			if !opts.IncludeTests && p.IsTestA && p.IsTestB {

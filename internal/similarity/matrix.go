@@ -9,7 +9,6 @@ import (
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // materializationFloorMin is the absolute minimum materialization
@@ -143,8 +142,18 @@ func BuildMatrix(
 						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
 					}
 					semantic := CosineFromNormalized(vectors[i], vectors[j])
-					sameLang := snippets[i].Lang == snippets[j].Lang &&
-						snippets[i].Lang != tokenizer.Unknown
+					// Unknown↔Unknown counts as SAME language: two files
+					// the tokenizer couldn't classify are more likely the
+					// same (unrecognized) language than different ones, so
+					// they get the even blend and the R3 same-language
+					// corroboration cap. Excluding Unknown here would hand
+					// them the semantic-dominant 0.2/0.8 cross-language
+					// blend AND let them escape the cap — unreachable via
+					// the CLI today (scan gates on supported extensions),
+					// but a trap for future loosening. Note --cross-lang-only
+					// (report.Prepare) independently treats unknown-language
+					// pairs as NOT cross-language.
+					sameLang := snippets[i].Lang == snippets[j].Lang
 					combined := CombinedForLangs(structural, semantic, sameLang)
 					// Length-aware confidence: dampen short-snippet matches
 					// before they reach the matrix so DBSCAN sees the same
