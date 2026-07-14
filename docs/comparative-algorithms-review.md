@@ -388,6 +388,19 @@ block-level scanning:
 Risk is concentrated in tuning (the bench extension is the mitigation)
 and in report ergonomics, not in algorithmic feasibility.
 
+**Ground truth landed:** `testdata/bench/blocks` +
+`TestBlockClones_GroundTruth` (internal/bench/blocks_test.go) define
+the acceptance contract — positives (verbatim, renamed, containment,
+gapped; Go and Python) must produce block matches at
+`min-block-lines 8` with containment ≥ 0.8 overlapping the line ranges
+stated in each fixture header; negatives (err-check chains, logging
+runs, import-adjacent setup) must produce none. The contract test skips
+until an implementation is wired into the `detectBlocks` seam; fixture
+invisibility at function level (every positive's best whole-function
+pair scores 0.36–0.43, below the 0.50 default threshold) is enforced
+by a live companion test so the fixtures can't drift into
+function-level-detectable territory.
+
 ### 5.4 Not recommended as "granularity": cross-repo
 
 Cross-repo scanning (roadmap bet #6) is sometimes framed as a
