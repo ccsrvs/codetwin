@@ -52,11 +52,21 @@ The terminal report is cluster-first and has up to three sections.
 
 **REFACTORING CLUSTERS** are families of similar snippets grouped by
 DBSCAN. A cluster requires at least `--min-pts` (default 2) mutually
-similar snippets within distance `--eps` (default 0.45). One cluster =
-one refactoring task that consolidates several files at once. A family
-of n members implies n·(n-1)/2 pairs; those pairs are collapsed into
-the cluster instead of being listed individually (the summary counts
-them as "In-cluster pairs").
+similar snippets within distance `--eps` (default 0.35 — pairs link at
+score ≥ 65%, the "strong clone" band). One cluster = one refactoring
+task that consolidates several files at once. A family of n members
+implies n·(n-1)/2 pairs; those pairs are collapsed into the cluster
+instead of being listed individually (the summary counts them as
+"In-cluster pairs").
+
+Each cluster header shows two numbers: the **avg similarity** across
+all internal pairs and the **cohesion** — the *weakest* internal pair
+(`min_score` in JSON). DBSCAN links transitively (A~B and B~C pull C
+in even when A~C is weak), so a large gap between the two is the tell
+that a family was chained together rather than uniformly similar. When
+a cluster's cohesion falls below `--threshold`, codetwin re-links its
+members at threshold strength and splits it into tighter families;
+members left without a threshold-strength partner drop out as noise.
 
 **RELATED CLUSTERS** aggregates pairs that bridge two different
 clusters — `Cluster 3 ↔ Cluster 7 — 44 pairs, up to 61%` means the two
@@ -100,7 +110,10 @@ machine consumers see every pair regardless.
 - `--verbose` includes weak similarities in addition to the labelled
   tiers. For memory reasons pairs are only materialized down to
   `max(0.30, threshold − 0.20)`, so even `--verbose` bottoms out there.
-- `--eps` only affects clusters. Stricter eps means tighter clusters with fewer members each.
+- `--eps` only affects clusters. Stricter (lower) eps means tighter clusters
+  with fewer members each; looser (higher) eps admits weaker pairs and grows
+  chains. The default 0.35 keeps cluster linking aligned with the
+  "strong clone" label (score ≥ 65%).
 
 ## Things the score can't see (and judgment calls you still own)
 
