@@ -340,6 +340,55 @@ or on a system without git installed, codetwin exits 1 with a clear
 error rather than silently degrading — the user explicitly opted in to
 a git-dependent feature, so silent fallback would hide the real problem.
 
+## Clone watchlist drift events (--baseline)
+
+`--update-baseline <file>` snapshots the clusters a scan found;
+`--baseline <file>` compares a later scan against the snapshot and
+prints one stderr line per change, in a stable format:
+
+```
+drift: <kind> cluster <n>: <detail>
+```
+
+`<n>` is the cluster's position in the *current* run (for
+`cluster-dissolved`, the baseline's — the cluster no longer exists);
+`<detail>` always names the members involved, so each line stands on
+its own. Any drift makes the run exit 1, which is the CI gate.
+
+How to read each kind:
+
+- **`member-added`** — a cluster gained a member. Someone pasted a new
+  copy of an existing clone family. This is the watchlist's version of
+  "new duplication introduced"; the detail names the new copy.
+- **`member-removed`** — a cluster lost a member. Usually good news
+  (a copy was deleted or refactored onto a shared helper), but verify
+  the member was removed on purpose rather than drifting so far it no
+  longer matches.
+- **`member-changed`** — the member still belongs to its cluster, but
+  its body changed. This is the classic drift alarm: a bug fixed (or a
+  feature added) in one copy but not its siblings. Diff the changed
+  member against the other cluster members and decide whether the edit
+  should propagate.
+- **`cluster-appeared`** — a whole new clone family with no baseline
+  counterpart. Treat like a fresh detection: read the cluster in the
+  normal report above the drift lines.
+- **`cluster-dissolved`** — a baseline family is gone: its members were
+  deleted, deduplicated, or drifted below the clustering band. The
+  detail lists the baseline members so you can check which it was.
+
+A body change only counts when the *normalized* token stream changes —
+formatting, comments, and renaming identifiers or literals never fire
+`member-changed`; added/removed statements or changed control flow do.
+Member identity strips line ranges and scan-root prefixes, so edits
+above a function (or scanning from a different directory) don't read
+as drift either.
+
+When the drift is intentional, refresh the snapshot with
+`--update-baseline` and commit the file. If codetwin refuses to compare
+at all ("different scan parameters" or "schema version"), the snapshot
+and the current run aren't comparable — match the flags it lists, or
+regenerate the baseline.
+
 ## Refactor suggestions
 
 `--suggest <id>` emits a unified diff that *adds* a starter helper to

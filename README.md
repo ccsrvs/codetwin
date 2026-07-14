@@ -102,6 +102,10 @@ codetwin --cross-lang-only --threshold 0.50 ./
 # CI gate: fail on any new strong clone introduced since main
 codetwin --since main --threshold 0.85 --json ./src
 
+# Clone watchlist: snapshot today's clusters, then alert when they drift
+codetwin --update-baseline .codetwin-baseline.json ./src
+codetwin --baseline .codetwin-baseline.json ./src   # exits 1 on drift
+
 # Annotate findings with git provenance, newest clones first
 codetwin --blame --sort age --limit 10 ./src
 
@@ -135,6 +139,8 @@ codetwin --suggest <pair-id> ./src
 | `--include-tests` | false | Include test↔test pairs and test-only clusters; by default they are suppressed and summarized in one line. See [Test code segregation](#test-code-segregation). |
 | `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
+| `--update-baseline` | `""` | Write a clone-watchlist snapshot of the visible clusters to `<file>` after the scan. See [Clone watchlist](#clone-watchlist-drift-alerts). |
+| `--baseline` | `""` | Compare this scan against the snapshot in `<file>`; drift events print to stderr and any drift exits 1 (CI gate). Mutually exclusive with `--update-baseline`. |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
 | `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair or partial-clone block with the given 8-char ID. Pairs: all six languages; blocks: Go and Python. |
 | `--suggest-all` | false | With `--json`: populate `suggested_patch` on every visible pair and partial clone. |
@@ -399,6 +405,74 @@ filtering (the summary counts only findings that would have rendered)
 and before `--limit` (the limit applies to what remains). Unlike adding
 `**/*_test.go` to `ignore_paths`, segregation keeps test files in the
 scan, so cross-boundary test↔production findings still surface.
+
+## Clone watchlist (drift alerts)
+
+Clone families evolve: members drift apart, a bug gets fixed in one
+copy but not the others, a new copy gets pasted in. The watchlist
+persists a baseline of the clusters a scan found and alerts on the
+*changes* between runs — no other clone detector tracks families over
+time.
+
+```bash
+# 1. Snapshot the current clusters (commit the file alongside your code)
+codetwin --update-baseline .codetwin-baseline.json ./src
+git add .codetwin-baseline.json
+
+# 2. In CI: compare each build against the snapshot
+codetwin --baseline .codetwin-baseline.json ./src
+# exit 0  → no drift (stderr is silent)
+# exit 1  → drift; one line per event on stderr:
+#   drift: member-added cluster 0: src/billing/tax.go computeVAT
+#   drift: member-changed cluster 2: src/api/parse.go ParseRecord
+
+# 3. When the drift is intentional, refresh the snapshot
+codetwin --update-baseline .codetwin-baseline.json ./src
+```
+
+Five event kinds:
+
+| Event | Meaning |
+|---|---|
+| `member-added` | a cluster gained a member — a new copy was pasted in |
+| `member-removed` | a cluster lost a member — deleted or refactored away |
+| `member-changed` | a member's body changed but it still clusters — the classic "bug fixed in one copy" alarm: check its siblings |
+| `cluster-appeared` | a new clone family with no baseline counterpart |
+| `cluster-dissolved` | a baseline family no longer detected (numbered by its position in the *baseline*; the detail lists its members) |
+
+The normal report still prints to stdout in both modes; drift events go
+to stderr. With `--json`, a `drift` array (kind / cluster / detail) is
+added to the document — omitted when empty, so the JSON schema is
+unchanged for consumers that don't use baselines.
+
+Details that make baselines durable:
+
+- **Member identity survives edits.** Snapshot members are stored as
+  line-range-stripped names (`path Symbol`, the same normalization as
+  [`ignore_pairs`](#pair-ignores-ignore_pairs)) with paths relative to
+  the scan roots — so editing code above a function, or running the
+  scan from a different directory, never reads as drift. A body change
+  is detected via a hash of the member's *normalized* token stream:
+  formatting, comments, and renames don't trip it; structural edits do.
+- **Clusters are matched by membership, not position.** A baseline
+  cluster matches the current cluster it shares the most members with
+  (highest Jaccard wins, deterministic tie-break), as long as they share
+  at least half the smaller cluster's members; below that floor the
+  pair reads as `cluster-dissolved` + `cluster-appeared`.
+- **Snapshots are byte-deterministic.** Two `--update-baseline` runs
+  over the same tree write byte-identical files — the schema
+  deliberately has no timestamp (your VCS history dates it), so the
+  file diffs cleanly in review.
+- **Comparability is enforced.** The snapshot records the scan
+  parameters that shape clusters (`threshold`, `eps`, `min-pts`,
+  `granularity`, `include-tests`). Comparing with different flags is
+  user error, not drift: codetwin lists the mismatched parameters and
+  exits 1 before scanning. A `schema_version` field likewise rejects
+  snapshots from an incompatible codetwin with a clear "regenerate"
+  error. Baselines snapshot the *visible* (post-suppression) clusters,
+  so [test segregation](#test-code-segregation) composes naturally —
+  you baseline what you see, and `--include-tests` baselines require
+  `--include-tests` comparisons.
 
 ## Sorting
 

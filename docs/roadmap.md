@@ -13,7 +13,7 @@ merged as PR #7 (`fix/matching-pipeline-review`)._
 | 2 | PR-delta mode | **Shipped** | `--since <ref>` |
 | 3 | Cross-language as the headline | **Shipped** | `--cross-lang-only`, `lang_{a,b}` JSON |
 | 4 | Refactor patch emission | **Shipped (all 6 languages)** | `--suggest <pair-id>`, `--suggest-all`, `id` + `suggested_patch` in JSON |
-| 5 | Clone watchlist + drift alerts | Not started | (proposed: `--baseline`) |
+| 5 | Clone watchlist + drift alerts | **Shipped** | `--update-baseline`, `--baseline`, `drift` JSON array |
 | 6 | Cross-repo / org-level scanning | Not started | (existing CLI already accepts multiple roots; needs namespacing + per-repo cluster grouping) |
 | 7 | Behavioural / runtime equivalence | Flagged longshot | — |
 | — | Detection quality + report SNR (PR #7) | **Shipped** | `internal/bench` ground-truth benchmark, retuned scoring defaults, cluster-first report, `--flat` |
@@ -174,23 +174,60 @@ Elixir emitters. Fixtures are already in place under
 `testdata/refactor/<lang>/{simple,medium,advanced}/`.
 
 ### 5. Clone watchlist + drift alerts
-**Status: Not started.**
+**Status: Shipped.**
 
 **Why nobody has it:** Clone families *evolve* — once detected, members
 gradually drift apart, fixing a bug in one but not the others. No tool
-tracks this. Codetwin's cache infrastructure is one annotation away
-from supporting a watchlist.
+tracks this.
 
-**Fit:** Good. Persist clusters detected on a baseline run; on each
-subsequent run, compare and emit `drift: <cluster> member <N> diverged`
-events.
+**What landed:**
+- `--update-baseline <file>`: after the normal scan (report still
+  prints), write a snapshot of the visible clusters and exit 0.
+- `--baseline <file>`: compare the scan's clusters against the
+  snapshot; drift events print to stderr one line each
+  (`drift: <kind> cluster <n>: <detail>`); any drift exits 1 — the CI
+  gate. No drift exits 0 silently. `--json` adds a `drift` array
+  (omitted when empty, so the schema is unchanged for non-watchlist
+  consumers). The two flags are mutually exclusive.
+- Five event kinds: `member-added`, `member-removed`,
+  `member-changed` (body changed but still clusters — detected via a
+  per-member normalized-token hash), `cluster-appeared`,
+  `cluster-dissolved`.
+- New package `internal/baseline`: versioned JSON snapshot
+  (`schema_version` 1; mismatch = explicit "regenerate" error), the
+  scan params that gate comparability (threshold / eps / min-pts /
+  granularity / include-tests — a mismatch is a clear pre-scan error,
+  not drift), and the drift diff.
+- **Member identity across runs** reuses the exact ignore_pairs
+  normalization (`config.ParseSnippetName`): line ranges are stripped
+  and paths are made relative to the scan roots, so ordinary edits and
+  different scan directories never read as drift. Duplicate keys
+  inside a cluster (Elixir multi-clause defs) merge with a combined
+  hash.
+- **Cluster matching** is greedy highest-Jaccard over member keys with
+  a documented floor (overlap coefficient ≥ 0.5 — the two clusters
+  share at least half the smaller one's members, so grown clusters
+  still match), ties broken by first member key; below the floor a
+  pair reads as dissolved + appeared.
+- **Determinism:** the snapshot has NO timestamp (deliberate — VCS
+  history dates it); clusters/members are written sorted, so two
+  `--update-baseline` runs over the same tree are byte-identical.
+- Baselines snapshot the post-suppression *visible* clusters, so test
+  segregation and `--include-tests` compose naturally: you baseline
+  what you see.
 
-**Proposed surface:**
-- `codetwin --baseline .codetwin-baseline.json ./src`
-- `codetwin --update-baseline ./src`
-
-**Critical files (proposed):** new `internal/baseline/baseline.go`,
-hooks in `cmd/codetwin/main.go` after DBSCAN.
+**Verified:** all five test layers per the plan below —
+`internal/baseline/baseline_test.go` (round-trip, byte determinism,
+schema/params errors, all five kinds on synthetic sets, floor/greedy/
+tie-break); fixture-driven `cmd/codetwin/baseline_test.go` over
+`testdata/baseline/{before,after}` (member-added / member-removed /
+member-changed each fire exactly once through the real pipeline; a
+line-shifting comment pins that identical bodies never drift);
+subprocess `cmd/codetwin/baseline_subprocess_test.go` (stderr lines +
+exit codes end-to-end, JSON `drift` array, mutual exclusion, schema and
+params mismatch errors, byte-determinism through the binary); self-host
+`TestSelfHost_BaselineZeroDriftOnInternal` (snapshot `./internal`,
+re-compare unchanged, zero drift).
 
 ### 6. Cross-repo / org-level scanning
 **Status: Not started.** The CLI already accepts multiple roots and the
@@ -348,10 +385,13 @@ them:
   JS emitter handles plain TS today but doesn't strip type
   annotations.
 
-The next bet to consider is **5** (clone watchlist + drift alerts) or
-**6** (cross-repo / org-level scanning), depending on whether the
-priority is lifecycle (track clone families over time) or scale
-(surface "promote to library" candidates across N repos).
+Bet **5** (clone watchlist + drift alerts) is **shipped** (2026-07-14):
+codetwin now tracks clone families *over time* — snapshot with
+`--update-baseline`, gate CI with `--baseline`, and get one stderr line
+per drift event when a family gains a copy, loses one, or a member's
+body changes while its siblings don't. The next bet to consider is
+**6** (cross-repo / org-level scanning): surface "promote to library"
+candidates across N repos.
 
 ## Coverage of shipped code
 
@@ -361,6 +401,7 @@ After the PR #7 detection-quality overhaul (2026-07-02):
 |---|---|
 | `internal/tokenizer` | **100.0%** |
 | `internal/refactor` | 99.1% |
+| `internal/baseline` | 94.8% _(added 2026-07-14 by bet #5)_ |
 | `internal/fingerprint` | 97.6% |
 | `internal/similarity` | 96.9% |
 | `internal/git` | 96.7% |
