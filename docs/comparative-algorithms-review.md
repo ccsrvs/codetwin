@@ -443,7 +443,14 @@ function-level-detectable territory.
 containment ≥ 0.85 + matched-line floor verification), wired through a
 gray-band candidate channel in `BuildMatrix` into the `PARTIAL CLONES`
 report section and `partial_clones` JSON array (`--min-block-lines`,
-default 8); the contract test above is un-skipped and green.
+default 8); the contract test above is un-skipped and green. The two
+deferred follow-ups landed too: `--suggest <block-id>` runs the
+block-mode refactor pipeline (slice block spans → align →
+`SynthesizeBlock` wraps the statement run in a fresh helper, Go +
+Python, inserted after the enclosing function; `--suggest-all` fills
+`suggested_patch` on partial clones), and `--preview` renders each
+side's exact block range with absolute line numbers (JSON previews
+keyed by the block's `file:start-end` range name).
 
 ### 5.4 Not recommended as "granularity": cross-repo
 

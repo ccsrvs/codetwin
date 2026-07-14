@@ -90,8 +90,8 @@ func main() {
 	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
-	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair (look up the 8-char pair ID in --json output). v1 supports Go, Python, and Java; other languages print a 'note' explaining why.")
-	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair. Off by default — synthesis adds work proportional to pair count.")
+	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair or partial-clone block (look up the 8-char ID in --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir; blocks: Go and Python. Other languages print a 'note' explaining why.")
+	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair and partial clone. Off by default — synthesis adds work proportional to finding count.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
 	showVersion := flag.Bool("version", false, "print the codetwin version and exit")
@@ -420,12 +420,14 @@ func main() {
 	// the user can target a sub-threshold pair without having to
 	// re-tune --threshold. Materialization reaches down to
 	// similarity.MaterializationFloor(threshold) — a 0.20 band below
-	// the threshold (never below 0.30).
+	// the threshold (never below 0.30). Partial-clone block IDs are
+	// searched too (all detected blocks, not just visible ones); pairs
+	// win the 1-in-4-billion ID collision.
 	if *suggest != "" {
 		if showProgress {
 			fmt.Fprint(os.Stderr, "\r\033[K")
 		}
-		if err := emitSuggestion(*suggest, pairs, snippets); err != nil {
+		if err := emitSuggestion(*suggest, pairs, partialClones, snippets); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -438,6 +440,7 @@ func main() {
 			fmt.Fprint(os.Stderr, "\r\033[Kbuilding previews...")
 		}
 		opts.Previews = buildPreviews(visiblePairs, visibleClusters, snippets, *previewLines)
+		addBlockPreviews(opts.Previews, visibleBlocks, snippets, *previewLines)
 		debugf("previews built: %d", len(opts.Previews))
 	}
 
@@ -446,12 +449,14 @@ func main() {
 	}
 
 	if *jsonOut {
-		var suggestions map[string]jsonPatch
+		var suggestions, blockSuggestions map[string]jsonPatch
 		if *suggestAll {
 			suggestions = buildSuggestionMap(visiblePairs, snippets)
-			debugf("--suggest-all: built %d suggestions", len(suggestions))
+			blockSuggestions = buildBlockSuggestionMap(visibleBlocks, snippets)
+			debugf("--suggest-all: built %d pair + %d block suggestions",
+				len(suggestions), len(blockSuggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, suppressed)
+		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, blockSuggestions, suppressed)
 		debugf("done (json)")
 		return
 	}
@@ -626,17 +631,25 @@ func buildReportClusters(
 
 // ── Refactor suggestions (--suggest / --suggest-all) ─────────────────────────
 
-// emitSuggestion looks up a pair by 8-char ID, runs the refactor
-// pipeline (align → synthesize → patch), and writes the resulting
-// unified diff to stdout. When synthesis is rejected, prints a single
-// "note: <reason>" line on stderr and exits 1 — that matches the
-// failure semantics of `--since` on a non-existent ref and gives CI
-// pipelines a clean way to detect "no patch produced."
-func emitSuggestion(id string, pairs []report.Pair, snippets []scan.Snippet) error {
-	pair, ok := findPairByID(id, pairs)
-	if !ok {
-		return fmt.Errorf("no pair matches id %q (lower --threshold or check the id from --json output)", id)
+// emitSuggestion looks up an 8-char ID across pairs and partial-clone
+// blocks (pairs take precedence on the 1-in-4-billion collision), runs
+// the matching refactor pipeline (align → synthesize → patch), and
+// writes the resulting unified diff to stdout. When synthesis is
+// rejected, prints a single "note: <reason>" line on stderr and exits
+// 1 — that matches the failure semantics of `--since` on a
+// non-existent ref and gives CI pipelines a clean way to detect "no
+// patch produced."
+func emitSuggestion(id string, pairs []report.Pair, blocks []report.BlockClone, snippets []scan.Snippet) error {
+	if pair, ok := findPairByID(id, pairs); ok {
+		return emitPairSuggestion(pair, snippets)
 	}
+	if bc, ok := findBlockByID(id, blocks); ok {
+		return emitBlockSuggestion(bc, snippets)
+	}
+	return fmt.Errorf("no pair or partial clone matches id %q (lower --threshold or check the id from --json output)", id)
+}
+
+func emitPairSuggestion(pair report.Pair, snippets []scan.Snippet) error {
 	a, ok := findSnippet(pair.NameA, snippets)
 	if !ok {
 		return fmt.Errorf("snippet not found: %s", pair.NameA)
@@ -652,6 +665,29 @@ func emitSuggestion(id string, pairs []report.Pair, snippets []scan.Snippet) err
 		os.Exit(1)
 	}
 	diff, err := refactor.BuildPatch(a.Path, s)
+	if err != nil {
+		return fmt.Errorf("build patch: %w", err)
+	}
+	fmt.Print(diff)
+	return nil
+}
+
+// emitBlockSuggestion is emitSuggestion's block-mode path: slice both
+// hosts' chunk code to the matched block spans, run the block-mode
+// pipeline (Align → SynthesizeBlock), and emit a diff that inserts the
+// helper right after side A's enclosing function. Rejections (notably
+// languages without a block-mode emitter) follow the pair-level
+// contract: "note: <reason>" on stderr, exit 1.
+func emitBlockSuggestion(bc report.BlockClone, snippets []scan.Snippet) error {
+	s, hostA, err := synthesizeBlockSuggestion(bc, snippets)
+	if err != nil {
+		return err
+	}
+	if s.Note != "" {
+		fmt.Fprintf(os.Stderr, "note: %s\n", s.Note)
+		os.Exit(1)
+	}
+	diff, err := refactor.BuildPatchInsertAfter(hostA.Path, hostA.EndLine, s)
 	if err != nil {
 		return fmt.Errorf("build patch: %w", err)
 	}
@@ -818,8 +854,8 @@ type jsonPreview struct {
 // terminal renderer. When suggestions is non-nil, each pair's
 // suggested_patch field is populated by ID lookup. Non-zero suppressed
 // counts add a top-level `suppressed` summary object.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions map[string]jsonPatch, suppressed report.Suppressed) {
-	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones)}
+func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed) {
+	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones, blockSuggestions)}
 	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 || suppressed.TestTestBlocks > 0 {
 		out.Suppressed = &jsonSuppressed{
 			TestTestPairs:    suppressed.TestTestPairs,

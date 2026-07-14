@@ -30,6 +30,95 @@ func BuildPatch(pathA string, s Suggestion) (string, error) {
 	return buildAppendPatch(pathA, string(data), s.HelperSrc), nil
 }
 
+// BuildPatchInsertAfter produces a unified diff that inserts the
+// suggestion's HelperSrc into pathA right after the 1-based line
+// afterLine — block-mode --suggest uses it to land the helper directly
+// after the enclosing function instead of at end-of-file, so the
+// starter sits next to the code it was extracted from. When afterLine
+// reaches (or passes) the end of the file this degenerates to the
+// plain append patch. Returns ("", nil) when s.HelperSrc is empty
+// (rejection case) — callers should check Suggestion.Note instead.
+func BuildPatchInsertAfter(pathA string, afterLine int, s Suggestion) (string, error) {
+	if s.HelperSrc == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(pathA)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", pathA, err)
+	}
+	return buildInsertAfterPatch(pathA, string(data), s.HelperSrc, afterLine), nil
+}
+
+// buildInsertAfterPatch is BuildPatchInsertAfter's pure core: a single
+// hunk anchored on up to 3 lines of context on each side of the
+// insertion point, with a blank separator line before the helper (and
+// after it when the following line isn't already blank).
+func buildInsertAfterPatch(pathA, fileContent, helperSrc string, afterLine int) string {
+	trimmed := strings.TrimSuffix(fileContent, "\n")
+	var fileLines []string
+	if trimmed != "" {
+		fileLines = strings.Split(trimmed, "\n")
+	}
+	if afterLine >= len(fileLines) {
+		return buildAppendPatch(pathA, fileContent, helperSrc)
+	}
+	if afterLine < 0 {
+		afterLine = 0
+	}
+
+	preStart := afterLine - 3
+	if preStart < 0 {
+		preStart = 0
+	}
+	preCtx := fileLines[preStart:afterLine]
+	postEnd := afterLine + 3
+	if postEnd > len(fileLines) {
+		postEnd = len(fileLines)
+	}
+	postCtx := fileLines[afterLine:postEnd]
+
+	helperLines := strings.Split(strings.TrimRight(helperSrc, "\n"), "\n")
+	// Blank separator before the helper; another after it unless the
+	// next original line is already blank.
+	added := len(helperLines) + 1
+	trailingBlank := len(postCtx) > 0 && postCtx[0] != ""
+	if trailingBlank {
+		added++
+	}
+
+	hunkOldStart := preStart + 1
+	hunkOldLen := len(preCtx) + len(postCtx)
+	hunkNewStart := hunkOldStart
+	hunkNewLen := hunkOldLen + added
+
+	rel := strings.TrimPrefix(filepath.ToSlash(pathA), "/")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- a/%s\n", rel)
+	fmt.Fprintf(&b, "+++ b/%s\n", rel)
+	fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", hunkOldStart, hunkOldLen, hunkNewStart, hunkNewLen)
+	for _, l := range preCtx {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	b.WriteString("+\n")
+	for _, l := range helperLines {
+		b.WriteString("+")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	if trailingBlank {
+		b.WriteString("+\n")
+	}
+	for _, l := range postCtx {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // buildAppendPatch is BuildPatch's pure core: given the current file
 // content and the helper source, return a unified diff string that
 // appends the helper at the end of the file. Split out for testing

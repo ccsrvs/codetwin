@@ -15,10 +15,12 @@ What sets codetwin apart from other clone detectors:
 - **Git provenance** — annotate every match with when, by whom, and which
   endpoint is the original (`--blame`). Sort by introduction date with
   `--sort age` for "newest clones first".
-- **Refactor suggestions** — once a pair is identified, `--suggest <pair-id>`
+- **Refactor suggestions** — once a finding is identified, `--suggest <id>`
   emits a unified diff that adds a starter helper extracted from the matching
-  pair, with a comment block listing every divergence. Go and Python in v1;
-  pairs in other languages report a structured `note` so a follow-up emitter
+  pair *or partial-clone block*, with a comment block listing every
+  divergence. Block suggestions wrap the shared statement run in a fresh
+  helper (Go and Python), inserted right after the enclosing function.
+  Unsupported languages report a structured `note` so a follow-up emitter
   has a clear contract.
 - **Sub-function partial clones** — a copied block hiding inside two
   otherwise-unrelated functions is invisible to whole-function scoring
@@ -134,8 +136,8 @@ codetwin --suggest <pair-id> ./src
 | `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
-| `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair with the given 8-char ID. Go and Python in v1. |
-| `--suggest-all` | false | With `--json`: populate `suggested_patch` on every visible pair. |
+| `--suggest` | `""` | Print a unified diff that adds a starter helper for the pair or partial-clone block with the given 8-char ID. Pairs: all six languages; blocks: Go and Python. |
+| `--suggest-all` | false | With `--json`: populate `suggested_patch` on every visible pair and partial clone. |
 | `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
 | `--guide` | false | Print the report interpretation guide and exit |
 
@@ -328,6 +330,23 @@ the type block, so "class-level" there means struct+methodset symbol
 grouping — a possible follow-up, tracked in
 `docs/comparative-algorithms-review.md` §5.2, as is Elixir `defmodule`
 grouping.
+
+With `--preview` on, each side renders a line-numbered excerpt of its
+exact block range (capped by `--preview-lines`); in JSON the
+`previews` map gains entries keyed by each side's `file:start-end`
+range name, so block previews never collide with the whole-chunk
+preview of the same snippet.
+
+Partial clones are also `--suggest` targets: pass the finding's 8-char
+`id` from the JSON output and codetwin emits a unified diff that wraps
+side A's block in a fresh helper (`extractedBlock_<id>` in Go,
+`extracted_block_<id>` in Python), inserted right after the enclosing
+function. The helper is a literal copy of the block — parameters are
+left as a `TODO(codetwin)` comment listing the free identifiers the
+block uses (a lexical heuristic; the human finishes the extraction).
+Block suggestions ship for Go and Python; other languages print a
+`note:` and exit 1. `--suggest-all --json` fills `suggested_patch` on
+every visible partial clone under the same per-language scope.
 
 ## Test code segregation
 
@@ -720,6 +739,11 @@ codetwin --cross-lang-only --threshold 0.5 --preview ./
 # Triage: who introduced the freshest exact clone?
 codetwin --blame --sort age --threshold 0.95 --limit 1 --json ./src \
   | jq '.pairs[0] | {a:.file_a,b:.file_b,intro:.provenance_b.first_date,by:.provenance_b.first_author}'
+
+# See exactly which lines a partial clone covers, then get a starter helper
+codetwin --preview ./src                       # PARTIAL CLONES with excerpts
+codetwin --json ./src | jq '.partial_clones[0].id'
+codetwin --suggest <block-id> ./src > extract-block.diff
 ```
 
 ## Git-aware modes

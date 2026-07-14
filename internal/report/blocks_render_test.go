@@ -92,6 +92,63 @@ func TestRender_PartialClonesSection(t *testing.T) {
 	}
 }
 
+func TestBuildBlockPreview_SlicesExactRangeWithAbsoluteStart(t *testing.T) {
+	// Chunk starts at source line 10; block covers lines 12-14.
+	code := "func host() {\n\ta := 1\n\tb := 2\n\tuse(a, b)\n\treturn nil\n}\n"
+	pv := BuildBlockPreview(code, 10, 12, 14, 10)
+	if pv.StartLine != 12 {
+		t.Errorf("StartLine = %d, want 12", pv.StartLine)
+	}
+	if pv.Text != "\tb := 2\n\tuse(a, b)\n\treturn nil" {
+		t.Errorf("Text = %q", pv.Text)
+	}
+}
+
+func TestBuildBlockPreview_TruncatesToMaxLines(t *testing.T) {
+	code := "l1\nl2\nl3\nl4\nl5\n"
+	pv := BuildBlockPreview(code, 1, 1, 5, 2)
+	if pv.Text != "l1\nl2" || pv.StartLine != 1 {
+		t.Errorf("truncated preview = %+v", pv)
+	}
+	// maxLines <= 0 shows the whole block.
+	full := BuildBlockPreview(code, 1, 2, 4, 0)
+	if full.Text != "l2\nl3\nl4" || full.StartLine != 2 {
+		t.Errorf("unlimited preview = %+v", full)
+	}
+}
+
+func TestBuildBlockPreview_ClampsOutOfRange(t *testing.T) {
+	code := "l1\nl2\n"
+	pv := BuildBlockPreview(code, 5, 1, 99, 0)
+	if pv.Text != "l1\nl2" || pv.StartLine != 5 {
+		t.Errorf("clamped preview = %+v", pv)
+	}
+}
+
+func TestRender_PartialClonePreviews_RenderUnderEachSide(t *testing.T) {
+	b := mkBlock("orders.go", 120, 122, "ProcessOrders", "invoices.go", 88, 90, "SummarizeInvoices", 0.92, 3)
+	opts := Options{
+		Plain: true, Threshold: 0.5, PartialClones: []BlockClone{b},
+		Previews: map[string]Preview{
+			b.RangeNameA(): {StartLine: 120, Text: "alpha()\nbeta()\ngamma()"},
+			b.RangeNameB(): {StartLine: 88, Text: "alpha()\nbeta()\ngamma()"},
+		},
+	}
+	var sb strings.Builder
+	Render(&sb, nil, nil, opts)
+	out := sb.String()
+	for _, want := range []string{
+		" 120 │ alpha()",
+		" 122 │ gamma()",
+		"  88 │ alpha()",
+		"  90 │ gamma()",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered report missing preview line %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRender_NoBlocksNoSection(t *testing.T) {
 	var sb strings.Builder
 	Render(&sb, nil, nil, Options{Plain: true, Threshold: 0.5})

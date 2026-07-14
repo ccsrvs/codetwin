@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -176,6 +177,106 @@ func TestBlocks_TestTestSuppressedByDefault(t *testing.T) {
 	if !strings.Contains(string(term), "1 test↔test partial clone suppressed (--include-tests to show)") {
 		t.Errorf("terminal summary missing suppressed partial-clone line:\n%s", term)
 	}
+}
+
+// TestBlocks_PreviewRendersBlockRanges: contract (f) — with --preview
+// on, each PARTIAL CLONES side renders a line-numbered excerpt of its
+// matched block range with absolute line numbers. The verbatim-go
+// block starts at the fixture's line 12 on both sides; line 13 is the
+// first line of the shared validation run.
+func TestBlocks_PreviewRendersBlockRanges(t *testing.T) {
+	bin := subprocessBin(t)
+	out, err := exec.Command(bin, "--plain", "--preview", "--no-cache", "--no-progress",
+		"../../testdata/bench/blocks/positive/verbatim-go").Output()
+	if err != nil {
+		t.Fatalf("terminal run: %v\nstdout:\n%s", err, out)
+	}
+	text := string(out)
+	for _, want := range []string{
+		// Side A: absolute line numbers with the actual a.go content.
+		"12 │ func exportOrderRows(db *sql.DB, req *Request, out *strings.Builder) error {",
+		"13 │ \tif req == nil {",
+		"19 │ \tseen := make(map[string]bool, len(req.Items))",
+		// Side B: same block, b.go host.
+		"12 │ func dispatchJobs(req *Request, workers int, results chan<- Result) error {",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("preview output missing %q:\n%s", want, text)
+		}
+	}
+
+	// --preview-lines caps the excerpt: 3 lines per side means the
+	// block's line 15 (4th line) must not render.
+	capped, err := exec.Command(bin, "--plain", "--preview", "--preview-lines", "3",
+		"--no-cache", "--no-progress",
+		"../../testdata/bench/blocks/positive/verbatim-go").Output()
+	if err != nil {
+		t.Fatalf("capped run: %v\nstdout:\n%s", err, capped)
+	}
+	if !strings.Contains(string(capped), "14 │ \t\treturn errNilRequest") {
+		t.Errorf("capped preview missing line 14:\n%s", capped)
+	}
+	if strings.Contains(string(capped), "15 │ ") {
+		t.Errorf("--preview-lines 3 should stop before line 15:\n%s", capped)
+	}
+}
+
+// TestBlocks_JSONPreviewsUseRangeQualifiedKeys: in --json --preview
+// mode the previews map gains one entry per block endpoint, keyed by
+// the side's "file:start-end" range name so block previews can't
+// collide with whole-chunk previews of the same snippet.
+func TestBlocks_JSONPreviewsUseRangeQualifiedKeys(t *testing.T) {
+	bin := subprocessBin(t)
+	out, err := exec.Command(bin, "--json", "--preview", "--no-cache", "--no-progress",
+		"../../testdata/bench/blocks/positive/verbatim-go").Output()
+	if err != nil {
+		t.Fatalf("json run: %v\nstdout:\n%s", err, out)
+	}
+	var doc struct {
+		PartialClones []struct {
+			FileA      string `json:"file_a"`
+			StartLineA int    `json:"start_line_a"`
+			EndLineA   int    `json:"end_line_a"`
+			FileB      string `json:"file_b"`
+			StartLineB int    `json:"start_line_b"`
+			EndLineB   int    `json:"end_line_b"`
+		} `json:"partial_clones"`
+		Previews map[string]struct {
+			StartLine int    `json:"start_line"`
+			Text      string `json:"text"`
+		} `json:"previews"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, out)
+	}
+	if len(doc.PartialClones) != 1 {
+		t.Fatalf("expected 1 partial clone, got %d", len(doc.PartialClones))
+	}
+	pc := doc.PartialClones[0]
+	for _, key := range []string{
+		fmt.Sprintf("%s:%d-%d", pc.FileA, pc.StartLineA, pc.EndLineA),
+		fmt.Sprintf("%s:%d-%d", pc.FileB, pc.StartLineB, pc.EndLineB),
+	} {
+		pv, ok := doc.Previews[key]
+		if !ok {
+			t.Errorf("previews missing range-qualified key %q (have %v)", key, previewKeys(doc.Previews))
+			continue
+		}
+		if pv.StartLine != pc.StartLineA { // both sides start at the same fixture line
+			t.Errorf("preview %q start_line = %d, want %d", key, pv.StartLine, pc.StartLineA)
+		}
+		if !strings.Contains(pv.Text, "if req == nil {") {
+			t.Errorf("preview %q missing block content:\n%s", key, pv.Text)
+		}
+	}
+}
+
+func previewKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // TestBlocks_LimitApplies: --limit must cap the partial-clones list
