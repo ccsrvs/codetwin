@@ -46,6 +46,9 @@ const (
 	// report-noise proxy: at the default threshold, most unrelated
 	// pairs must fall below it.
 	noiseP95Max = 0.30
+	// defaultThreshold mirrors the CLI --threshold default: the score a
+	// pair must reach to appear in a default report.
+	defaultThreshold = 0.50
 
 	minLines = 3 // mirror the CLI default
 )
@@ -55,6 +58,14 @@ type benchCase struct {
 	dir      string
 	positive bool
 	minWant  float64 // for positives
+
+	// shortNegative marks sub-10-line noise pairs (API-forced token
+	// shapes, e.g. 4-line Elixir clauses) whose RAW combined score is
+	// allowed above negativeMax — real noise of this class scores ~0.60
+	// raw. Their contract is instead that the default-on length
+	// dampener (--min-confidence-lines 10) pushes them below the
+	// default report threshold.
+	shortNegative bool
 }
 
 // collectCases discovers labeled pairs: testdata/bench/{positive,negative}
@@ -83,6 +94,25 @@ func collectCases(t *testing.T) []benchCase {
 	}
 
 	addDir(filepath.Join(root, "bench", "negative"), false, 0)
+
+	// Short negatives: labeled noise pairs under 10 non-blank lines,
+	// asserted against the dampened score rather than the raw one.
+	shortBase := filepath.Join(root, "bench", "negative-short")
+	shortEntries, err := os.ReadDir(shortBase)
+	if err != nil {
+		t.Fatalf("read %s: %v", shortBase, err)
+	}
+	for _, e := range shortEntries {
+		if !e.IsDir() {
+			continue
+		}
+		cases = append(cases, benchCase{
+			name:          "negative-short/" + e.Name(),
+			dir:           filepath.Join(shortBase, e.Name()),
+			positive:      false,
+			shortNegative: true,
+		})
+	}
 	// Bench positives: crosslang-* pairs get the cross-language floor.
 	posBase := filepath.Join(root, "bench", "positive")
 	entries, err := os.ReadDir(posBase)
@@ -223,7 +253,25 @@ func TestBench_GroundTruth(t *testing.T) {
 			status = "FAIL(<" + fmtF(minWant) + ")"
 			failures++
 		}
-		if !c.positive && best.combined > negativeMax {
+		switch {
+		case c.shortNegative:
+			// Contract for short noise: the raw score is real report
+			// noise (it WOULD render at the default threshold — that's
+			// what makes the case meaningful), and the default-on
+			// dampener is what keeps it out of the default report.
+			dampened := similarity.LengthDampen(
+				best.combined, bestMinLines, bestMinLines,
+				similarity.DefaultMinConfidenceLines)
+			if best.combined < defaultThreshold {
+				status = "FAIL(raw<" + fmtF(defaultThreshold) + ": case no longer exercises the dampener)"
+				failures++
+			} else if dampened >= defaultThreshold {
+				status = "FAIL(dampened " + fmtF(dampened) + " >= " + fmtF(defaultThreshold) + ")"
+				failures++
+			} else {
+				status = "ok (dampened " + fmtF(dampened) + ")"
+			}
+		case !c.positive && best.combined > negativeMax:
 			status = "FAIL(>" + fmtF(negativeMax) + ")"
 			failures++
 		}

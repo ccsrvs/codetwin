@@ -11,7 +11,7 @@ shown as a label and a number. Bands use strict `>` thresholds:
 
 | Label | Score | What it usually means |
 |---|---|---|
-| EXACT CLONE | > 95% | Token-for-token equivalent (after the tokenizer's `VAR` / `STR` / `NUM` normalization). Almost certainly copy-paste. Extract a shared utility and delete one. |
+| EXACT CLONE | > 95% | Token-for-token equivalent (after the tokenizer's `VAR` / `STR` / `NUM` normalization). Almost certainly copy-paste. Extract a shared utility and delete one. Evidence-gated: both snippets must span ≥ 10 non-blank lines; a shorter pair renders as NEAR CLONE even at a perfect score, because tiny functions can share their whole token shape by API force alone. |
 | NEAR CLONE | > 85% | Virtually identical with one or two token-level edits (a swapped literal, a different default arg). Treat as a clone unless the difference is intentional. |
 | STRONG CLONE | > 65% | Same shape and most of the same structure, with substantive divergences. Parameterize the differing parts. |
 | REFACTOR TARGET | > 45% | Same general approach to the same problem, with real differences in execution. Evaluate whether a shared abstraction reduces duplication; sometimes "no" is the right answer. |
@@ -44,7 +44,7 @@ Reading the combinations:
 | structural ≈ semantic, both high | Real clone. Same tokens, same order. |
 | structural high, semantic low | Rare. Short snippets where order matters but the token bag differs. |
 | structural low, semantic high | "Functionally similar but written differently" — same problem, different shape. Often the most interesting refactor target, less interesting as a literal clone. |
-| both moderate | Usually noise from shared idioms — test scaffolding, lifecycle methods. `--min-confidence-lines` exists to demote these. |
+| both moderate | Usually noise from shared idioms — test scaffolding, lifecycle methods. The default `--min-confidence-lines 10` dampener demotes the short ones; raise it to demote more. |
 
 ## Clusters, relations, and pairs
 
@@ -79,19 +79,27 @@ machine consumers see every pair regardless.
 - `--threshold N` filters which pairs are *reported*. Doesn't change the math, just hides anything below.
 - `--min-confidence-lines N` dampens the combined `Score` for short
   snippets (multiplier ramps linearly from 0.5× at 0 lines to 1.0× at
-  N lines). The dampener is applied **once, at the scoring layer** —
-  before the score reaches the matrix that DBSCAN clusters from and
-  before the threshold filter. Practical consequences:
-  - Two 5-line snippets that look identical earn ~60-65% instead of 100%,
-    reflecting how little evidence five lines of overlap actually carries.
+  N lines). **On by default with N = 10**; pass `0` to turn it off.
+  The dampener is applied **once, at the scoring layer** — before the
+  score reaches the matrix that DBSCAN clusters from and before the
+  threshold filter. Practical consequences:
+  - Two 5-line snippets that look identical earn 75% instead of 100%
+    at the default N, reflecting how little evidence five lines of
+    overlap actually carries; a 4-line shape-coincidence at 60% raw
+    drops to 42% and out of the default report.
   - **Cluster membership respects the dampener too.** A short-snippet
     match that drops below the eps boundary doesn't get clustered. So
-    setting `--min-confidence-lines 20` doesn't just demote tiny pairs
-    in the report — it dissolves clusters built on tiny-snippet noise.
+    the dampener doesn't just demote tiny pairs in the report — it
+    dissolves clusters built on tiny-snippet noise.
   - The `structural` and `semantic` sub-scores stay raw. Only the
     combined `Score` (and the matrix DBSCAN sees) is adjusted.
   - `min(LinesA, LinesB) ≥ N` snippets are unaffected (multiplier 1.0×).
-- `--verbose` includes weak similarities in addition to the labelled tiers.
+- Separately from the score, the EXACT CLONE **label** requires
+  `min(LinesA, LinesB) ≥ 10`; shorter pairs demote one band to NEAR
+  CLONE. Terminal and JSON labels always agree.
+- `--verbose` includes weak similarities in addition to the labelled
+  tiers. For memory reasons pairs are only materialized down to
+  `max(0.30, threshold − 0.20)`, so even `--verbose` bottoms out there.
 - `--eps` only affects clusters. Stricter eps means tighter clusters with fewer members each.
 
 ## Things the score can't see (and judgment calls you still own)

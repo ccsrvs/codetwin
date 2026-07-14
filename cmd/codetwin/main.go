@@ -77,7 +77,7 @@ func main() {
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
 	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name | age | age-asc (age modes require --blame)")
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
-	minConfLines := flag.Int("min-confidence-lines", 0, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
+	minConfLines := flag.Int("min-confidence-lines", similarity.DefaultMinConfidenceLines, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
@@ -311,14 +311,15 @@ func main() {
 		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
 	matrix, pairs := similarity.BuildMatrix(
-		snippets, vectors, *minConfLines,
+		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
 	)
 	if matrixProgStop != nil {
 		close(matrixProgStop)
 		matrixProgWg.Wait()
 	}
-	debugf("similarity.BuildMatrix: %d pairs above noise floor", len(pairs))
+	debugf("similarity.BuildMatrix: %d pairs above materialization floor (%.2f)",
+		len(pairs), similarity.MaterializationFloor(*threshold))
 
 	if pairIgnoreMatcher != nil {
 		var ignored int
@@ -395,7 +396,9 @@ func main() {
 	// --suggest <pair-id> short-circuits the rest of the report. We
 	// look up across all materialized pairs (not just visiblePairs) so
 	// the user can target a sub-threshold pair without having to
-	// re-tune --threshold.
+	// re-tune --threshold. Materialization reaches down to
+	// similarity.MaterializationFloor(threshold) — a 0.20 band below
+	// the threshold (never below 0.30).
 	if *suggest != "" {
 		if showProgress {
 			fmt.Fprint(os.Stderr, "\r\033[K")
@@ -691,7 +694,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 			ID:    p.ID,
 			FileA: p.NameA, FileB: p.NameB,
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
-			Label: report.JSONLabel(p.Score),
+			Label: report.JSONLabel(p),
 			LangA: p.LangA, LangB: p.LangB,
 			ProvenanceA: toJSONProvenance(p.ProvenanceA),
 			ProvenanceB: toJSONProvenance(p.ProvenanceB),
@@ -1074,7 +1077,8 @@ FLAGS:
   --limit int          show only the top N pairs and N clusters (0 = no limit)
   --flat               list every pair individually; by default pairs inside a
                        cluster render once as the cluster (families first)
-  --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off)
+  --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N
+                       (default 10; 0 = off)
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
@@ -1104,6 +1108,10 @@ SCORING:
   > 65%%  Strong clone      — parameterize differing parts
   > 45%%  Refactor target   — evaluate shared abstraction
   < 45%%  Weak similarity   — probably coincidental
+
+  The Exact clone label additionally requires both snippets to span at
+  least 10 non-blank lines; shorter pairs render as Near clones even at
+  a perfect score (the score itself is unchanged).
 
   Run 'codetwin --guide' for a full explanation of the score, the
   structural/semantic split, and how clusters differ from pairs.

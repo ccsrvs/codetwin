@@ -116,7 +116,7 @@ codetwin --suggest <pair-id> ./src
 | `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
 | `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
-| `--min-confidence-lines` | `0` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). See [Scoring](#scoring). |
+| `--min-confidence-lines` | `10` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). On by default. See [Scoring](#scoring). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
@@ -140,6 +140,12 @@ codetwin --suggest <pair-id> ./src
 | > 45% | Refactor target | Evaluate shared abstraction |
 | < 45% | Weak similarity | Probably coincidental |
 
+The "Exact clone" label is additionally evidence-gated: it requires both
+snippets to span at least 10 non-blank lines. A shorter pair renders as
+a near clone even at a perfect score (the numeric score is unchanged —
+only the label demotes), because two tiny functions can share their
+entire token shape by API force alone.
+
 Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF
 over token trigrams)` for same-language pairs. Cross-language pairs use
 `0.2 × structural + 0.8 × semantic`: winnowing fingerprints hash raw keyword
@@ -153,18 +159,21 @@ pairs differ from clusters, run `codetwin --guide`.
 ### Short-snippet confidence
 
 Two 5-line snippets that share their entire token shape and two 25-line
-snippets that do the same both score 100%, but the first is much weaker
-evidence — short snippets are forced into a shared shape by their API
-surface (e.g. test scaffolding that has to call one function and assert
-on the result). `--min-confidence-lines N` opts into a length-aware
-dampener: the combined score is multiplied by `0.5 + 0.5 · min(LinesA, LinesB) / N`
-(capped at 1.0), so matches under N non-blank lines lose proportional
-score. The dampener is applied once at the scoring layer, so it also
-affects DBSCAN cluster boundaries — short-snippet matches that drop
-below the eps threshold don't cluster. A common starting point is
-`--min-confidence-lines 20` — enough to push test boilerplate out of
-the "exact clone" bucket while leaving real multi-line refactor
-targets unaffected.
+snippets that do the same both score identically, but the first is much
+weaker evidence — short snippets are forced into a shared shape by
+their API surface (e.g. test scaffolding that has to call one function
+and assert on the result). `--min-confidence-lines N` is a length-aware
+dampener, **on by default at N = 10**: the combined score is multiplied
+by `0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0), so matches
+under N non-blank lines lose proportional score. At the default, a
+10-line exact clone keeps its full 100% score, while a 4-line
+shape-coincidence scoring 60% raw dampens to 42% and drops below the
+default threshold. The dampener is applied once at the scoring layer,
+so it also affects DBSCAN cluster boundaries — short-snippet matches
+that drop below the eps threshold don't cluster. Raise it (e.g.
+`--min-confidence-lines 20`) to push more test boilerplate out of the
+report, or pass `--min-confidence-lines 0` to turn it off and restore
+raw scores.
 
 ## Sorting
 
@@ -426,7 +435,7 @@ go test -run TestNormalize # single test by name
 
  SIMILARITY PAIRS
 
-  [EXACT CLONE     ]  100%
+  [STRONG CLONE    ]   85%
     src/utils/sum.go:3-9 SumSlice
          3 │ func SumSlice(nums []int) int {
          4 │     total := 0
@@ -454,11 +463,18 @@ go test -run TestNormalize # single test by name
  SUMMARY
 ────────────────────────────────────────────────────────────
   Pairs shown       1
-  Exact clones      1
-  Strong clones     0
+  Exact clones      0
+  Strong clones     1
   Refactor targets  0
   Clusters found    1
 ```
+
+The two functions are token-identical (structural and semantic both
+100%), but at 7 non-blank lines each the default short-snippet dampener
+(`--min-confidence-lines 10`) scales the combined score to 85%. Run
+with `--min-confidence-lines 0` to see the raw 100% — it would render
+as a NEAR CLONE, since the EXACT CLONE label needs ≥ 10 non-blank
+lines on both sides.
 
 ## Recipes
 
@@ -469,8 +485,11 @@ codetwin --sort size --limit 5 --preview ./src
 # Triage borderline cases — pairs that ALMOST cleared the threshold
 codetwin --sort score-asc --threshold 0.40 ./src
 
-# Suppress noisy short-snippet matches (test boilerplate, tiny wrappers)
+# Suppress MORE short-snippet noise than the default dampener (N=10) does
 codetwin --min-confidence-lines 20 --threshold 0.50 ./src
+
+# See raw, undampened scores (short-snippet dampening off)
+codetwin --min-confidence-lines 0 ./src
 
 # Strict CI gate — fail if any exact clones exist
 codetwin --json --threshold 0.85 ./src | jq '.pairs | length' \
