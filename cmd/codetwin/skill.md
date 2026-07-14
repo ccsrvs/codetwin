@@ -64,6 +64,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
 | Suggest a refactor (Go) | `codetwin --suggest <pair-id> <path>` |
 | Suggest for every visible pair (JSON) | `codetwin --suggest-all --json <path>` |
+| Extract a partial-clone block into a helper (Go/Python) | `codetwin --suggest <block-id> <path>` |
+| Preview partial-clone block ranges inline | `codetwin --preview <path>` |
 
 ### All flags
 
@@ -102,10 +104,12 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --blame                 annotate findings with git provenance (when introduced, by whom,
                         last touched). Pairs --sort=age for "newest clones first".
 --suggest string        print a unified diff that adds a starter helper extracted from the
-                        matching pair (look up the 8-char pair ID in --json output). v1
-                        supports Go, Python, and Java; other languages print a 'note'
+                        matching pair or partial-clone block (look up the 8-char ID in
+                        --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir;
+                        blocks: Go and Python. Other languages print a 'note'
                         explaining why.
 --suggest-all           with --json: populate `suggested_patch` on every visible pair
+                        and partial clone
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
@@ -209,8 +213,29 @@ with `@impl`, Phoenix-style multi-line headers, multi-clause pattern-
 matched defs, and `defmacro` DSL builders.
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
-pair, so a single run produces machine-readable suggestions across the
-whole report.
+pair *and* every visible partial clone, so a single run produces
+machine-readable suggestions across the whole report.
+
+#### Partial-clone (block) suggestions
+
+`--suggest` also accepts a partial clone's `id` from the
+`partial_clones` JSON array. The block is a statement run, not a
+function, so the emitter wraps side A's block span in a fresh helper —
+`extractedBlock_<id>` (Go) or `extracted_block_<id>` (Python) — and
+inserts it right after the enclosing function. Parameters are not
+inferred: a `TODO(codetwin)` comment lists the free identifiers the
+block appears to use; finish the extraction by hand (or as the skill
+consumer). Block-mode ships for Go and Python; other languages print a
+`note:` and exit 1.
+
+```bash
+# 1. Discover block IDs.
+codetwin --json <path> | jq '.partial_clones[]? | {id, symbol_a, symbol_b}'
+
+# 2. Emit the starter helper for one block.
+codetwin --suggest <block-id> <path> > extract-block.diff
+git apply --check extract-block.diff
+```
 
 ### Sorting and limiting results
 
@@ -415,6 +440,12 @@ consumers can render snippets without re-reading the source:
 ```bash
 codetwin --json --preview --threshold 0.50 <path> | jq '.previews'
 ```
+
+Partial clones preview too: each PARTIAL CLONES side renders its exact
+matched block range (absolute line numbers, capped by
+`--preview-lines`). In JSON these previews are keyed by the side's
+range name — `file:start-end` of the *block*, not the chunk — so they
+never collide with a whole-chunk preview of the same snippet.
 
 ## Supported languages
 

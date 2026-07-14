@@ -159,9 +159,30 @@ them; `--limit` caps them; `--min-block-lines 0` turns the channel off.
 Test↔test partial clones are suppressed by default like test↔test
 pairs (see below).
 
+With `--preview` on, each side shows a line-numbered excerpt of its
+exact block range (the numbers are absolute source lines, capped by
+`--preview-lines`), so you can read the duplicated lines without
+opening either file:
+
+```
+  [PARTIAL CLONE   ]  92% contained · 15 lines
+    orders.go:120-134 ⊂ ProcessOrders
+       120 │ 	seen := make(map[string]bool, len(req.Items))
+       121 │ 	for _, item := range req.Items {
+       ...
+```
+
 Acting on one is usually the easiest refactor in the report: the block
 is contiguous on both sides, so extract it into a helper and call it
-from both hosts.
+from both hosts. `--suggest <id>` (the finding's 8-char `id` in the
+JSON output) does the first step for you: it emits a unified diff that
+wraps side A's block in a fresh helper — `extractedBlock_<id>` in Go,
+`extracted_block_<id>` in Python — inserted right after the enclosing
+function. The helper body is a literal copy of the block; parameters
+are not inferred (a `TODO(codetwin)` comment lists the free
+identifiers the block appears to use, and the human finishes the
+extraction). Block suggestions ship for Go and Python; other languages
+print a `note:` on stderr and exit 1.
 
 ## Test code segregation (default)
 
@@ -271,9 +292,13 @@ a git-dependent feature, so silent fallback would hide the real problem.
 
 ## Refactor suggestions
 
-`--suggest <pair-id>` emits a unified diff that *adds* a starter
-helper to the file containing snippet A. The helper is a literal copy
-of A's body, prefaced by a `Divergences (B vs A):` comment block
+`--suggest <id>` emits a unified diff that *adds* a starter helper to
+the file containing snippet A. The ID may name a pair or a partial
+clone — both carry stable 8-char IDs in the JSON output, and pairs win
+the (astronomically unlikely) collision. For a pair the helper is a
+literal copy of A's body; for a partial clone it is A's block span
+wrapped in a fresh helper signature (see the PARTIAL CLONES section).
+Either way it's prefaced by a `Divergences (B vs A):` comment block
 listing exactly what differs (`//` for Go, `#` for Python). Codetwin
 doesn't rewrite the call sites — it plants a starting point so a human
 (or the Claude skill) can finish the extraction with full visibility
@@ -318,6 +343,13 @@ A few things worth knowing:
   form and shorthand-vs-block style and ALWAYS carries a `# NOTE:
   appended at file scope; Elixir defs must live inside a defmodule…`
   comment, since Elixir cannot have free-standing defs.
+- **Partial-clone (block) coverage.** Block suggestions ship for Go
+  and Python only. The block is a statement run, not a function, so
+  the emitter wraps it in a fresh signature with no parameters and a
+  `TODO(codetwin)` comment listing the block's free identifiers
+  (lexical heuristic — package names may appear; full inference is out
+  of scope). The diff inserts the helper right after side A's
+  enclosing function instead of at end-of-file.
 
 ## A note on config
 
