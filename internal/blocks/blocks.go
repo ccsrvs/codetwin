@@ -24,12 +24,12 @@
 //     across the whole function.
 //  4. Verify: a chain (or contiguous subchain) is promoted to a Match
 //     only when its containment — matched tokens over the smaller
-//     side's total span tokens — reaches MinContainment, and the
-//     spanned block has at least minBlockLines non-blank lines on BOTH
-//     sides. Boilerplate runs (err-check chains, logging blocks) fail
-//     one bar or the other: either their matched span is mostly
-//     divergent filler (low containment) or the truly-identical run is
-//     too short (line floor).
+//     side's total span tokens — reaches MinContainment, and at least
+//     minBlockLines source lines carry matched tokens on BOTH sides.
+//     Boilerplate runs (err-check chains, logging blocks) fail one bar
+//     or the other: either their matched span is mostly divergent
+//     filler (low containment) or the truly-identical run is too short
+//     (line floor).
 //
 // All functions are pure; detection runs per candidate pair with no
 // shared state, so callers may parallelize freely.
@@ -43,10 +43,10 @@ import (
 )
 
 const (
-	// DefaultMinBlockLines is the default --min-block-lines value: a
-	// block must span at least this many non-blank lines on BOTH sides
-	// to be reported. Mirrors the review §5.3 band (~8–10) at the
-	// permissive end pinned by the bench contract.
+	// DefaultMinBlockLines is the default --min-block-lines value: at
+	// least this many source lines must carry matched tokens on BOTH
+	// sides for a block to be reported. Mirrors the review §5.3 band
+	// (~8–10) at the permissive end pinned by the bench contract.
 	DefaultMinBlockLines = 8
 
 	// MinContainment is the verification floor: the fraction of the
@@ -87,7 +87,7 @@ type Match struct {
 
 // Detect finds verified block clones between two snippets. It returns
 // only matches that survive exact-token verification (containment ≥
-// MinContainment) and the minBlockLines non-blank-line floor on BOTH
+// MinContainment) and the minBlockLines matched-line floor on BOTH
 // sides; overlapping and nested candidates are deduplicated down to
 // the maximal non-overlapping set. minBlockLines <= 0 disables
 // detection entirely. The result is deterministic for given inputs.
@@ -320,18 +320,67 @@ type candidate struct {
 	matched int
 }
 
+// chainLineCounts precomputes, for one side of a chain, the prefix
+// sums needed to answer "how many distinct source lines carry matched
+// tokens in subchain i..j" in O(1): distinct[i] is segment i's own
+// distinct-line count and boundary[i] is 1 when segment i starts on
+// the same line segment i−1 ended on (so the union count subtracts the
+// double-counted boundary line). Token positions increase along a
+// chain and a token's line is nondecreasing in its position, so the
+// union over i..j is exactly Σdistinct − Σboundary.
+func chainLineCounts(lines []int, chain []segment, start func(segment) int, end func(segment) int) (distinctPrefix, boundaryPrefix []int) {
+	n := len(chain)
+	distinctPrefix = make([]int, n+1)
+	boundaryPrefix = make([]int, n+1)
+	prevLast := -1
+	for i, seg := range chain {
+		first, last := start(seg), end(seg)
+		if last >= len(lines) {
+			last = len(lines) - 1
+		}
+		distinct := 0
+		cur := -1
+		for t := first; t <= last; t++ {
+			if lines[t] != cur {
+				distinct++
+				cur = lines[t]
+			}
+		}
+		distinctPrefix[i+1] = distinctPrefix[i] + distinct
+		boundaryPrefix[i+1] = boundaryPrefix[i]
+		if i > 0 && first < len(lines) && lines[first] == prevLast {
+			boundaryPrefix[i+1]++
+		}
+		prevLast = lines[last]
+	}
+	return distinctPrefix, boundaryPrefix
+}
+
 // bestSubchain scans every contiguous subchain of a chain and returns
 // the best one that passes verification: containment ≥ MinContainment
-// and ≥ minBlockLines non-blank lines on both sides. "Best" is the
-// most matched tokens (ties: higher containment, then smaller span,
-// then earliest start), so a chain that sprawled into nearby
-// coincidental segments is trimmed back to the region that actually
-// verifies rather than rejected outright.
+// and ≥ minBlockLines matched lines on both sides. The line floor
+// counts source lines that actually CARRY matched tokens — not the
+// lines merely spanned — so a multi-line string literal (one STR token
+// attributed to its opening line) contributes one line of evidence, no
+// matter how many source lines it spans; without this, test files
+// whose scaffolding wraps big raw-string fixtures flood the report
+// with 15-"line" matches that share only a few real statements.
+// "Best" is the most matched tokens (ties: higher containment, then
+// smaller span, then earliest start), so a chain that sprawled into
+// nearby coincidental segments is trimmed back to the region that
+// actually verifies rather than rejected outright.
 func bestSubchain(sa, sb side, chain []segment, minBlockLines int) (candidate, bool) {
 	n := len(chain)
 	prefix := make([]int, n+1)
 	for i, s := range chain {
 		prefix[i+1] = prefix[i] + s.length
+	}
+	aDist, aBound := chainLineCounts(sa.snip.Lines, chain,
+		func(s segment) int { return s.aStart }, func(s segment) int { return s.aEnd() })
+	bDist, bBound := chainLineCounts(sb.snip.Lines, chain,
+		func(s segment) int { return s.bStart }, func(s segment) int { return s.bEnd() })
+	matchedLines := func(distinct, boundary []int, i, j int) int {
+		return (distinct[j+1] - distinct[i]) - (boundary[j+1] - boundary[i+1])
 	}
 	var best candidate
 	found := false
@@ -351,11 +400,12 @@ func bestSubchain(sa, sb side, chain []segment, minBlockLines int) (candidate, b
 			if cont < MinContainment {
 				continue
 			}
-			aStartLn, aEndLn, aNB := sa.span(chain[i].aStart, chain[j].aEnd())
-			bStartLn, bEndLn, bNB := sb.span(chain[i].bStart, chain[j].bEnd())
-			if aNB < minBlockLines || bNB < minBlockLines {
+			if matchedLines(aDist, aBound, i, j) < minBlockLines ||
+				matchedLines(bDist, bBound, i, j) < minBlockLines {
 				continue
 			}
+			aStartLn, aEndLn, aNB := sa.span(chain[i].aStart, chain[j].aEnd())
+			bStartLn, bEndLn, bNB := sb.span(chain[i].bStart, chain[j].bEnd())
 			c := candidate{
 				Match: Match{
 					AStartLine: aStartLn, AEndLine: aEndLn,

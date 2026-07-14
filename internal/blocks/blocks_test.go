@@ -183,6 +183,29 @@ func TestDetect_WideDivergenceDoesNotChain(t *testing.T) {
 	}
 }
 
+func TestDetect_MultiLineStringsDontInflateTheLineFloor(t *testing.T) {
+	// Test-file shape: a few scaffolding statements wrapping a big
+	// multi-line raw string. The string is ONE token attributed to its
+	// opening line, so although the identical scaffolding SPANS 14+
+	// source lines, only ~5 lines carry matched tokens — below the
+	// 8-line floor. Without the matched-line floor this shape floods
+	// self-scans with hundreds of test↔test "blocks".
+	mk := func(fixture string) scan.Snippet {
+		return snippetFrom(t, "func TestSomething(t *testing.T) {\n"+
+			"\tcode := `"+fixture+"`\n"+
+			"\tgot := Split(\"a.go\", code)\n"+
+			"\tif len(got) != 1 {\n"+
+			"\t\tt.Fatalf(\"got %d chunks\", len(got))\n"+
+			"\t}\n"+
+			"}")
+	}
+	a := mk("package main\n\ntype Server struct {\n\tHandler func(http.ResponseWriter)\n}\n\nfunc Real() {\n\tx := 1\n\t_ = x\n}")
+	b := mk("defmodule Controller do\n  def update(conn, params) do\n    user = Repo.get(User, id)\n    redirect(conn)\n  end\n\n  def index(conn, _), do: render(conn)\nend")
+	if got := Detect(a, b, 8); len(got) != 0 {
+		t.Errorf("Detect = %d matches, want 0 (only ~5 lines carry matched tokens): %+v", len(got), got)
+	}
+}
+
 func TestDetect_Deterministic(t *testing.T) {
 	a := snippetFrom(t, `func hostA(cfg *Config, w io.Writer) error {
 `+sharedBlock+`

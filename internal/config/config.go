@@ -59,6 +59,11 @@ type Defaults struct {
 
 	MinConfidenceLines *int `json:"min_confidence_lines,omitempty"`
 
+	// MinBlockLines sets the sub-function partial-clone floor (blocks
+	// must span at least N non-blank lines on both sides; 0 disables
+	// block detection). Mirrors the --min-block-lines CLI flag.
+	MinBlockLines *int `json:"min_block_lines,omitempty"`
+
 	// IncludeTests restores test↔test pairs and test-only clusters to
 	// the report (they are suppressed by default). Mirrors the
 	// --include-tests CLI flag.

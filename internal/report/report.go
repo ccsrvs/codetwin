@@ -99,12 +99,55 @@ type Cluster struct {
 }
 
 // Suppressed counts findings dropped by the default test-code
-// segregation: test↔test pairs and clusters whose members are all test
-// snippets. Counted after threshold filtering, so the numbers describe
-// findings that would otherwise have rendered.
+// segregation: test↔test pairs, clusters whose members are all test
+// snippets, and test↔test partial clones. Counted after threshold
+// filtering, so the numbers describe findings that would otherwise
+// have rendered.
 type Suppressed struct {
 	TestTestPairs    int
 	TestOnlyClusters int
+	TestTestBlocks   int
+}
+
+// BlockClone is one sub-function partial-clone finding (review §5.3):
+// a shared block of code detected inside two functions whose overall
+// pair score sat below the report threshold. Unlike a Pair it carries
+// real line ranges — the block, not the enclosing chunk — and its
+// quality bar is Containment (the fraction of the smaller side's block
+// tokens exactly matched on the other side), not the combined score,
+// so Options.Threshold never filters it.
+type BlockClone struct {
+	// ID is a stable, order-invariant 8-char digest of the two range
+	// names ("file:start-end"), following the Pair ID convention.
+	ID string
+
+	FileA                string // display path of side A's file (as scanned)
+	SymbolA              string // enclosing chunk's symbol, may be empty
+	AStartLine, AEndLine int    // 1-based line range of the block in file A
+
+	FileB                string
+	SymbolB              string
+	BStartLine, BEndLine int
+
+	Containment    float64
+	LinesA, LinesB int // non-blank lines of the block on each side
+
+	IsTestA, IsTestB bool
+
+	// PathA / PathB are the absolute paths of the two files, carried
+	// for --since diff filtering. Never rendered.
+	PathA, PathB string
+}
+
+// RangeNameA returns side A's "file:start-end" range name, the unit
+// the BlockClone ID is derived from.
+func (b BlockClone) RangeNameA() string {
+	return fmt.Sprintf("%s:%d-%d", b.FileA, b.AStartLine, b.AEndLine)
+}
+
+// RangeNameB is RangeNameA for side B.
+func (b BlockClone) RangeNameB() string {
+	return fmt.Sprintf("%s:%d-%d", b.FileB, b.BStartLine, b.BEndLine)
 }
 
 // Preview is a code excerpt to display under a pair or cluster member.
@@ -230,6 +273,12 @@ type Options struct {
 	// Previews, when non-nil, maps a snippet name to a code excerpt with its
 	// originating start line. Entries with empty Text are skipped.
 	Previews map[string]Preview
+
+	// PartialClones are the block-level findings to render in the
+	// PARTIAL CLONES section, already prepared via PrepareBlocks
+	// (test-suppressed, sorted, limited). Options.Threshold does not
+	// apply to them — containment is their quality bar.
+	PartialClones []BlockClone
 }
 
 // ANSI color codes
@@ -298,6 +347,50 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster,
 	visiblePairs = sortAndLimit(visiblePairs, pairLessFunc(opts.Sort), opts.Limit)
 	visibleClusters = sortAndLimit(visibleClusters, clusterLessFunc(opts.Sort), opts.Limit)
 	return visiblePairs, visibleClusters, sup
+}
+
+// PrepareBlocks applies the report pipeline to block-clone findings:
+// suppress test↔test blocks (unless Options.IncludeTests), order by
+// containment (descending; ties by size then range names so output is
+// deterministic), then cap at Options.Limit. Options.Threshold is
+// deliberately NOT applied — a block finding's quality bar is its
+// containment, which the detector already enforced. Returns the
+// visible blocks and the count suppressed by test segregation.
+func PrepareBlocks(blocks []BlockClone, opts Options) ([]BlockClone, int) {
+	suppressed := 0
+	visible := make([]BlockClone, 0, len(blocks))
+	for _, b := range blocks {
+		if !opts.IncludeTests && b.IsTestA && b.IsTestB {
+			suppressed++
+			continue
+		}
+		visible = append(visible, b)
+	}
+	visible = sortAndLimit(visible, blockLess, opts.Limit)
+	return visible, suppressed
+}
+
+// blockLess orders block clones best-first: higher containment, then
+// bigger block (min-side non-blank lines), then range names.
+func blockLess(a, b BlockClone) bool {
+	if a.Containment != b.Containment {
+		return a.Containment > b.Containment
+	}
+	am, bm := minInt(a.LinesA, a.LinesB), minInt(b.LinesA, b.LinesB)
+	if am != bm {
+		return am > bm
+	}
+	if ra, rb := a.RangeNameA(), b.RangeNameA(); ra != rb {
+		return ra < rb
+	}
+	return a.RangeNameB() < b.RangeNameB()
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // sortAndLimit returns up to `limit` items in the order defined by `less`
@@ -374,10 +467,11 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	// whether the input was raw or already prepared.
 	sup.TestTestPairs += opts.Suppressed.TestTestPairs
 	sup.TestOnlyClusters += opts.Suppressed.TestOnlyClusters
+	sup.TestTestBlocks += opts.Suppressed.TestTestBlocks
 
 	printHeader(w, opts)
 
-	if len(visiblePairs) == 0 && len(visibleClusters) == 0 {
+	if len(visiblePairs) == 0 && len(visibleClusters) == 0 && len(opts.PartialClones) == 0 {
 		fmt.Fprintf(w, "\n%s  No similarities found above threshold %.0f%%%s\n",
 			color(green, opts), opts.Threshold*100, color(reset, opts))
 		printSuppressed(w, sup, opts)
@@ -388,6 +482,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	if opts.Flat {
 		printPairs(w, visiblePairs, opts)
 		printClusters(w, visibleClusters, opts)
+		printPartialClones(w, opts.PartialClones, opts)
 		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, sup, opts)
 		return
 	}
@@ -398,6 +493,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	if len(shownPairs) > 0 {
 		printPairs(w, shownPairs, opts)
 	}
+	printPartialClones(w, opts.PartialClones, opts)
 	crossCollapsed := 0
 	for _, r := range relations {
 		crossCollapsed += r.Count
@@ -701,6 +797,38 @@ func printPreview(w io.Writer, name string, opts Options) {
 	}
 }
 
+// printPartialClones renders the block-level findings section. Each
+// finding shows the containment score, the block's line ranges in both
+// files, and (when known) the enclosing function of each side.
+func printPartialClones(w io.Writer, blocks []BlockClone, opts Options) {
+	if len(blocks) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "%s%s PARTIAL CLONES%s\n\n",
+		color(bold, opts), color(white, opts), color(reset, opts))
+	for _, b := range blocks {
+		fmt.Fprintf(w, "  %s%s[PARTIAL CLONE   ]%s  %s%3.0f%% contained%s · %d lines\n",
+			color(orange, opts), color(bold, opts), color(reset, opts),
+			color(orange, opts), b.Containment*100, color(reset, opts),
+			minInt(b.LinesA, b.LinesB))
+		printBlockSide(w, b.RangeNameA(), b.SymbolA, opts)
+		printBlockSide(w, b.RangeNameB(), b.SymbolB, opts)
+		fmt.Fprintln(w)
+	}
+}
+
+// printBlockSide renders one side of a partial clone as
+// "file:start-end ⊂ EnclosingFunc" (the ⊂ suffix only when the
+// enclosing chunk has a symbol).
+func printBlockSide(w io.Writer, rangeName, symbol string, opts Options) {
+	container := ""
+	if symbol != "" {
+		container = fmt.Sprintf(" %s⊂ %s%s", color(grey, opts), symbol, color(reset, opts))
+	}
+	fmt.Fprintf(w, "  %s  %s%s%s%s\n",
+		color(grey, opts), color(cyan, opts), rangeName, color(reset, opts), container)
+}
+
 func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 	if len(clusters) == 0 {
 		return
@@ -800,6 +928,11 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 	}
 	fmt.Fprintf(w, "  %sClusters found%s    %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(green, opts), len(clusters), color(reset, opts))
+	if len(opts.PartialClones) > 0 {
+		fmt.Fprintf(w, "  %sPartial clones%s    %s%d%s %s(sub-function blocks; see PARTIAL CLONES)%s\n",
+			color(grey, opts), color(reset, opts), color(orange, opts), len(opts.PartialClones), color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
 	printSuppressed(w, sup, opts)
 	fmt.Fprintln(w)
 }
@@ -817,6 +950,11 @@ func printSuppressed(w io.Writer, sup Suppressed, opts Options) {
 		fmt.Fprintf(w, "  %s%s test-only %s suppressed (--include-tests to show)%s\n",
 			color(grey, opts), groupDigits(sup.TestOnlyClusters),
 			plural(sup.TestOnlyClusters, "cluster", "clusters"), color(reset, opts))
+	}
+	if sup.TestTestBlocks > 0 {
+		fmt.Fprintf(w, "  %s%s test↔test partial %s suppressed (--include-tests to show)%s\n",
+			color(grey, opts), groupDigits(sup.TestTestBlocks),
+			plural(sup.TestTestBlocks, "clone", "clones"), color(reset, opts))
 	}
 }
 

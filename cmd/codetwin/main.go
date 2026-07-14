@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
@@ -78,6 +79,7 @@ func main() {
 	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name | age | age-asc (age modes require --blame)")
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
 	minConfLines := flag.Int("min-confidence-lines", similarity.DefaultMinConfidenceLines, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
+	minBlockLines := flag.Int("min-block-lines", blocks.DefaultMinBlockLines, "report sub-function partial clones (shared blocks inside below-threshold pairs) spanning at least N non-blank lines on both sides; 0 disables block detection")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
@@ -137,7 +139,8 @@ func main() {
 		applied := flagsExplicitlySet()
 		applyConfigDefaults(cfg.Defaults, applied,
 			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
-			preview, previewLines, sortMode, limit, minConfLines, includeTests)
+			preview, previewLines, sortMode, limit, minConfLines, includeTests,
+			minBlockLines)
 	}
 
 	ignoreMatcher, err := compileIgnoreMatcher(cfg)
@@ -311,7 +314,7 @@ func main() {
 		matrixProgWg.Add(1)
 		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
-	matrix, pairs := similarity.BuildMatrix(
+	matrix, pairs, blockCands := similarity.BuildMatrix(
 		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
 	)
@@ -319,8 +322,8 @@ func main() {
 		close(matrixProgStop)
 		matrixProgWg.Wait()
 	}
-	debugf("similarity.BuildMatrix: %d pairs above materialization floor (%.2f)",
-		len(pairs), similarity.MaterializationFloor(*threshold))
+	debugf("similarity.BuildMatrix: %d pairs above materialization floor (%.2f), %d block candidates in gray band",
+		len(pairs), similarity.MaterializationFloor(*threshold), len(blockCands))
 
 	// Tag each pair endpoint with its snippet's test-file classification
 	// so report.Prepare can segregate test↔test findings by default.
@@ -333,10 +336,22 @@ func main() {
 		debugf("ignore_pairs: dropped %d pairs", ignored)
 	}
 
+	// Block-level partial clones (review §5.3): a second detection
+	// channel over the gray-band candidates — pairs too diluted to
+	// render at function level that may still hide a copied block.
+	var partialClones []report.BlockClone
+	if *minBlockLines > 0 && len(blockCands) > 0 {
+		partialClones = detectBlockClones(blockCands, snippets, *minBlockLines, pairIgnoreMatcher)
+		debugf("blocks: %d partial clones from %d candidates", len(partialClones), len(blockCands))
+	}
+
 	if *since != "" {
 		var dropped int
 		pairs, dropped = filterPairsBySince(pairs, snippets, gitRepo.Root, sinceDiff)
 		debugf("--since: dropped %d pairs not overlapping diff", dropped)
+		var blocksDropped int
+		partialClones, blocksDropped = filterBlocksBySince(partialClones, gitRepo.Root, sinceDiff)
+		debugf("--since: dropped %d partial clones not overlapping diff", blocksDropped)
 	}
 
 	if *blame {
@@ -380,12 +395,15 @@ func main() {
 	// On a big repo this avoids an O(shown²) MatchRange storm over
 	// thousands of snippets when --limit means we'll only show a handful.
 	visiblePairs, visibleClusters, suppressed := report.Prepare(pairs, clusters, opts)
+	visibleBlocks, suppressedBlocks := report.PrepareBlocks(partialClones, opts)
+	suppressed.TestTestBlocks = suppressedBlocks
 	// Render re-runs Prepare on the already-filtered slices, which counts
 	// zero suppressions — carry the real counts through Options.
 	opts.Suppressed = suppressed
-	debugf("prepared: %d visible pairs, %d visible clusters (%d test↔test pairs, %d test-only clusters suppressed)",
-		len(visiblePairs), len(visibleClusters),
-		suppressed.TestTestPairs, suppressed.TestOnlyClusters)
+	opts.PartialClones = visibleBlocks
+	debugf("prepared: %d visible pairs, %d visible clusters, %d partial clones (%d test↔test pairs, %d test-only clusters, %d test↔test blocks suppressed)",
+		len(visiblePairs), len(visibleClusters), len(visibleBlocks),
+		suppressed.TestTestPairs, suppressed.TestOnlyClusters, suppressed.TestTestBlocks)
 
 	// --suggest <pair-id> short-circuits the rest of the report. We
 	// look up across all materialized pairs (not just visiblePairs) so
@@ -423,7 +441,7 @@ func main() {
 			suggestions = buildSuggestionMap(visiblePairs, snippets)
 			debugf("--suggest-all: built %d suggestions", len(suggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, opts.Previews, suggestions, suppressed)
+		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, suppressed)
 		debugf("done (json)")
 		return
 	}
@@ -693,6 +711,11 @@ type jsonOutput struct {
 	Clusters []jsonCluster          `json:"clusters"`
 	Previews map[string]jsonPreview `json:"previews,omitempty"`
 
+	// PartialClones lists sub-function block-level findings (review
+	// §5.3). Omitted when block detection found nothing or was
+	// disabled with --min-block-lines 0.
+	PartialClones []jsonBlockClone `json:"partial_clones,omitempty"`
+
 	// Suppressed summarizes findings dropped by the default test-code
 	// segregation. Omitted entirely when nothing was suppressed — in
 	// particular with --include-tests, so that flag preserves the exact
@@ -704,6 +727,7 @@ type jsonOutput struct {
 type jsonSuppressed struct {
 	TestTestPairs    int `json:"test_test_pairs,omitempty"`
 	TestOnlyClusters int `json:"test_only_clusters,omitempty"`
+	TestTestBlocks   int `json:"test_test_blocks,omitempty"`
 }
 
 type jsonPair struct {
@@ -784,12 +808,13 @@ type jsonPreview struct {
 // terminal renderer. When suggestions is non-nil, each pair's
 // suggested_patch field is populated by ID lookup. Non-zero suppressed
 // counts add a top-level `suppressed` summary object.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview, suggestions map[string]jsonPatch, suppressed report.Suppressed) {
-	out := jsonOutput{}
-	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 {
+func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions map[string]jsonPatch, suppressed report.Suppressed) {
+	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones)}
+	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 || suppressed.TestTestBlocks > 0 {
 		out.Suppressed = &jsonSuppressed{
 			TestTestPairs:    suppressed.TestTestPairs,
 			TestOnlyClusters: suppressed.TestOnlyClusters,
+			TestTestBlocks:   suppressed.TestTestBlocks,
 		}
 	}
 	if len(previews) > 0 {
@@ -936,7 +961,7 @@ func applyConfigDefaults(
 	threshold *float64, plain *bool, jsonOut *bool, verbose *bool,
 	minLines *int, eps *float64, minPts *int,
 	preview *bool, previewLines *int, sortMode *string, limit *int,
-	minConfLines *int, includeTests *bool,
+	minConfLines *int, includeTests *bool, minBlockLines *int,
 ) {
 	if d.Threshold != nil && !explicit["threshold"] {
 		*threshold = *d.Threshold
@@ -976,6 +1001,9 @@ func applyConfigDefaults(
 	}
 	if d.IncludeTests != nil && !explicit["include-tests"] {
 		*includeTests = *d.IncludeTests
+	}
+	if d.MinBlockLines != nil && !explicit["min-block-lines"] {
+		*minBlockLines = *d.MinBlockLines
 	}
 }
 
@@ -1232,6 +1260,9 @@ FLAGS:
                        cluster render once as the cluster (families first)
   --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N
                        (default 10; 0 = off)
+  --min-block-lines int  report sub-function PARTIAL CLONES: shared blocks of at
+                       least N non-blank lines (both sides) hiding inside pairs
+                       below the report threshold (default 8; 0 = off)
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch

@@ -2,6 +2,7 @@ package similarity
 
 import (
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -18,6 +19,18 @@ const (
 	materializationFloorMin = 0.30
 	materializationBand     = 0.20
 )
+
+// BlockCandidateFloor is the combined-score floor of the "gray band"
+// from which block-level partial-clone candidates are drawn (review
+// §5.3): same-language pairs with nonzero structural evidence whose
+// combined score lands in [BlockCandidateFloor, threshold). Pairs at
+// or above the threshold already render as function-level findings;
+// pairs below 0.20 share too little for a >= 8-line block to hide in
+// (a shared block that big lifts even heavily diluted hosts above
+// 0.20). The band sits below the materialization floor, so candidates
+// are collected as index pairs inside BuildMatrix rather than read
+// back from the returned pair slice.
+const BlockCandidateFloor = 0.20
 
 // MaterializationFloor returns the minimum combined score below which a
 // pair is dropped from the materialized list: max(0.30, threshold−0.20).
@@ -41,14 +54,21 @@ func MaterializationFloor(threshold float64) float64 {
 	return floor
 }
 
-// BuildMatrix computes the all-pairs similarity matrix and the
-// materialized pair list above MaterializationFloor(threshold) in a
-// single pass. threshold is the user's --threshold value. Work is
-// sharded across runtime.NumCPU() goroutines using a stripe partition
-// (worker w handles rows where i % numWorkers == w), which balances
-// small-row and big-row work. Each worker writes to its own pair buffer
-// and to disjoint matrix cells, so no synchronization is needed beyond
-// the final WaitGroup join.
+// BuildMatrix computes the all-pairs similarity matrix, the
+// materialized pair list above MaterializationFloor(threshold), and
+// the block-candidate index pairs (same-language pairs in the gray
+// band [BlockCandidateFloor, threshold) with nonzero structural
+// evidence — see BlockCandidateFloor) in a single pass. threshold is
+// the user's --threshold value. Work is sharded across
+// runtime.NumCPU() goroutines using a stripe partition (worker w
+// handles rows where i % numWorkers == w), which balances small-row
+// and big-row work. Each worker writes to its own pair buffer and to
+// disjoint matrix cells, so no synchronization is needed beyond the
+// final WaitGroup join.
+//
+// Block candidates are indices into snippets ({i, j} with i < j),
+// sorted, so downstream block detection is deterministic and the
+// memory cost stays two ints per gray-band pair.
 //
 // onPairDone, if non-nil, is invoked after each comparison with the
 // running done count. It's called from worker goroutines, so it must
@@ -59,7 +79,7 @@ func BuildMatrix(
 	minConfLines int,
 	threshold float64,
 	onPairDone func(done, total int64),
-) ([][]float64, []report.Pair) {
+) ([][]float64, []report.Pair, [][2]int) {
 	floor := MaterializationFloor(threshold)
 	n := len(snippets)
 	matrix := make([][]float64, n)
@@ -70,7 +90,7 @@ func BuildMatrix(
 
 	totalPairs := int64(n) * int64(n-1) / 2
 	if n < 2 {
-		return matrix, nil
+		return matrix, nil, nil
 	}
 
 	hashIndex := buildHashIndex(snippets)
@@ -85,12 +105,14 @@ func BuildMatrix(
 
 	var done atomic.Int64
 	pairsByWorker := make([][]report.Pair, workers)
+	blockCandsByWorker := make([][][2]int, workers)
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
 			var local []report.Pair
+			var localBlockCands [][2]int
 			batchProgress := int64(0)
 			for i := workerID; i < n; i += workers {
 				// Candidates: any j > i that shares a fingerprint with i.
@@ -141,6 +163,16 @@ func BuildMatrix(
 					matrix[i][j] = combined
 					matrix[j][i] = combined
 
+					// Block-candidate gray band (review §5.3): the pair
+					// itself won't render (below threshold), but a shared
+					// sub-function block might hide inside it. Collected
+					// here because the band reaches below the
+					// materialization floor.
+					if sameLang && structural > 0 &&
+						combined >= BlockCandidateFloor && combined < threshold {
+						localBlockCands = append(localBlockCands, [2]int{i, j})
+					}
+
 					batchProgress++
 					if combined < floor {
 						continue
@@ -190,6 +222,7 @@ func BuildMatrix(
 				}
 			}
 			pairsByWorker[workerID] = local
+			blockCandsByWorker[workerID] = localBlockCands
 		}(w)
 	}
 	wg.Wait()
@@ -202,7 +235,23 @@ func BuildMatrix(
 	for _, p := range pairsByWorker {
 		pairs = append(pairs, p...)
 	}
-	return matrix, pairs
+	totalCands := 0
+	for _, c := range blockCandsByWorker {
+		totalCands += len(c)
+	}
+	blockCands := make([][2]int, 0, totalCands)
+	for _, c := range blockCandsByWorker {
+		blockCands = append(blockCands, c...)
+	}
+	// Workers finish in arbitrary stripe order; sort so block detection
+	// (and therefore its report section) is deterministic across runs.
+	sort.Slice(blockCands, func(x, y int) bool {
+		if blockCands[x][0] != blockCands[y][0] {
+			return blockCands[x][0] < blockCands[y][0]
+		}
+		return blockCands[x][1] < blockCands[y][1]
+	})
+	return matrix, pairs, blockCands
 }
 
 // buildHashIndex builds an inverted index from fingerprint hash → snippet

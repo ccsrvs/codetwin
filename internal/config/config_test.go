@@ -27,7 +27,8 @@ func TestLoad_ParsesFullConfig(t *testing.T) {
 			"preview": true,
 			"preview_lines": 15,
 			"sort": "size",
-			"include_tests": true
+			"include_tests": true,
+			"min_block_lines": 12
 		},
 		"ignore_paths": ["vendor/**", "*_test.go"],
 		"ignore_patterns": ["^\\s*log\\.info\\("]
@@ -56,6 +57,9 @@ func TestLoad_ParsesFullConfig(t *testing.T) {
 	}
 	if c.Defaults.IncludeTests == nil || *c.Defaults.IncludeTests != true {
 		t.Errorf("defaults.include_tests not parsed correctly")
+	}
+	if c.Defaults.MinBlockLines == nil || *c.Defaults.MinBlockLines != 12 {
+		t.Errorf("defaults.min_block_lines not parsed correctly")
 	}
 	if got := c.IgnorePaths; len(got) != 2 || got[0] != "vendor/**" || got[1] != "*_test.go" {
 		t.Errorf("ignore_paths not parsed correctly: %v", got)
