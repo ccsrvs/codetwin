@@ -12,6 +12,13 @@ package fingerprint
 import "math/bits"
 
 const (
+	// SchemaVersion identifies the fingerprint algorithm's output schema
+	// beyond what DefaultK/DefaultW capture: bump it whenever the hash
+	// function, gram encoding, or winnowing selection changes the hash
+	// values produced for an unchanged token stream. Folded into
+	// cache.SchemaTag so a bump auto-invalidates cached fingerprints.
+	SchemaVersion = 1
+
 	// DefaultK is the k-gram size. Tuned against the tokenizer's output
 	// density: the tokenizer emits punctuation runes as individual tokens
 	// (roughly doubling tokens per source line versus word-only streams),

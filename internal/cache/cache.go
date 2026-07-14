@@ -13,7 +13,10 @@
 // Cache invalidation is automatic on:
 //   - file content change (content hash mismatch)
 //   - ignore_patterns change (patterns hash mismatch)
-//   - codetwin tokenizer/splitter upgrades (Version constant bump)
+//   - cache storage format change (Version constant bump)
+//   - algorithm parameter change — fingerprint.DefaultK/DefaultW,
+//     fingerprint.SchemaVersion, tokenizer.SchemaVersion — via the
+//     SchemaTag stored in the cache file (no Version bump needed)
 package cache
 
 import (
@@ -25,6 +28,9 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // Filename is the on-disk cache file in the working directory.
@@ -36,7 +42,32 @@ const Filename = ".codetwin-cache.bin"
 // v3: added Chunk.LexTerms (raw-code lexical vocabulary for the
 // structural-twin label gate). Caches written by earlier versions lack
 // the field and are invalidated wholesale on Load.
+//
+// Version is only ONE component of the schema check — algorithm
+// parameters (fingerprint k/w, fingerprint hash schema, tokenizer
+// schema) are folded in via SchemaTag, so retuning any of them
+// invalidates the cache without a manual bump here. Reserve Version
+// bumps for changes to the cache's own storage format.
 const Version uint32 = 3
+
+// SchemaTag encodes every algorithm parameter whose change makes cached
+// per-file output stale: the cache storage version, the fingerprint
+// k-gram size and winnowing window, the fingerprint hash schema, and the
+// tokenizer output schema. Load drops any cache whose stored tag differs
+// from the current one, so a retune of ANY of these constants
+// auto-invalidates old caches — the historical trap was that only a
+// manual Version bump did.
+func SchemaTag() string {
+	return schemaTag(Version, fingerprint.DefaultK, fingerprint.DefaultW,
+		fingerprint.SchemaVersion, tokenizer.SchemaVersion)
+}
+
+// schemaTag is the parameterized core of SchemaTag, split out so tests
+// can prove each component independently changes the tag.
+func schemaTag(cacheVersion uint32, k, w, fpSchema, tokSchema int) string {
+	return fmt.Sprintf("cache=%d;fp=k%d,w%d,s%d;tok=s%d",
+		cacheVersion, k, w, fpSchema, tokSchema)
+}
 
 // Chunk mirrors enough of the tokenizer + fingerprint output to reconstruct
 // a snippet without rerunning either. Tokens are stored as raw strings;
@@ -74,6 +105,13 @@ type Entry struct {
 type Cache struct {
 	mu      sync.Mutex
 	Version uint32
+	// Schema is the SchemaTag the cache was written under. Load rejects
+	// caches whose tag differs from the current build's — this is what
+	// makes a fingerprint.DefaultK/DefaultW retune or a tokenizer schema
+	// bump auto-invalidate without touching Version. Caches written
+	// before this field existed decode with Schema == "" and are
+	// likewise rejected (they simply miss and get rebuilt).
+	Schema  string
 	Entries map[string]Entry
 	dirty   bool
 }
@@ -97,15 +135,29 @@ func Load(dir string) (*Cache, error) {
 		// Corrupt cache → start fresh rather than fail the run.
 		return New(), nil
 	}
-	if c.Version != Version || c.Entries == nil {
+	if c.Version != Version || c.Schema != SchemaTag() || c.Entries == nil {
 		return New(), nil
+	}
+	// Defense-in-depth behind the SchemaTag check: entries whose chunks
+	// were fingerprinted under a different k-gram size than the current
+	// fingerprint.DefaultK are stale (their hashes cover differently
+	// sized token windows) and must miss. SchemaTag should already have
+	// rejected such caches wholesale; this guards hand-carried or
+	// tag-collided files at per-entry granularity.
+	for key, e := range c.Entries {
+		for _, ch := range e.Chunks {
+			if ch.K != fingerprint.DefaultK {
+				delete(c.Entries, key)
+				break
+			}
+		}
 	}
 	return &c, nil
 }
 
-// New returns a fresh empty cache at the current Version.
+// New returns a fresh empty cache at the current Version and SchemaTag.
 func New() *Cache {
-	return &Cache{Version: Version, Entries: map[string]Entry{}}
+	return &Cache{Version: Version, Schema: SchemaTag(), Entries: map[string]Entry{}}
 }
 
 // Get returns the cached entry for key, if any. The returned bool reports
