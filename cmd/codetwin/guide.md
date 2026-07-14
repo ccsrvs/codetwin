@@ -163,6 +163,33 @@ Acting on one is usually the easiest refactor in the report: the block
 is contiguous on both sides, so extract it into a helper and call it
 from both hosts.
 
+## Granularity (--granularity file)
+
+The default report compares per-definition chunks. `--granularity file`
+compares whole files instead: every source file becomes one snippet
+named by its bare path, and the same scoring, clustering, and labels
+apply to those file-sized chunks.
+
+When to reach for it:
+
+- **Module-level consolidation.** Two files that carry the same set of
+  functions — reordered, lightly edited — plus the same surrounding
+  declarations show up in the default report as several mid-band
+  function pairs, none individually compelling. In file mode they show
+  up as one strong whole-file pair, which matches the real refactoring
+  unit: "these two files should be one module."
+- **Unsupported languages.** Languages without a splitter already fall
+  back to whole-file chunks; file mode makes that the rule for every
+  language, so a mixed-language scan compares like with like.
+
+Interpretation shifts accordingly: a 70% whole-file pair means the two
+*modules* share most of their content, even if no single function pair
+would clear the strong-clone band. Expect far fewer findings (fewer,
+bigger chunks), and expect short-file dampening to rarely matter —
+whole files usually exceed the `--min-confidence-lines` floor. Function
+mode remains the right default for "which helpers should be extracted";
+file mode answers "which files should be merged."
+
 ## Test code segregation (default)
 
 Files matching each language's test convention (`*_test.go`,
