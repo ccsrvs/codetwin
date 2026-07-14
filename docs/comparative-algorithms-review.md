@@ -6,6 +6,19 @@ DBSCAN), evaluated against the `internal/bench` ground-truth suite and
 empirical scans of this repository. All numbers below are reproducible
 with the commands shown._
 
+> **Implementation status (2026-07-14):** R1, R2, R4, and R5 — the
+> "Release N" SNR items from §6 — are implemented on this branch.
+> Measured effect on the default self-scan of `./internal ./cmd`:
+> **1,887 pairs / 77 clusters → 36 pairs / 8 clusters** (1,538
+> test↔test pairs and 70 test-only clusters folded into summary lines;
+> `--include-tests` restores the full listing). Largest cluster
+> 47 → 6 members; visible "exact clone" labels 241 → 1 (short pairs
+> demoted by the evidence gate); materialized pairs 83% → ~4% of all
+> comparisons. `TestBench_GroundTruth` green throughout, with a new
+> `negative-short` bench category pinning the short-snippet contract.
+> R3 and R6 (scoring-model changes) and §5's granularity work remain
+> open.
+
 ## Executive summary
 
 The core comparison machinery is sound and well-tuned for what it
