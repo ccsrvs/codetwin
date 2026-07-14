@@ -14,34 +14,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
 )
 
-// BlockMatch is the intended result shape for one detected sub-function
-// block clone: 1-based source line ranges of the shared block on both
-// sides, plus the block's containment score
-// (intersection / min(|A|, |B|) over the block's own fingerprints,
-// per review §5.3).
-//
-// NOTE: this type and the detectBlocks seam below are declared in the
-// test package for now. The real implementation will live in a new
-// internal/blocks package; when it lands, replace this declaration with
-// the internal/blocks types, assign its entry point to detectBlocks,
-// and delete the t.Skip in TestBlockClones_GroundTruth — no other test
-// change should be needed.
-type BlockMatch struct {
-	AStartLine, AEndLine int // line range of the block in snippet A's file
-	BStartLine, BEndLine int // line range of the block in snippet B's file
-	Containment          float64
-}
-
-// detectBlocks is the seam the future implementation plugs into. It
-// must return only matches that survive exact-token verification and
-// the min-block-lines floor on BOTH sides — coalesced boilerplate runs
-// (err-check chains, logging blocks) that fail verification must be
-// filtered inside the implementation, not by callers.
-var detectBlocks func(a, b scan.Snippet, minBlockLines int) []BlockMatch
+// detectBlocks is the implementation under contract: internal/blocks'
+// entry point. It returns only matches that survive exact-token
+// verification and the min-block-lines floor on BOTH sides — coalesced
+// boilerplate runs (err-check chains, logging blocks) that fail
+// verification are filtered inside the implementation, not by callers.
+var detectBlocks = blocks.Detect
 
 const (
 	// blockMinLines mirrors the planned --min-block-lines default band
@@ -92,15 +75,11 @@ func overlaps(gotStart, gotEnd int, want lineRange) bool {
 // §5.3. Positives must yield at least one verified block match that
 // overlaps the expected ranges on both sides with containment >= 0.8
 // and length >= min-block-lines; negatives must yield zero matches.
-// Skipped until the implementation is wired into detectBlocks.
 func TestBlockClones_GroundTruth(t *testing.T) {
-	if detectBlocks == nil {
-		t.Skip("block-level detection not implemented — contract for review §5.3; assign internal/blocks' entry point to detectBlocks and remove this skip")
-	}
 	for _, c := range blockCases {
 		t.Run(c.name, func(t *testing.T) {
 			a, b := caseSnippets(t, blockCaseDir(c))
-			var matches []BlockMatch
+			var matches []blocks.Match
 			for _, sa := range a {
 				for _, sb := range b {
 					matches = append(matches, detectBlocks(sa, sb, blockMinLines)...)
