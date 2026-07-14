@@ -85,6 +85,21 @@ func CountNonBlankLines(code string) int {
 	return n
 }
 
+// chunkSpan builds the Chunk for lines[start..end] (0-based, inclusive
+// on both ends), converting to Chunk's 1-based line convention. It is
+// the one construction path shared by every splitter loop that emits a
+// matched span. kind is KindClass for class-span chunks and "" for
+// ordinary definitions — Split normalizes "" to KindFunction.
+func chunkSpan(lines []string, start, end int, symbol string, kind ChunkKind) Chunk {
+	return Chunk{
+		StartLine: start + 1,
+		EndLine:   end + 1,
+		Symbol:    symbol,
+		Kind:      kind,
+		Code:      strings.Join(lines[start:end+1], "\n"),
+	}
+}
+
 // Split breaks code into per-definition chunks. The returned slice always
 // contains at least one chunk: when no definitions are found the whole file
 // is returned as a single anonymous chunk.
@@ -227,13 +242,7 @@ func splitPython(code string) []Chunk {
 				break
 			}
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: d.chunkStart + 1,
-			EndLine:   end + 1,
-			Symbol:    d.name,
-			Kind:      d.kind,
-			Code:      strings.Join(lines[d.chunkStart:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, d.chunkStart, end, d.name, d.kind))
 	}
 	return chunks
 }
@@ -427,12 +436,7 @@ func splitGo(code string) []Chunk {
 		if !ok {
 			continue
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    symbol,
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, i, end, symbol, ""))
 	}
 	return chunks
 }
@@ -463,13 +467,7 @@ func splitBraceBased(code string, match braceMatcher, emitBodyless bool, contain
 		if container != nil {
 			if symbol, ok := container(lines[i]); ok {
 				if end, hasBody := findBraceEnd(lines, i); hasBody {
-					chunks = append(chunks, Chunk{
-						StartLine: i + 1,
-						EndLine:   end + 1,
-						Symbol:    symbol,
-						Kind:      KindClass,
-						Code:      strings.Join(lines[i:end+1], "\n"),
-					})
+					chunks = append(chunks, chunkSpan(lines, i, end, symbol, KindClass))
 				}
 				i++
 				continue
@@ -483,22 +481,12 @@ func splitBraceBased(code string, match braceMatcher, emitBodyless bool, contain
 		end, hasBody := findBraceEnd(lines, i)
 		if !hasBody {
 			if emitBodyless {
-				chunks = append(chunks, Chunk{
-					StartLine: i + 1,
-					EndLine:   i + 1,
-					Symbol:    symbol,
-					Code:      lines[i],
-				})
+				chunks = append(chunks, chunkSpan(lines, i, i, symbol, ""))
 			}
 			i++
 			continue
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    symbol,
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, i, end, symbol, ""))
 		i = end + 1
 	}
 	return chunks
@@ -507,13 +495,20 @@ func splitBraceBased(code string, match braceMatcher, emitBodyless bool, contain
 // splitBraceLang chunks code using a "find a definition header, then
 // brace-balance to its closer" strategy. Works for Go and Rust.
 func splitBraceLang(code string, headerRe *regexp.Regexp) []Chunk {
-	return splitBraceBased(code, func(line string) (string, bool) {
-		m := headerRe.FindStringSubmatch(line)
+	return splitBraceBased(code, matchHeaderRe(headerRe), false, nil)
+}
+
+// matchHeaderRe adapts a header regexp whose first capture group is the
+// symbol name into a braceMatcher. Shared by splitBraceLang and the
+// class-container matchers (javaTypeMatch, jsClassMatch).
+func matchHeaderRe(re *regexp.Regexp) braceMatcher {
+	return func(line string) (string, bool) {
+		m := re.FindStringSubmatch(line)
 		if m == nil {
 			return "", false
 		}
 		return m[1], true
-	}, false, nil)
+	}
 }
 
 // ── Java ──────────────────────────────────────────────────────────────────────
@@ -548,13 +543,7 @@ func splitJava(code string) []Chunk {
 
 // javaTypeMatch reports whether a line declares a type, returning the
 // type name for the class-span chunk.
-func javaTypeMatch(line string) (string, bool) {
-	m := javaTypeDeclRe.FindStringSubmatch(line)
-	if m == nil {
-		return "", false
-	}
-	return m[1], true
-}
+var javaTypeMatch = matchHeaderRe(javaTypeDeclRe)
 
 // javaHeaderMatch reports whether a line opens a method or constructor
 // definition. Type declarations and Java keywords with method-like
@@ -633,13 +622,7 @@ func splitJavaScript(code string) []Chunk {
 
 // jsClassMatch reports whether a line opens a class declaration,
 // returning the class name for the class-span chunk.
-func jsClassMatch(line string) (string, bool) {
-	m := jsClassRe.FindStringSubmatch(line)
-	if m == nil {
-		return "", false
-	}
-	return m[1], true
-}
+var jsClassMatch = matchHeaderRe(jsClassRe)
 
 // jsHeaderMatch tries each JavaScript/TypeScript header pattern in order
 // (named function, arrow assigned to const/let/var, class method) and
@@ -694,12 +677,7 @@ func splitElixir(code string) []Chunk {
 			i++
 			continue
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    m[2],
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, i, end, m[2], ""))
 		i = end + 1
 	}
 	return chunks
