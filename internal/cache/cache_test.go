@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 func TestLoad_MissingReturnsEmptyCache(t *testing.T) {
@@ -177,6 +179,45 @@ func TestLoad_SchemaMismatchReturnsEmpty(t *testing.T) {
 	}
 	if c.Schema != SchemaTag() {
 		t.Errorf("fresh cache should carry the current schema tag, got %q", c.Schema)
+	}
+}
+
+// TestSchemaTag_HasSplitterComponent: the schema tag must fold in the
+// splitter's output schema version. Without it, a splitter change (new
+// chunk kinds, new spans — e.g. Elixir defmodule class chunks) would
+// silently serve stale cached chunk sets: the file content is
+// unchanged, so nothing else invalidates the entry.
+func TestSchemaTag_HasSplitterComponent(t *testing.T) {
+	if !strings.Contains(SchemaTag(), ";split=s") {
+		t.Errorf("SchemaTag %q lacks a splitter schema component (want a \";split=s<N>\" segment)", SchemaTag())
+	}
+}
+
+// TestLoad_PreSplitterSchemaCacheRejected: a cache file written under
+// the pre-splitter-component tag format (as shipped before Elixir
+// module spans) must be dropped wholesale on Load — its entries were
+// split without module chunks and would silently drop module findings.
+func TestLoad_PreSplitterSchemaCacheRejected(t *testing.T) {
+	dir := t.TempDir()
+	oldTag := fmt.Sprintf("cache=%d;fp=k%d,w%d,s%d;tok=s%d",
+		Version, fingerprint.DefaultK, fingerprint.DefaultW,
+		fingerprint.SchemaVersion, tokenizer.SchemaVersion)
+	old := &Cache{
+		Version: Version,
+		Schema:  oldTag,
+		Entries: map[string]Entry{"k1": {ContentHash: "x"}},
+		dirty:   true,
+	}
+	if err := old.Save(dir); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(c.Entries) != 0 {
+		t.Errorf("cache written under the pre-splitter tag %q must be rejected, got %d entries served", oldTag, len(c.Entries))
 	}
 }
 

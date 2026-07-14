@@ -4,8 +4,9 @@ package splitter
 // languages emit a KindClass chunk covering the whole class body IN
 // ADDITION to the method chunks inside it; the same-file nesting filter
 // and the kind gate downstream keep the container/part overlap out of
-// reports. Go/Rust (struct+methodset grouping — methods live outside
-// the type block) and Elixir defmodule are out of scope; see
+// reports. Elixir `defmodule` blocks are the container equivalent and
+// get the same treatment. Go/Rust (struct+methodset grouping — methods
+// live outside the type block) are out of scope; see
 // docs/comparative-algorithms-review.md §5.2.
 
 import (
@@ -370,11 +371,11 @@ func TestSplit_JSClassExpressionNotEmittedAsClassChunk(t *testing.T) {
 	}
 }
 
-func TestSplit_GoAndElixirEmitNoClassChunks(t *testing.T) {
+func TestSplit_GoEmitsNoClassChunks(t *testing.T) {
 	// Go "class-level" would mean struct+methodset symbol grouping
-	// (methods live outside the type block) and Elixir defmodule
-	// grouping — both out of scope for span-based class chunks; noted
-	// as follow-ups in docs/comparative-algorithms-review.md §5.2.
+	// (methods live outside the type block) — out of scope for
+	// span-based class chunks; noted as a follow-up in
+	// docs/comparative-algorithms-review.md §5.2.
 	goCode := `package p
 
 type Counter struct {
@@ -390,14 +391,162 @@ func (c *Counter) Add(x int) int {
 	if len(classes) != 0 {
 		t.Errorf("Go must not emit class chunks, got %+v", classes)
 	}
-	exCode := `defmodule Counter do
+}
+
+// ── Elixir defmodule spans ────────────────────────────────────────────────────
+
+func TestSplit_ElixirModuleSpanEmittedAlongsideDefs(t *testing.T) {
+	code := `defmodule Billing.Ledger do
   def add(n, x) do
     n + x
   end
+
+  defp sub(n, x) do
+    n - x
+  end
+end
+
+IO.puts("after")
+`
+	chunks := Split("ledger.ex", code, tokenizer.Elixir)
+	classes, funcs := chunksByKind(chunks)
+	if len(classes) != 1 {
+		t.Fatalf("expected 1 module chunk, got %d: %+v", len(classes), chunks)
+	}
+	mod := classes[0]
+	// Symbol is the full dotted module name; span includes the closing
+	// `end` (line 9) but not the trailing top-level code.
+	if mod.Symbol != "Billing.Ledger" {
+		t.Errorf("module chunk symbol = %q, want Billing.Ledger", mod.Symbol)
+	}
+	if mod.StartLine != 1 || mod.EndLine != 9 {
+		t.Errorf("module span = %d-%d, want 1-9 (through the closing end)", mod.StartLine, mod.EndLine)
+	}
+	if !strings.Contains(mod.Code, "defp sub") || !strings.HasSuffix(strings.TrimSpace(mod.Code), "end") {
+		t.Errorf("module chunk should contain its defs and the closing end, got:\n%s", mod.Code)
+	}
+	if got := mod.Name(); got != "ledger.ex:1-9 Billing.Ledger" {
+		t.Errorf("module chunk Name() = %q, want %q", got, "ledger.ex:1-9 Billing.Ledger")
+	}
+	// The defs inside must STILL be emitted exactly as before.
+	var symbols []string
+	for _, f := range funcs {
+		symbols = append(symbols, f.Symbol)
+	}
+	if len(symbols) != 2 || symbols[0] != "add" || symbols[1] != "sub" {
+		t.Fatalf("def chunks = %v, want [add sub]", symbols)
+	}
+	if funcs[0].StartLine != 2 || funcs[0].EndLine != 4 {
+		t.Errorf("add span = %d-%d, want 2-4 (unchanged by module emission)", funcs[0].StartLine, funcs[0].EndLine)
+	}
+	if funcs[0].Kind != KindFunction {
+		t.Errorf("def chunk kind = %q, want %q", funcs[0].Kind, KindFunction)
+	}
+}
+
+func TestSplit_ElixirNestedModulesEmitBothSpans(t *testing.T) {
+	// Mirrors Java's nested-type behavior: both the outer and the inner
+	// module get a span, and the defs inside remain individual chunks.
+	code := `defmodule Outer do
+  defmodule Inner do
+    def ping(x) do
+      x
+    end
+  end
+
+  def outer_fun(y) do
+    y * 2
+  end
 end
 `
-	classes, _ = chunksByKind(Split("c.ex", exCode, tokenizer.Elixir))
-	if len(classes) != 0 {
-		t.Errorf("Elixir must not emit class chunks, got %+v", classes)
+	chunks := Split("o.ex", code, tokenizer.Elixir)
+	classes, funcs := chunksByKind(chunks)
+	if len(classes) != 2 {
+		t.Fatalf("expected 2 module chunks (Outer + Inner), got %d: %+v", len(classes), classes)
+	}
+	if classes[0].Symbol != "Outer" || classes[1].Symbol != "Inner" {
+		t.Errorf("module symbols = %q, %q; want Outer, Inner", classes[0].Symbol, classes[1].Symbol)
+	}
+	if classes[0].StartLine != 1 || classes[0].EndLine != 11 {
+		t.Errorf("Outer span = %d-%d, want 1-11", classes[0].StartLine, classes[0].EndLine)
+	}
+	if classes[1].StartLine != 2 || classes[1].EndLine != 6 {
+		t.Errorf("Inner span = %d-%d, want 2-6", classes[1].StartLine, classes[1].EndLine)
+	}
+	var symbols []string
+	for _, f := range funcs {
+		symbols = append(symbols, f.Symbol)
+	}
+	if len(symbols) != 2 || symbols[0] != "ping" || symbols[1] != "outer_fun" {
+		t.Errorf("def chunks = %v, want [ping outer_fun]", symbols)
+	}
+}
+
+func TestSplit_ElixirFileWithoutModuleUnchanged(t *testing.T) {
+	// A file with no defmodule (a plain .exs script) keeps today's
+	// behavior: no definitions → whole-file fallback, function kind.
+	code := `IO.puts("hello")
+x = 1 + 2
+IO.inspect(x)
+`
+	chunks := Split("script.exs", code, tokenizer.Elixir)
+	if len(chunks) != 1 || chunks[0].Symbol != "" || chunks[0].StartLine != 1 {
+		t.Fatalf("expected the whole-file fallback chunk, got %+v", chunks)
+	}
+	if chunks[0].Kind != KindFunction {
+		t.Errorf("fallback chunk kind = %q, want %q", chunks[0].Kind, KindFunction)
+	}
+}
+
+func TestSplit_ElixirModuleInsideDefNotEmitted(t *testing.T) {
+	// A defmodule generated inside a def/defmacro body (e.g. inside a
+	// `quote` block) is weird-but-legal Elixir. Def chunks jump past
+	// their bodies, so the inner defmodule is NOT emitted — mirroring
+	// the JS rule that a class declared inside a function body gets no
+	// class chunk. The def itself is emitted as usual.
+	code := `defmodule Factory do
+  defmacro build(name) do
+    quote do
+      defmodule unquote(name) do
+        def make(x) do
+          x
+        end
+      end
+    end
+  end
+end
+`
+	chunks := Split("f.ex", code, tokenizer.Elixir)
+	classes, funcs := chunksByKind(chunks)
+	var symbols []string
+	for _, c := range classes {
+		symbols = append(symbols, c.Symbol)
+	}
+	if len(classes) != 1 || classes[0].Symbol != "Factory" {
+		t.Errorf("only the top-level module should get a span, got %v", symbols)
+	}
+	if len(funcs) != 1 || funcs[0].Symbol != "build" {
+		t.Errorf("def chunks = %+v, want just [build]", funcs)
+	}
+}
+
+func TestSplit_ElixirModuleShorthandFormNotSpanChunked(t *testing.T) {
+	// Only the block form (`defmodule Foo do … end`) is span-chunked.
+	// The `defmodule Foo, do: …` shorthand — legal but not a shape that
+	// occurs in real-world code — is skipped rather than risking a
+	// misparse; the (equally unrealistic) defs it could carry are out of
+	// scope. Documented limitation.
+	code := `defmodule Tiny, do: :ok
+
+defmodule Real do
+  def run(x) do
+    x
+  end
+end
+`
+	chunks := Split("t.ex", code, tokenizer.Elixir)
+	classes, _ := chunksByKind(chunks)
+	if len(classes) != 1 || classes[0].Symbol != "Real" {
+		t.Errorf("shorthand defmodule must not be span-chunked, got %+v", classes)
 	}
 }

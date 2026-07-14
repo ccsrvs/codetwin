@@ -13,6 +13,7 @@ import (
 
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/splitter"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 func TestBuildMatrix_MixedKindPairAcrossFilesIsSuppressed(t *testing.T) {
@@ -79,6 +80,65 @@ func TestBuildMatrix_ClassVsOwnMethodSameFileSuppressed(t *testing.T) {
 	}
 	if len(pairs) != 0 {
 		t.Errorf("expected 0 pairs for class-vs-own-method, got %d", len(pairs))
+	}
+}
+
+// TestElixirModuleChunks_KindGateAndNestingSuppression pins the §5.2
+// noise-control invariants for Elixir `defmodule` spans specifically,
+// on REAL splitter output (not hand-built snippets): a module chunk
+// never compares against a loose def across files (kind gate), and a
+// module chunk vs one of its own defs is caught by the same-file
+// nesting filter (belt) in addition to the kind gate (braces).
+func TestElixirModuleChunks_KindGateAndNestingSuppression(t *testing.T) {
+	codeA := `defmodule LedgerA do
+  def add(n, x) do
+    n + x
+  end
+end
+`
+	codeB := `defmodule LedgerB do
+  def plus(n, x) do
+    n + x
+  end
+end
+`
+	toSnippets := func(path, code string) (mod, def scan.Snippet) {
+		var haveMod, haveDef bool
+		for _, c := range splitter.Split(path, code, tokenizer.Elixir) {
+			s := scan.Snippet{
+				Name: c.Name(), Path: c.Path,
+				StartLine: c.StartLine, EndLine: c.EndLine, Kind: c.Kind,
+			}
+			switch c.Kind {
+			case splitter.KindClass:
+				mod, haveMod = s, true
+			default:
+				def, haveDef = s, true
+			}
+		}
+		if !haveMod || !haveDef {
+			t.Fatalf("%s: expected a module chunk and a def chunk, got mod=%v def=%v", path, haveMod, haveDef)
+		}
+		return mod, def
+	}
+	modA, defA := toSnippets("/a.ex", codeA)
+	modB, defB := toSnippets("/b.ex", codeB)
+
+	if ComparableKinds(modA, defB) || ComparableKinds(modB, defA) {
+		t.Error("a defmodule chunk must never be comparable with a cross-file def chunk (kind gate)")
+	}
+	if !ComparableKinds(modA, modB) {
+		t.Error("cross-file module↔module chunks must stay comparable — that's the §5.2 value-add")
+	}
+	if !ComparableKinds(defA, defB) {
+		t.Error("def↔def chunks must stay comparable")
+	}
+	if !chunksNestedSameFile(modA, defA) {
+		t.Errorf("module span %d-%d must contain its own def span %d-%d (same-file nesting suppression)",
+			modA.StartLine, modA.EndLine, defA.StartLine, defA.EndLine)
+	}
+	if chunksNestedSameFile(modA, defB) {
+		t.Error("cross-file spans must not be treated as nested")
 	}
 }
 

@@ -504,10 +504,12 @@ func classNames(snips []scan.Snippet) map[string]bool {
 // class↔class pairs must surface as strong clones (the case
 // method-level granularity underreports — a renamed class with slightly
 // reordered methods), while class↔function pairs across files are
-// mixed-kind noise and must never materialize.
+// mixed-kind noise and must never materialize. The elixir-module-clone
+// case extends the contract to Elixir `defmodule` spans, which carry
+// splitter.KindClass exactly like Python/Java/JS class spans.
 func TestBench_ClassGranularity(t *testing.T) {
 	// Positive: same class renamed, methods slightly reordered.
-	for _, name := range []string{"python-class-clone", "java-class-clone"} {
+	for _, name := range []string{"python-class-clone", "java-class-clone", "elixir-module-clone"} {
 		snips, pairs := classCasePairs(t, name)
 		classes := classNames(snips)
 		if len(classes) != 2 {
@@ -529,6 +531,27 @@ func TestBench_ClassGranularity(t *testing.T) {
 			t.Errorf("%s: class↔class pair score = %s, want >= %s", name, fmtF(best), fmtF(positiveMin))
 		} else {
 			t.Logf("%-40s class pair score=%s ok", "classes/"+name, fmtF(best))
+		}
+	}
+
+	// Elixir-specific §5.2 kind-purity verification, through the real
+	// matrix pipeline: every materialized pair that touches a module
+	// chunk must be module↔module. Mixed-kind pairs (module vs a def —
+	// its own via the same-file nesting filter, a cross-file one via
+	// the kind gate) must never materialize.
+	{
+		snips, pairs := classCasePairs(t, "elixir-module-clone")
+		modules := classNames(snips)
+		for _, p := range pairs {
+			if modules[p.NameA] != modules[p.NameB] {
+				t.Errorf("elixir-module-clone: mixed-kind pair materialized: %s <-> %s (%s)",
+					p.NameA, p.NameB, fmtF(p.Score))
+			}
+			if (modules[p.NameA] || modules[p.NameB]) &&
+				strings.Split(p.NameA, ":")[0] == strings.Split(p.NameB, ":")[0] {
+				t.Errorf("elixir-module-clone: module paired within its own file: %s <-> %s (%s)",
+					p.NameA, p.NameB, fmtF(p.Score))
+			}
 		}
 	}
 
