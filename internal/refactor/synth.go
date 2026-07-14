@@ -68,6 +68,97 @@ func SymbolForSnippet(s scan.Snippet) string {
 	return parts[1]
 }
 
+// Per-language control-flow keyword sets for hole-asymmetry rejection.
+// Shared between the pair emitters and their block-mode counterparts.
+var (
+	goControlFlowKeywords     = []string{"return", "break", "continue"}
+	pythonControlFlowKeywords = []string{"return", "break", "continue", "raise", "yield"}
+	javaControlFlowKeywords   = []string{"return", "break", "continue", "throw", "yield"}
+	rustControlFlowKeywords   = []string{"return", "break", "continue", "panic"}
+	elixirControlFlowKeywords = []string{"raise", "throw", "exit"}
+)
+
+// pairEmitter bundles the language-specific pieces of pair-level
+// synthesis so synthesizePair can drive the flow every per-language
+// emitter previously duplicated: rejection checks, helper naming,
+// banner/NOTE/divergence emission, and the confidence formula.
+type pairEmitter struct {
+	commentPrefix    string   // line-comment leader: "//" or "#"
+	cfKeywords       []string // control-flow keywords for hole-asymmetry rejection
+	headerRejectNote string   // Note when header can't find a definition line
+	// header rewrites A's definition header to use the helper name;
+	// ok=false rejects with headerRejectNote.
+	header func(aCode, helperName string) (string, bool)
+	// rebody extracts A's body, re-shaped for the helper.
+	rebody func(aCode string) string
+	// notes, when non-nil, returns extra NOTE comment lines emitted
+	// after the banner (and before the divergence block); "" for none.
+	notes func(aCode string) string
+}
+
+// synthesizePair is the shared engine behind every per-language pair
+// emitter (synthesizeGo/Python/Java/Rust/Elixir/JavaScript). It owns
+// the flow the emitters previously each duplicated: common-span and
+// control-flow-asymmetry rejection, helper naming, banner + NOTE +
+// divergence emission, header/body assembly, and the confidence
+// formula. Language specifics arrive via the pairEmitter spec.
+func synthesizePair(a, b scan.Snippet, pairID string, al Alignment, em pairEmitter) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between snippets"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes, em.cfKeywords); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
+	header, ok := em.header(a.Code, helperName)
+	if !ok {
+		return Suggestion{Note: em.headerRejectNote}
+	}
+	body := em.rebody(a.Code)
+	divergence := formatDivergenceComment(al.Holes, em.commentPrefix)
+
+	p := em.commentPrefix
+	src := strings.Builder{}
+	src.WriteString(p + " codetwin: starter helper extracted from " +
+		nonEmpty(SymbolForSnippet(a), "<anon>") +
+		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
+		" (pair " + pairID + ").\n")
+	src.WriteString(p + " This is a literal copy of the first snippet's body. Review the\n")
+	src.WriteString(p + " divergences below and parameterize as needed before relying on it.\n")
+	if em.notes != nil {
+		src.WriteString(em.notes(a.Code))
+	}
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(header)
+	src.WriteString("\n")
+	src.WriteString(body)
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: alignmentConfidence(a, b, al),
+	}
+}
+
+// alignmentConfidence is the confidence formula shared by every pair
+// and block emitter: CommonLines / max(linesA, linesB) over the two
+// snippets' code.
+func alignmentConfidence(a, b scan.Snippet, al Alignment) float64 {
+	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
+	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
+	maxLines := aLines
+	if bLines > maxLines {
+		maxLines = bLines
+	}
+	if maxLines <= 0 {
+		return 0
+	}
+	return float64(al.CommonLines()) / float64(maxLines)
+}
+
 // synthesizeGo produces a starter helper for two Go function-level
 // snippets. Rejection rules (see plan):
 //   - Symbol must be a top-level named function (no
@@ -87,48 +178,14 @@ func synthesizeGo(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 	if reason, ok := rejectMethodOnDifferentReceivers(a.Code, b.Code); !ok {
 		return Suggestion{Note: reason}
 	}
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between snippets"}
-	}
-	if reason, ok := rejectControlFlowAsymmetry(al.Holes); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := goHelperName(a, pairID)
-	header := goHelperHeader(a.Code, helperName)
-	body := goRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "//")
-
-	src := strings.Builder{}
-	src.WriteString("// codetwin: starter helper extracted from " +
-		nonEmpty(SymbolForSnippet(a), "<anon>") +
-		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
-		" (pair " + pairID + ").\n")
-	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
-	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
-
-	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
-	}
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: confidence,
-	}
+	return synthesizePair(a, b, pairID, al, pairEmitter{
+		commentPrefix: "//",
+		cfKeywords:    goControlFlowKeywords,
+		header: func(aCode, helperName string) (string, bool) {
+			return goHelperHeader(aCode, helperName), true
+		},
+		rebody: goRebodyAsHelper,
+	})
 }
 
 // synthesizePython produces a starter helper for two Python
@@ -149,52 +206,13 @@ func synthesizeGo(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 // human (or Claude skill) decides whether to lift the helper to a
 // shared module.
 func synthesizePython(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between snippets"}
-	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
-		[]string{"return", "break", "continue", "raise", "yield"}); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
-	header, ok := pythonHelperHeader(a.Code, helperName)
-	if !ok {
-		return Suggestion{Note: "rejected: snippet has no recognisable `def` line"}
-	}
-	body := pythonRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "#")
-
-	src := strings.Builder{}
-	src.WriteString("# codetwin: starter helper extracted from " +
-		nonEmpty(SymbolForSnippet(a), "<anon>") +
-		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
-		" (pair " + pairID + ").\n")
-	src.WriteString("# This is a literal copy of the first snippet's body. Review the\n")
-	src.WriteString("# divergences below and parameterize as needed before relying on it.\n")
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
-
-	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
-	}
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: confidence,
-	}
+	return synthesizePair(a, b, pairID, al, pairEmitter{
+		commentPrefix:    "#",
+		cfKeywords:       pythonControlFlowKeywords,
+		headerRejectNote: "rejected: snippet has no recognisable `def` line",
+		header:           pythonHelperHeader,
+		rebody:           pythonRebodyAsHelper,
+	})
 }
 
 // synthesizeJava produces a starter helper for two Java method-level
@@ -217,54 +235,17 @@ func synthesizePython(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 // wrapping classes are NOT rejected (the advanced fixture has
 // UserStore.fetchA + OrderStore.fetchB and is meant to accept).
 func synthesizeJava(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between snippets"}
-	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
-		[]string{"return", "break", "continue", "throw", "yield"}); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
-	header, ok := javaHelperHeader(a.Code, helperName)
-	if !ok {
-		return Suggestion{Note: "rejected: snippet has no recognisable Java method header"}
-	}
-	body := javaRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "//")
-
-	src := strings.Builder{}
-	src.WriteString("// codetwin: starter helper extracted from " +
-		nonEmpty(SymbolForSnippet(a), "<anon>") +
-		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
-		" (pair " + pairID + ").\n")
-	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
-	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
-	src.WriteString("// NOTE: appended at file scope; move it into the appropriate Java\n")
-	src.WriteString("// class (or extract to a utility class) before compiling.\n")
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
-
-	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
-	}
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: confidence,
-	}
+	return synthesizePair(a, b, pairID, al, pairEmitter{
+		commentPrefix:    "//",
+		cfKeywords:       javaControlFlowKeywords,
+		headerRejectNote: "rejected: snippet has no recognisable Java method header",
+		header:           javaHelperHeader,
+		rebody:           javaRebodyAsHelper,
+		notes: func(string) string {
+			return "// NOTE: appended at file scope; move it into the appropriate Java\n" +
+				"// class (or extract to a utility class) before compiling.\n"
+		},
+	})
 }
 
 // synthesizeRust produces a starter helper for two Rust snippets. The
@@ -279,58 +260,22 @@ func synthesizeJava(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 //     same way Java's `throw` does.
 //   - The chunk must have a recognisable Rust definition header.
 func synthesizeRust(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between snippets"}
-	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
-		[]string{"return", "break", "continue", "panic"}); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
-	header, ok := rsHelperHeader(a.Code, helperName)
-	if !ok {
-		return Suggestion{Note: "rejected: snippet has no recognisable Rust fn header"}
-	}
-	body := rsRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "//")
-
-	src := strings.Builder{}
-	src.WriteString("// codetwin: starter helper extracted from " +
-		nonEmpty(SymbolForSnippet(a), "<anon>") +
-		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
-		" (pair " + pairID + ").\n")
-	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
-	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
-	if rsBodyReferencesSelf(a.Code) {
-		src.WriteString("// NOTE: extracted as a free function with &self carried as an\n")
-		src.WriteString("// explicit parameter; bind a receiver at call sites (e.g.\n")
-		src.WriteString("// extracted_helper(&store, key)) or move the fn into an impl\n")
-		src.WriteString("// block to restore method-call syntax.\n")
-	}
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
-
-	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
-	}
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: confidence,
-	}
+	return synthesizePair(a, b, pairID, al, pairEmitter{
+		commentPrefix:    "//",
+		cfKeywords:       rustControlFlowKeywords,
+		headerRejectNote: "rejected: snippet has no recognisable Rust fn header",
+		header:           rsHelperHeader,
+		rebody:           rsRebodyAsHelper,
+		notes: func(aCode string) string {
+			if !rsBodyReferencesSelf(aCode) {
+				return ""
+			}
+			return "// NOTE: extracted as a free function with &self carried as an\n" +
+				"// explicit parameter; bind a receiver at call sites (e.g.\n" +
+				"// extracted_helper(&store, key)) or move the fn into an impl\n" +
+				"// block to restore method-call syntax.\n"
+		},
+	})
 }
 
 // rsBodyReferencesSelf reports whether snippet code contains a
@@ -361,55 +306,18 @@ func rsBodyReferencesSelf(code string) bool {
 //     expression; iteration is recursive).
 //   - The chunk must have a recognisable `def`/`defp` header.
 func synthesizeElixir(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between snippets"}
-	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
-		[]string{"raise", "throw", "exit"}); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
-	header, ok := exHelperHeader(a.Code, helperName)
-	if !ok {
-		return Suggestion{Note: "rejected: snippet has no recognisable Elixir def header"}
-	}
-	body := exRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "#")
-
-	src := strings.Builder{}
-	src.WriteString("# codetwin: starter helper extracted from " +
-		nonEmpty(SymbolForSnippet(a), "<anon>") +
-		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
-		" (pair " + pairID + ").\n")
-	src.WriteString("# This is a literal copy of the first snippet's body. Review the\n")
-	src.WriteString("# divergences below and parameterize as needed before relying on it.\n")
-	src.WriteString("# NOTE: appended at file scope; Elixir defs must live inside a\n")
-	src.WriteString("# defmodule — move this def into the appropriate module (or\n")
-	src.WriteString("# extract to a shared helper module) before compiling.\n")
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
-
-	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
-	}
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: confidence,
-	}
+	return synthesizePair(a, b, pairID, al, pairEmitter{
+		commentPrefix:    "#",
+		cfKeywords:       elixirControlFlowKeywords,
+		headerRejectNote: "rejected: snippet has no recognisable Elixir def header",
+		header:           exHelperHeader,
+		rebody:           exRebodyAsHelper,
+		notes: func(string) string {
+			return "# NOTE: appended at file scope; Elixir defs must live inside a\n" +
+				"# defmodule — move this def into the appropriate module (or\n" +
+				"# extract to a shared helper module) before compiling.\n"
+		},
+	})
 }
 
 // exRebodyAsHelper returns the body of an Elixir def chunk —
@@ -430,11 +338,7 @@ func exRebodyAsHelper(aCode string) string {
 			continue
 		}
 		headerIdx = i
-		k := 0
-		for k < len(l) && (l[k] == ' ' || l[k] == '\t') {
-			k++
-		}
-		headerIndent = l[:k]
+		headerIndent = leadingWhitespace(l)
 		break
 	}
 	if headerIdx < 0 {
@@ -455,41 +359,70 @@ func exRebodyAsHelper(aCode string) string {
 // or `, do:` body marker are preserved verbatim. Returns ok=false when
 // no def header is found.
 func exHelperHeader(aCode, helperName string) (string, bool) {
-	for _, l := range strings.Split(aCode, "\n") {
+	t, ok := firstSignificantLine(aCode, "#", "@")
+	if !ok {
+		return "", false
+	}
+	var keyword string
+	var rest string
+	switch {
+	case strings.HasPrefix(t, "def "):
+		keyword = "def "
+		rest = t[len("def "):]
+	case strings.HasPrefix(t, "defp "):
+		keyword = "defp "
+		rest = t[len("defp "):]
+	case strings.HasPrefix(t, "defmacro "):
+		keyword = "defmacro "
+		rest = t[len("defmacro "):]
+	case strings.HasPrefix(t, "defmacrop "):
+		keyword = "defmacrop "
+		rest = t[len("defmacrop "):]
+	default:
+		return "", false
+	}
+	nameEnd := identLen(rest)
+	if nameEnd == 0 {
+		return "", false
+	}
+	return keyword + helperName + rest[nameEnd:], true
+}
+
+// firstSignificantLine returns the trimmed text of code's first line
+// that is non-blank and doesn't start with any of skipPrefixes
+// (comments, decorators, attributes). Shared scaffolding for the
+// per-language header rewriters, which all parse only the first
+// significant line of a chunk. ok=false when every line is blank or
+// skipped.
+func firstSignificantLine(code string, skipPrefixes ...string) (string, bool) {
+	for _, l := range strings.Split(code, "\n") {
 		t := strings.TrimSpace(l)
-		if t == "" ||
-			strings.HasPrefix(t, "#") ||
-			strings.HasPrefix(t, "@") {
+		if t == "" || hasAnyPrefix(t, skipPrefixes) {
 			continue
 		}
-		var keyword string
-		var rest string
-		switch {
-		case strings.HasPrefix(t, "def "):
-			keyword = "def "
-			rest = t[len("def "):]
-		case strings.HasPrefix(t, "defp "):
-			keyword = "defp "
-			rest = t[len("defp "):]
-		case strings.HasPrefix(t, "defmacro "):
-			keyword = "defmacro "
-			rest = t[len("defmacro "):]
-		case strings.HasPrefix(t, "defmacrop "):
-			keyword = "defmacrop "
-			rest = t[len("defmacrop "):]
-		default:
-			return "", false
-		}
-		nameEnd := 0
-		for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
-			nameEnd++
-		}
-		if nameEnd == 0 {
-			return "", false
-		}
-		return keyword + helperName + rest[nameEnd:], true
+		return t, true
 	}
 	return "", false
+}
+
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// identLen returns the length of the identifier prefix of s (0 when s
+// doesn't start with an identifier byte). Shared by the header
+// rewriters that scan past a definition's name token.
+func identLen(s string) int {
+	n := 0
+	for n < len(s) && isIdentByte(s[n]) {
+		n++
+	}
+	return n
 }
 
 // rsHelperHeader rewrites the first recognisable Rust definition
@@ -501,32 +434,25 @@ func exHelperHeader(aCode, helperName string) (string, bool) {
 // brace) are preserved verbatim. Returns ok=false when no `fn` is
 // found.
 func rsHelperHeader(aCode, helperName string) (string, bool) {
-	for _, l := range strings.Split(aCode, "\n") {
-		t := strings.TrimSpace(l)
-		if t == "" ||
-			strings.HasPrefix(t, "//") ||
-			strings.HasPrefix(t, "/*") ||
-			strings.HasPrefix(t, "*") ||
-			strings.HasPrefix(t, "#[") ||
-			strings.HasPrefix(t, "#![") {
-			continue
-		}
-		fnIdx := rsFindFnKeyword(t)
-		if fnIdx < 0 {
-			return "", false
-		}
-		afterFn := t[fnIdx+len("fn "):]
-		nameEnd := 0
-		for nameEnd < len(afterFn) && isIdentByte(afterFn[nameEnd]) {
-			nameEnd++
-		}
-		if nameEnd == 0 {
-			return "", false
-		}
-		return t[:fnIdx] + "fn " + helperName + afterFn[nameEnd:], true
+	t, ok := firstSignificantLine(aCode, rustSkipPrefixes...)
+	if !ok {
+		return "", false
 	}
-	return "", false
+	fnIdx := rsFindFnKeyword(t)
+	if fnIdx < 0 {
+		return "", false
+	}
+	afterFn := t[fnIdx+len("fn "):]
+	nameEnd := identLen(afterFn)
+	if nameEnd == 0 {
+		return "", false
+	}
+	return t[:fnIdx] + "fn " + helperName + afterFn[nameEnd:], true
 }
+
+// rustSkipPrefixes are the trimmed-line prefixes (comments, attributes)
+// skipped when locating a Rust chunk's definition header.
+var rustSkipPrefixes = []string{"//", "/*", "*", "#[", "#!["}
 
 // rsFindFnKeyword locates the `fn ` token at the start of a Rust
 // header line, after any leading modifiers (`pub`, `pub(crate)`,
@@ -573,30 +499,32 @@ func rsFindFnKeyword(line string) int {
 }
 
 // rsRebodyAsHelper returns the body of snippet A — everything inside
-// the outermost `{ ... }`. Each body line is dedented by the header
-// line's leading whitespace so the helper renders at column 0 and the
-// body sits at one natural indent level below it. Mirrors
-// jsRebodyAsHelper / javaRebodyAsHelper; the closing `}` of the
-// function passes through.
+// the outermost `{ ... }`. Rust attributes and comments are skipped
+// when locating the header line whose indent the body is dedented by;
+// otherwise identical to jsRebodyAsHelper / javaRebodyAsHelper (see
+// braceRebody).
 func rsRebodyAsHelper(aCode string) string {
+	return braceRebody(aCode, rustSkipPrefixes...)
+}
+
+// braceRebody is the shared core of javaRebodyAsHelper,
+// jsRebodyAsHelper, and rsRebodyAsHelper: return the body of a
+// `{ ... }`-braced chunk — everything after the first `{` — with each
+// body line dedented by the header line's leading whitespace so the
+// helper renders at column 0 and the body sits at one natural indent
+// level below it. The chunk's closing `}` passes through. skipPrefixes
+// lists trimmed-line prefixes (comments, attributes) ignored when
+// locating the header line.
+func braceRebody(aCode string, skipPrefixes ...string) string {
 	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
 
 	headerIndent := ""
 	for _, l := range lines {
 		t := strings.TrimSpace(l)
-		if t == "" ||
-			strings.HasPrefix(t, "//") ||
-			strings.HasPrefix(t, "/*") ||
-			strings.HasPrefix(t, "*") ||
-			strings.HasPrefix(t, "#[") ||
-			strings.HasPrefix(t, "#![") {
+		if t == "" || hasAnyPrefix(t, skipPrefixes) {
 			continue
 		}
-		i := 0
-		for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
-			i++
-		}
-		headerIndent = l[:i]
+		headerIndent = leadingWhitespace(l)
 		break
 	}
 
@@ -636,57 +564,21 @@ func rsRebodyAsHelper(aCode string) string {
 //   - The chunk must have a recognisable JS/TS definition header
 //     (free function, arrow assignment, or class method).
 func synthesizeJavaScript(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between snippets"}
-	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
-		[]string{"return", "break", "continue", "throw", "yield"}); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := sanitizeHelperName(SymbolForSnippet(a), pairID)
-	header, ok := jsHelperHeader(a.Code, helperName)
-	if !ok {
-		return Suggestion{Note: "rejected: snippet has no recognisable JavaScript function header"}
-	}
-	body := jsRebodyAsHelper(a.Code)
-	divergence := formatDivergenceComment(al.Holes, "//")
-
-	src := strings.Builder{}
-	src.WriteString("// codetwin: starter helper extracted from " +
-		nonEmpty(SymbolForSnippet(a), "<anon>") +
-		" + " + nonEmpty(SymbolForSnippet(b), "<anon>") +
-		" (pair " + pairID + ").\n")
-	src.WriteString("// This is a literal copy of the first snippet's body. Review the\n")
-	src.WriteString("// divergences below and parameterize as needed before relying on it.\n")
-	if jsBodyReferencesThis(a.Code) {
-		src.WriteString("// NOTE: extracted as a free function from a class-method context;\n")
-		src.WriteString("// `this` references must be wired at call sites (e.g. via\n")
-		src.WriteString("// helper.call(this, …)) before relying on the helper.\n")
-	}
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString(header)
-	src.WriteString("\n")
-	src.WriteString(body)
-
-	confidence := 0.0
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines > 0 {
-		confidence = float64(al.CommonLines()) / float64(maxLines)
-	}
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: confidence,
-	}
+	return synthesizePair(a, b, pairID, al, pairEmitter{
+		commentPrefix:    "//",
+		cfKeywords:       javaControlFlowKeywords, // JS shares Java's keyword set
+		headerRejectNote: "rejected: snippet has no recognisable JavaScript function header",
+		header:           jsHelperHeader,
+		rebody:           jsRebodyAsHelper,
+		notes: func(aCode string) string {
+			if !jsBodyReferencesThis(aCode) {
+				return ""
+			}
+			return "// NOTE: extracted as a free function from a class-method context;\n" +
+				"// `this` references must be wired at call sites (e.g. via\n" +
+				"// helper.call(this, …)) before relying on the helper.\n"
+		},
+	})
 }
 
 // jsHelperHeader rewrites the first recognisable JS/TS definition
@@ -697,25 +589,18 @@ func synthesizeJavaScript(a, b scan.Snippet, pairID string, al Alignment) Sugges
 // Subsequent cycles add arrow-assignment and class-method forms.
 // Returns ok=false when no recognisable form is found.
 func jsHelperHeader(aCode, helperName string) (string, bool) {
-	for _, l := range strings.Split(aCode, "\n") {
-		t := strings.TrimSpace(l)
-		if t == "" ||
-			strings.HasPrefix(t, "//") ||
-			strings.HasPrefix(t, "/*") ||
-			strings.HasPrefix(t, "*") ||
-			strings.HasPrefix(t, "@") {
-			continue
-		}
-		if h, ok := jsRewriteFunctionHeader(t, helperName); ok {
-			return h, true
-		}
-		if h, ok := jsRewriteArrowOrFuncExpr(t, helperName); ok {
-			return h, true
-		}
-		if h, ok := jsRewriteClassMethod(t, helperName); ok {
-			return h, true
-		}
+	t, ok := firstSignificantLine(aCode, "//", "/*", "*", "@")
+	if !ok {
 		return "", false
+	}
+	if h, ok := jsRewriteFunctionHeader(t, helperName); ok {
+		return h, true
+	}
+	if h, ok := jsRewriteArrowOrFuncExpr(t, helperName); ok {
+		return h, true
+	}
+	if h, ok := jsRewriteClassMethod(t, helperName); ok {
+		return h, true
 	}
 	return "", false
 }
@@ -746,10 +631,7 @@ func jsRewriteClassMethod(line, helperName string) (string, bool) {
 		}
 	}
 done:
-	nameEnd := 0
-	for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
-		nameEnd++
-	}
+	nameEnd := identLen(rest)
 	if nameEnd == 0 {
 		return "", false
 	}
@@ -773,47 +655,11 @@ func jsBodyReferencesThis(code string) bool {
 }
 
 // jsRebodyAsHelper returns the body of snippet A — everything inside
-// the outermost `{ ... }`. Each body line is dedented by the header
-// line's leading whitespace so the helper renders at column 0 and the
-// body sits at one natural indent level below it. Mirrors
-// javaRebodyAsHelper; the closing `}` of the function passes through.
+// the outermost `{ ... }`, dedented by the header line's leading
+// whitespace (see braceRebody). The closing `}` of the function passes
+// through.
 func jsRebodyAsHelper(aCode string) string {
-	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
-
-	headerIndent := ""
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		i := 0
-		for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
-			i++
-		}
-		headerIndent = l[:i]
-		break
-	}
-
-	openIdx := -1
-	for i, l := range lines {
-		if strings.Contains(l, "{") {
-			openIdx = i
-			break
-		}
-	}
-	if openIdx < 0 {
-		return strings.Join(lines, "\n") + "\n"
-	}
-	openLine := lines[openIdx]
-	bracePos := strings.IndexByte(openLine, '{')
-	afterBrace := strings.TrimSpace(openLine[bracePos+1:])
-	var body []string
-	if afterBrace != "" {
-		body = append(body, afterBrace)
-	}
-	for _, l := range lines[openIdx+1:] {
-		body = append(body, strings.TrimPrefix(l, headerIndent))
-	}
-	return strings.Join(body, "\n") + "\n"
+	return braceRebody(aCode)
 }
 
 var jsClassMethodReservedNames = map[string]bool{
@@ -853,10 +699,7 @@ func jsRewriteArrowOrFuncExpr(line, helperName string) (string, bool) {
 	default:
 		return "", false
 	}
-	nameEnd := 0
-	for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
-		nameEnd++
-	}
+	nameEnd := identLen(rest)
 	if nameEnd == 0 {
 		return "", false
 	}
@@ -875,13 +718,7 @@ func jsRewriteArrowOrFuncExpr(line, helperName string) (string, bool) {
 		if afterFunc == "" || afterFunc[0] == '(' || afterFunc[0] == ' ' || afterFunc[0] == '\t' {
 			afterFunc = strings.TrimLeft(afterFunc, " \t")
 			afterName := afterFunc
-			if len(afterName) > 0 && isIdentByte(afterName[0]) {
-				k := 0
-				for k < len(afterName) && isIdentByte(afterName[k]) {
-					k++
-				}
-				afterName = afterName[k:]
-			}
+			afterName = afterName[identLen(afterName):]
 			if !strings.HasPrefix(afterName, "(") {
 				return "", false
 			}
@@ -929,10 +766,7 @@ func jsRewriteFunctionHeader(line, helperName string) (string, bool) {
 		return "", false
 	}
 	afterKeyword := rest[len("function "):]
-	nameEnd := 0
-	for nameEnd < len(afterKeyword) && isIdentByte(afterKeyword[nameEnd]) {
-		nameEnd++
-	}
+	nameEnd := identLen(afterKeyword)
 	if nameEnd == 0 {
 		return "", false
 	}
@@ -952,78 +786,35 @@ func jsRewriteFunctionHeader(line, helperName string) (string, bool) {
 // exercised by v1 fixtures and aren't supported here; the splitter also
 // requires the header to fit on one line for `javaMethodRe` to match.
 func javaHelperHeader(aCode, helperName string) (string, bool) {
-	for _, l := range strings.Split(aCode, "\n") {
-		t := strings.TrimSpace(l)
-		if t == "" ||
-			strings.HasPrefix(t, "//") ||
-			strings.HasPrefix(t, "/*") ||
-			strings.HasPrefix(t, "*") ||
-			strings.HasPrefix(t, "@") {
-			continue
-		}
-		parenIdx := strings.IndexByte(t, '(')
-		if parenIdx <= 0 {
-			return "", false
-		}
-		nameEnd := parenIdx
-		for nameEnd > 0 && (t[nameEnd-1] == ' ' || t[nameEnd-1] == '\t') {
-			nameEnd--
-		}
-		nameStart := nameEnd
-		for nameStart > 0 && isIdentByte(t[nameStart-1]) {
-			nameStart--
-		}
-		if nameStart == nameEnd {
-			return "", false
-		}
-		return t[:nameStart] + helperName + t[nameEnd:], true
+	t, ok := firstSignificantLine(aCode, "//", "/*", "*", "@")
+	if !ok {
+		return "", false
 	}
-	return "", false
+	parenIdx := strings.IndexByte(t, '(')
+	if parenIdx <= 0 {
+		return "", false
+	}
+	nameEnd := parenIdx
+	for nameEnd > 0 && (t[nameEnd-1] == ' ' || t[nameEnd-1] == '\t') {
+		nameEnd--
+	}
+	nameStart := nameEnd
+	for nameStart > 0 && isIdentByte(t[nameStart-1]) {
+		nameStart--
+	}
+	if nameStart == nameEnd {
+		return "", false
+	}
+	return t[:nameStart] + helperName + t[nameEnd:], true
 }
 
 // javaRebodyAsHelper returns the body of snippet A — everything inside
-// the method's outermost `{ ... }`. Each body line is dedented by the
-// header line's leading whitespace (typically 4 spaces for class
-// methods) so the helper renders at column 0 with body lines at one
-// natural indent level, ready to drop into a class. The closing `}` of
-// the method passes through.
+// the method's outermost `{ ... }`, dedented by the header line's
+// leading whitespace (typically 4 spaces for class methods) so the
+// helper is ready to drop into a class (see braceRebody). The closing
+// `}` of the method passes through.
 func javaRebodyAsHelper(aCode string) string {
-	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
-
-	headerIndent := ""
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		i := 0
-		for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
-			i++
-		}
-		headerIndent = l[:i]
-		break
-	}
-
-	openIdx := -1
-	for i, l := range lines {
-		if strings.Contains(l, "{") {
-			openIdx = i
-			break
-		}
-	}
-	if openIdx < 0 {
-		return strings.Join(lines, "\n") + "\n"
-	}
-	openLine := lines[openIdx]
-	bracePos := strings.IndexByte(openLine, '{')
-	afterBrace := strings.TrimSpace(openLine[bracePos+1:])
-	var body []string
-	if afterBrace != "" {
-		body = append(body, afterBrace)
-	}
-	for _, l := range lines[openIdx+1:] {
-		body = append(body, strings.TrimPrefix(l, headerIndent))
-	}
-	return strings.Join(body, "\n") + "\n"
+	return braceRebody(aCode)
 }
 
 // pythonHelperHeader builds the helper's `def` line by finding the
@@ -1036,28 +827,20 @@ func javaRebodyAsHelper(aCode string) string {
 // exercised by v1 fixtures; revisit when one shows up. The single-line
 // case is enough for the simple/medium/advanced tiers.
 func pythonHelperHeader(aCode, helperName string) (string, bool) {
-	for _, l := range strings.Split(aCode, "\n") {
-		t := strings.TrimSpace(l)
-		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
-			continue
-		}
-		rest := t
-		prefix := ""
-		if strings.HasPrefix(rest, "async ") {
-			prefix = "async "
-			rest = strings.TrimSpace(rest[len("async "):])
-		}
-		if !strings.HasPrefix(rest, "def ") {
-			return "", false
-		}
-		afterDef := rest[len("def "):]
-		nameEnd := 0
-		for nameEnd < len(afterDef) && isIdentByte(afterDef[nameEnd]) {
-			nameEnd++
-		}
-		return prefix + "def " + helperName + afterDef[nameEnd:], true
+	rest, ok := firstSignificantLine(aCode, "#", "@")
+	if !ok {
+		return "", false
 	}
-	return "", false
+	prefix := ""
+	if strings.HasPrefix(rest, "async ") {
+		prefix = "async "
+		rest = strings.TrimSpace(rest[len("async "):])
+	}
+	if !strings.HasPrefix(rest, "def ") {
+		return "", false
+	}
+	afterDef := rest[len("def "):]
+	return prefix + "def " + helperName + afterDef[identLen(afterDef):], true
 }
 
 // pythonRebodyAsHelper returns snippet A's body re-indented for a
@@ -1186,7 +969,7 @@ func goReceiverType(code string) string {
 // Holes where both sides share the same control-flow keyword are
 // allowed — the divergence is in the surrounding expression.
 func rejectControlFlowAsymmetry(holes []Hole) (string, bool) {
-	return rejectControlFlowAsymmetryWithKeywords(holes, []string{"return", "break", "continue"})
+	return rejectControlFlowAsymmetryWithKeywords(holes, goControlFlowKeywords)
 }
 
 // rejectControlFlowAsymmetryWithKeywords is the language-parameterised
@@ -1232,19 +1015,11 @@ func isIdentByte(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
-// goHelperName composes a unique helper name. Format:
-// extracted_<symbolA>_<pair-id>. Sanitised so the result is a valid Go
-// identifier even if the splitter's symbol contained `@` (we already
-// reject anonymous chunks, but the sanitisation keeps the name safe
-// regardless).
-func goHelperName(a scan.Snippet, pairID string) string {
-	return sanitizeHelperName(SymbolForSnippet(a), pairID)
-}
-
 // sanitizeHelperName composes `extracted_<symbol>_<pairID>`, replacing
-// any non-identifier byte with `_`. Used by every per-language emitter
-// (Go, Python, …) since both languages share the same identifier
-// alphabet for our purposes.
+// any non-identifier byte with `_` so the result is a valid identifier
+// even if the splitter's symbol contained `@`. Used by every
+// per-language emitter (via synthesizePair) since all supported
+// languages share the same identifier alphabet for our purposes.
 func sanitizeHelperName(symbol, pairID string) string {
 	if symbol == "" {
 		symbol = "fn"
@@ -1276,10 +1051,7 @@ func goHelperHeader(aCode, helperName string) string {
 			rest = strings.TrimLeft(rest[close+1:], " \t")
 		}
 	}
-	nameEnd := 0
-	for nameEnd < len(rest) && isIdentByte(rest[nameEnd]) {
-		nameEnd++
-	}
+	nameEnd := identLen(rest)
 	return "func " + helperName + rest[nameEnd:]
 }
 

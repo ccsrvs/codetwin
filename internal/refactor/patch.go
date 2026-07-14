@@ -20,14 +20,9 @@ import (
 // scanned. Returns ("", nil) when s.HelperSrc is empty (rejection
 // case) — callers should check Suggestion.Note instead.
 func BuildPatch(pathA string, s Suggestion) (string, error) {
-	if s.HelperSrc == "" {
-		return "", nil
-	}
-	data, err := os.ReadFile(pathA)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", pathA, err)
-	}
-	return buildAppendPatch(pathA, string(data), s.HelperSrc), nil
+	return buildPatchFromFile(pathA, s, func(fileContent string) string {
+		return buildAppendPatch(pathA, fileContent, s.HelperSrc)
+	})
 }
 
 // BuildPatchInsertAfter produces a unified diff that inserts the
@@ -39,6 +34,16 @@ func BuildPatch(pathA string, s Suggestion) (string, error) {
 // plain append patch. Returns ("", nil) when s.HelperSrc is empty
 // (rejection case) — callers should check Suggestion.Note instead.
 func BuildPatchInsertAfter(pathA string, afterLine int, s Suggestion) (string, error) {
+	return buildPatchFromFile(pathA, s, func(fileContent string) string {
+		return buildInsertAfterPatch(pathA, fileContent, s.HelperSrc, afterLine)
+	})
+}
+
+// buildPatchFromFile is the shared front half of BuildPatch and
+// BuildPatchInsertAfter: short-circuit on an empty HelperSrc (the
+// rejection case — callers should check Suggestion.Note), read pathA,
+// and delegate to the pure diff builder.
+func buildPatchFromFile(pathA string, s Suggestion, build func(fileContent string) string) (string, error) {
 	if s.HelperSrc == "" {
 		return "", nil
 	}
@@ -46,7 +51,7 @@ func BuildPatchInsertAfter(pathA string, afterLine int, s Suggestion) (string, e
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", pathA, err)
 	}
-	return buildInsertAfterPatch(pathA, string(data), s.HelperSrc, afterLine), nil
+	return build(string(data)), nil
 }
 
 // buildInsertAfterPatch is BuildPatchInsertAfter's pure core: a single
