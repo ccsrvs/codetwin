@@ -44,7 +44,20 @@ with the commands shown._
 > ~45-line hosts, pair score 0.37) now surfaces as `100% contained`.
 > Self-scan: 12 genuine partial clones by default, byte-identical
 > across runs. §5.2 class-level granularity is implemented (see the
-> status note under §5.2); §5.1 file-level mode remains open.
+> status note under §5.2).
+>
+> **Final batch (same date):** §5.1 file-level mode is implemented
+> (`--granularity file`, both modes cached side by side); block-pair
+> UX landed (`--suggest` extracts starter helpers from partial-clone
+> spans in Go/Python with `git apply`-verified diffs; `--preview`
+> renders matched block ranges); and the §3.6 hardening items shipped —
+> cache SchemaTag auto-invalidation on k/w/tokenizer retunes,
+> Unknown↔Unknown pairs treated as same-language (plus a real
+> `--cross-lang-only` filter bug found and fixed), and k-gram hashing
+> made allocation-free with bit-identical hashes (5.9–11.4× faster
+> fingerprinting). Every item in this review — R1–R6, §5.1, §5.2, §5.3,
+> and the §3.6 hardening list — is now implemented. Remaining product
+> bets (clone watchlist, cross-repo scanning) live in docs/roadmap.md.
 
 ## Executive summary
 
