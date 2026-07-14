@@ -707,3 +707,51 @@ func TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
 		t.Errorf("expected empty stdout on rejection, got:\n%s", stdout.String())
 	}
 }
+
+// TestSuggest_JavaSimple_HelperInsertedInsideClass: the emitted diff
+// must place the helper INSIDE the enclosing class — the added lines
+// carry one level of member indentation and the obsolete file-scope
+// placement NOTE is gone — so the patched file compiles as emitted.
+func TestSuggest_JavaSimple_HelperInsertedInsideClass(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/java/simple"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID string `json:"id"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	if len(doc.Pairs) == 0 || doc.Pairs[0].ID == "" {
+		t.Fatalf("expected at least one pair with an id, got:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", doc.Pairs[0].ID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "+    public double extracted_priceWithTaxA_") {
+		t.Errorf("diff missing the class-indented helper added line. Got:\n%s", diff)
+	}
+	if strings.Contains(diff, "NOTE: appended at file scope") {
+		t.Errorf("diff still carries the file-scope placement NOTE. Got:\n%s", diff)
+	}
+}
