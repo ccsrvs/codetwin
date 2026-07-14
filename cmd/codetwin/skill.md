@@ -68,7 +68,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
-| Suggest a refactor (Go) | `codetwin --suggest <pair-id> <path>` |
+| Suggest a refactor (any same-language pair) | `codetwin --suggest <pair-id> <path>` |
 | Suggest for every visible pair (JSON) | `codetwin --suggest-all --json <path>` |
 | Extract a partial-clone block into a helper (Go/Python) | `codetwin --suggest <block-id> <path>` |
 | Preview partial-clone block ranges inline | `codetwin --preview <path>` |
@@ -141,8 +141,10 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
+--debug                 print phase checkpoints with elapsed time to stderr
 --skill                 print this skill guide and exit
 --guide                 print the report interpretation guide and exit
+--version               print the codetwin version and exit
 ```
 
 ### Git-aware modes
@@ -156,12 +158,17 @@ works the same in a non-git directory as it does in one.
 | Goal | Command |
 |---|---|
 | CI gate: fail only on duplication this PR introduces | `codetwin --since main --threshold 0.85 --json <path>` |
-| Find duplicate logic across languages in a polyglot repo | `codetwin --cross-lang-only --threshold 0.50 <path>` |
-| Find shared-library candidates across N service repos | `codetwin --cross-repo-only ../svc-a ../svc-b ../svc-c` |
-| List cross-repo clusters machine-readably | `codetwin --json ../svc-a ../svc-b \| jq '.clusters[] \| select(.cross_repo)'` |
 | Show the freshest clones (newest endpoint first) | `codetwin --blame --sort age --limit 10 <path>` |
 | Annotate every match with origin metadata | `codetwin --blame --preview <path>` |
 | Triage who introduced this clone | `codetwin --blame --json <path> \| jq '.pairs[] \| {a:.file_a,b:.file_b,intro_a:.provenance_a.first_date,intro_b:.provenance_b.first_date}'` |
+
+More JSON recipes that don't need git:
+
+| Goal | Command |
+|---|---|
+| Find duplicate logic across languages in a polyglot repo | `codetwin --cross-lang-only --threshold 0.50 <path>` |
+| Find shared-library candidates across N service repos | `codetwin --cross-repo-only ../svc-a ../svc-b ../svc-c` |
+| List cross-repo clusters machine-readably | `codetwin --json ../svc-a ../svc-b \| jq '.clusters[] \| select(.cross_repo)'` |
 | List sub-function partial clones with line ranges | `codetwin --json <path> \| jq '.partial_clones[]? \| {a:"\(.file_a):\(.start_line_a)-\(.end_line_a)", b:"\(.file_b):\(.start_line_b)-\(.end_line_b)", containment}'` |
 
 `codetwin --help` prints the same flag list with one-line descriptions.
@@ -242,23 +249,26 @@ divergence comment block listing exactly how snippet B differs.
 # 1. Run with --json to discover pair IDs.
 codetwin --json --threshold 0.85 ./pkg | jq '.pairs[] | {id, file_a, file_b}'
 
-# 2. Pick a same-language pair (Go or Python in v1) and emit its suggestion.
+# 2. Pick a same-language pair (any of the six languages) and emit its suggestion.
 codetwin --suggest <pair-id> ./pkg > suggest.diff
 
 # 3. Review, then apply.
 git apply suggest.diff
 ```
 
-The diff is *additive only* — it adds the helper at the end of A's
-file without rewriting either call site. The reviewer (or a Claude
-skill consuming the JSON output) finishes the refactor by hand.
-Codetwin deliberately stops short of full parameterization: doing it
-without a language AST would be unsafe.
+The diff is *additive only* — it adds the helper to A's file (at the
+end of the file, or inside the enclosing class/defmodule for
+Java/Elixir — see below) without rewriting either call site. The
+reviewer (or a Claude skill consuming the JSON output) finishes the
+refactor by hand. Codetwin deliberately stops short of full
+parameterization: doing it without a language AST would be unsafe.
 
 Rejection cases (printed as a `note:` line on stderr; exit 1):
 
 - Methods on different receiver types (Go)
 - Anonymous/goroutine/defer chunks (Go)
+- Class-level pairs (class↔class findings) — extraction targets
+  functions/methods; run `--suggest` on the method pairs inside
 - Cross-language pairs (v1 doesn't transpile)
 - Unsupported language (v1 supports Go, Python, Java,
   JavaScript/TypeScript, Rust, and Elixir — every language with a
@@ -277,13 +287,23 @@ is found (free-standing code, not legal Java) does the helper fall
 back to a file-scope append with a leading `// NOTE: appended at file
 scope…` comment flagging the manual placement step.
 
+For Python, class methods are emitted as top-level helpers with
+`self`/`cls` carried through as ordinary parameters, and multi-line
+(Black-formatted) `def` signatures are carried whole — the name is
+rewritten on the first line, continuation params/annotations/the
+closing `) -> Ret:` line pass through verbatim.
+
 For JavaScript/TypeScript, ES6+ class methods are unwrapped from their
 class chunk and emitted as free `function` helpers. When the body
 references `this`, the helper carries a `// NOTE: extracted as a free
 function from a class-method context; this references must be wired
 at call sites…` comment so the user knows to bind via `.call(this, …)`
 or pass `this` explicitly. Free-function and arrow-assignment sources
-don't carry that NOTE.
+don't carry that NOTE. TypeScript parameter/return-type annotations
+and generics are carried onto the helper verbatim (never stripped);
+class-method access modifiers (`public`/`private`/`protected`/
+`readonly`) are dropped — they're invalid on a free function — while
+`async`/`static` are preserved.
 
 For Rust, free functions and impl-method chunks are both emitted as
 free `fn` helpers; modifiers (`pub`, `pub(crate)`, `async`, `unsafe`)
@@ -298,7 +318,12 @@ For Elixir, every common def shape is supported: `def`/`defp`/
 `defmacro`/`defmacrop` block-form (`do … end`), `, do:` shorthand
 (single-line and split forms), multi-line wrapping headers, pattern-
 matched args, and `when` guards. The helper preserves the input's
-keyword form and shorthand-vs-block style. The diff inserts the helper
+keyword form and shorthand-vs-block style. Adjacent sibling clauses of
+the same name/arity are grouped into ONE multi-clause helper (renamed
+consistently; a clause-count mismatch with B adds a `# NOTE:` line),
+and any symbol-scoped `@doc`/`@spec` block above the def's first
+clause is carried onto the helper (`@spec` renamed; a diverging B-spec
+is surfaced as a `# NOTE:`). The diff inserts the helper
 inside the innermost defmodule enclosing the source def — immediately
 before its closing `end`, indented like a sibling def — so the patched
 file compiles as emitted. Only when no defmodule encloses the chunk
@@ -449,6 +474,49 @@ A live `comparing snippets: N/M (X%)` indicator prints to stderr while
 the matrix is computing. It's auto-suppressed when stderr isn't a TTY
 (piping to a file or running under CI), so log capture stays clean.
 
+### JSON output reference
+
+`--json` emits one object with these top-level keys (JSON is always
+flat — every visible pair is listed, including in-cluster ones):
+
+- **`pairs`** — array of pair objects:
+  - `id` — stable 8-char hex pair ID (feed to `--suggest`)
+  - `file_a`, `file_b` — snippet names, `path:start-end Symbol`
+    (`repo:path:start-end Symbol` in multi-root scans)
+  - `score`, `structural`, `semantic` — combined + sub-scores (0.0–1.0)
+  - `lexical` — raw-vocabulary Jaccard; present only where computed
+    (pairs above the near-clone band); a measured `0.0` still serializes
+  - `label` — one of `exact_clone`, `near_clone`, `structural_twin`,
+    `strong_clone`, `refactor_candidate`, `weak_similarity`
+    (note: the terminal renders `refactor_candidate` as
+    `[REFACTOR TARGET ]`)
+  - `lang_a`, `lang_b` — language of each endpoint
+  - `repo_a`, `repo_b` — repo labels; only in multi-root scans
+  - `provenance_a`, `provenance_b` — only with `--blame`:
+    `first_commit`, `first_author`, `first_date`, and `last_*` when the
+    range was touched again later
+  - `suggested_patch` — only with `--suggest-all`: `unified_diff`,
+    `helper_name`, `confidence`, or `note` when synthesis was rejected
+- **`clusters`** — array of `{id, members, score, min_score}`;
+  `score` is the average internal pair score, `min_score` the cohesion
+  (weakest internal pair). Multi-root scans add `member_repos`
+  (parallel to `members`) and `cross_repo`.
+- **`partial_clones`** — present when block detection found something:
+  `{id, file_a, start_line_a, end_line_a, symbol_a, file_b,
+  start_line_b, end_line_b, symbol_b, containment, lines_a, lines_b}`
+  plus `repo_a`/`repo_b` in multi-root scans and `suggested_patch`
+  with `--suggest-all`
+- **`previews`** — only with `--preview`: map keyed by snippet name
+  (`path:start-end Symbol`) to `{start_line, text}`; partial-clone
+  sides are keyed by the block's `file:start-end` range name
+- **`suppressed`** — present only when test segregation dropped
+  something: `{test_test_pairs, test_only_clusters, test_test_blocks}`
+  (each key omitted when zero; the whole object is absent with
+  `--include-tests`)
+- **`drift`** — only with `--baseline` and only when drift was
+  detected: array of `{kind, cluster, detail}` (kinds listed under
+  `--baseline` above)
+
 ## Step 3 — Interpret results
 
 ### Score thresholds
@@ -459,7 +527,7 @@ the matrix is computing. It's auto-suppressed when stderr isn't a TTY
 | > 85% | Near clone | Virtually identical with one or two token edits; treat as a clone unless the difference is intentional |
 | > 85% + lexical < 20% | Structural twin (`structural_twin` in JSON) | Same token shape, but the raw identifier/string vocabulary barely overlaps — parallel boilerplate (table tests, per-field validators), not copy-paste. Leave alone, or parameterize the shape if the family keeps growing; do NOT treat as "delete one copy" |
 | > 65% | Strong clone | Parameterize the differing parts |
-| > 45% | Refactor target | Evaluate whether a shared abstraction reduces duplication |
+| > 45% | Refactor target (`refactor_candidate` in JSON) | Evaluate whether a shared abstraction reduces duplication |
 | < 45% | Weak similarity | Probably coincidental — review before acting |
 
 For a fuller explanation of the score, the structural/semantic sub-scores,
@@ -497,8 +565,8 @@ mixed clusters always render.
 - `--include-tests` restores the full listing (and the exact
   pre-segregation JSON schema — no `suppressed` object).
 - In default `--json` output the suppressed findings are omitted and a
-  top-level `"suppressed": {"test_test_pairs": N, "test_only_clusters": M}`
-  object is added.
+  top-level `"suppressed": {"test_test_pairs": N, "test_only_clusters": M,
+  "test_test_blocks": K}` object is added (zero counts are omitted).
 - Scores and clustering are unchanged; suppression is applied after the
   threshold filter and before `--limit`.
 - Config equivalent: `"include_tests": true` under `defaults`.
@@ -531,8 +599,9 @@ the report:
 codetwin --preview --preview-lines 8 --threshold 0.40 <path>
 ```
 
-In `--json` mode, `--preview` adds a top-level `previews` map keyed by file path so downstream
-consumers can render snippets without re-reading the source:
+In `--json` mode, `--preview` adds a top-level `previews` map keyed by snippet name
+(`path:start-end Symbol`) so downstream consumers can render snippets without re-reading
+the source:
 
 ```bash
 codetwin --json --preview --threshold 0.50 <path> | jq '.previews'
@@ -566,15 +635,16 @@ go test ./...
 ## Worked example
 
 ```bash
-codetwin --preview --threshold 0.40 ./testdata
+codetwin --preview testdata/sum_a.js testdata/sum_b.js
 
 # Expected output (chunk-level — note "path:start-end Symbol" naming).
 # The two sum functions are 7-line token-identical clones: the default
 # short-snippet dampener scales their raw 100% to 85% (min lines 7 of
 # the default N=10), so they render as a strong-clone cluster:
 #  REFACTORING CLUSTERS
-#   Cluster 1 — 2 snippets · avg similarity  85%
-#     testdata/sum_a.js:1-7 sumArray
+#
+#   Cluster 1 — 2 snippets · avg similarity  85% · cohesion  85%
+#     · testdata/sum_a.js:1-7 sumArray
 #          1 │ function sumArray(arr) {
 #          2 │   let total = 0;
 #          3 │   for (let i = 0; i < arr.length; i++) {
@@ -582,7 +652,7 @@ codetwin --preview --threshold 0.40 ./testdata
 #          5 │   }
 #          6 │   return total;
 #          7 │ }
-#     testdata/sum_b.js:1-7 addNumbers
+#     · testdata/sum_b.js:1-7 addNumbers
 #          1 │ function addNumbers(nums) {
 #          ...
 #
@@ -595,7 +665,8 @@ codetwin --preview --threshold 0.40 ./testdata
 
 | Symptom | Fix |
 |---|---|
-| `not enough parseable files` | Target has < 2 files with supported extensions |
+| `need at least 2 source files to compare` | Target has < 2 files with supported extensions |
+| `not enough parseable snippets to compare` | Files were found but yielded < 2 chunks — check `--min-lines` and `ignore_paths` |
 | All scores near 0% | Files may be too short — lower `--min-lines` |
 | No clusters formed | Raise `--eps` (e.g. `--eps 0.45` links pairs ≥ 0.55) — looser linking admits weaker pairs |
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |

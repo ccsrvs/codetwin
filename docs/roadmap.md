@@ -1,10 +1,11 @@
 # codetwin roadmap — unique-niche bets
 
-_Last updated: 2026-07-14 (bet #6 shipped). Sources: planning conversation that shipped
-_Last updated: 2026-07-14. Sources: planning conversation that shipped
-commits `159a298`, `59fe97f`, `f53a739` on
-`claude/explore-unique-features-4rInJ`; detection-quality overhaul
-merged as PR #7 (`fix/matching-pipeline-review`)._
+_Last updated: 2026-07-14 (bets #5 and #6 shipped; doc audit). Sources:
+planning conversation that shipped commits `159a298`, `59fe97f`,
+`f53a739` on `claude/explore-unique-features-4rInJ`; detection-quality
+overhaul merged as PR #7 (`fix/matching-pipeline-review`); block-level
+partial clones and class-level granularity from the comparative
+algorithms review (PR #9)._
 
 ## Status at a glance
 
@@ -18,6 +19,8 @@ merged as PR #7 (`fix/matching-pipeline-review`)._
 | 6 | Cross-repo / org-level scanning | **Shipped** | automatic on ≥2 directory roots; `--cross-repo-only`, `repo_a`/`repo_b`/`member_repos`/`cross_repo` JSON, per-repo cluster grouping + `cross-repo` tag |
 | 7 | Behavioural / runtime equivalence | Flagged longshot | — |
 | — | Detection quality + report SNR (PR #7) | **Shipped** | `internal/bench` ground-truth benchmark, retuned scoring defaults, cluster-first report, `--flat` |
+| — | Block-level partial clones (review §5.3) | **Shipped** | `--min-block-lines`, `PARTIAL CLONES` section, `partial_clones` JSON, block `--suggest` (Go/Python) |
+| — | Class-level granularity (review §5.2) | **Shipped** | class-span chunks for Python/Java/JS-TS classes + Elixir defmodules (≥2 defs), matched class↔class only; `--granularity file` for whole-file mode |
 
 ### Per-language emitter status (Bet #4)
 
@@ -25,13 +28,10 @@ merged as PR #7 (`fix/matching-pipeline-review`)._
 |---|---|---|
 | Go | **Shipped** | Starter helper + divergence comment block. |
 | Python | **Shipped** | Starter helper with `#`-comment divergence block; class methods carried through as top-level helpers with `self`/`cls` as ordinary parameters. Multi-line (Black-formatted) `def` signatures are carried whole — name rewritten on the first line, continuation params / default args / annotations / the closing `) -> Ret:` line verbatim (fixture: `realworld-multiline-sig`). |
-| Java | **Shipped** | Starter helper with `//`-comment divergence block; modifiers/generics/`throws` preserved verbatim; helper is appended at file scope after the wrapping class's closing `}` and carries a `// NOTE: appended at file scope…` placement comment (file won't compile until a human moves the helper into the appropriate class — the v1 "starter, human finishes" boundary). Control-flow keyword set extended with `throw`. |
-| JavaScript / TypeScript | **Shipped** | Starter helper with `//`-comment divergence block. Recognises four definition shapes: `function name(...)` (incl. `async` / `export default`), arrow assignments `const|let|var name = (...) => {…}`, `const|let|var name = async function(...) {…}`, and ES6+ class methods. The JS splitter was lifted to method-level granularity in the same commit (matching Python and Java) so detection itself runs on individual methods rather than swallowing whole class bodies. When a method references `this.`, the helper carries a `// NOTE:` line flagging that `this` must be wired at call sites. Control-flow keyword set extended with `throw` (mirrors Java). TypeScript-specific header shapes are handled (fixture: `realworld-typescript`, real `.ts` files): parameter/return-type annotations and generics are carried onto the helper verbatim (never stripped — plain-JS pairs never contain them, so plain-JS output is byte-identical), arrow return annotations (`(x: string): Foo => {`) survive the free-function rewrite, and class-method access modifiers (`public`/`private`/`protected`/`readonly`) are dropped (invalid on a free function) while `async`/`static` are preserved. Interface declarations and type aliases remain out of scope — the splitter never chunks them as functions. |
-| Python | **Shipped** | Starter helper with `#`-comment divergence block; class methods carried through as top-level helpers with `self`/`cls` as ordinary parameters. |
 | Java | **Shipped** | Starter helper with `//`-comment divergence block; modifiers/generics/`throws` preserved verbatim; the patch inserts the helper inside the innermost class/interface/enum/record enclosing A's chunk (immediately before its closing `}`, indented like a sibling member) so the file compiles as emitted. Defensive fallback: when no enclosing type is found the helper appends at file scope with a `// NOTE: appended at file scope…` placement comment. Control-flow keyword set extended with `throw`. |
-| JavaScript / TypeScript | **Shipped** | Starter helper with `//`-comment divergence block. Recognises four definition shapes: `function name(...)` (incl. `async` / `export default`), arrow assignments `const|let|var name = (...) => {…}`, `const|let|var name = async function(...) {…}`, and ES6+ class methods. The JS splitter was lifted to method-level granularity in the same commit (matching Python and Java) so detection itself runs on individual methods rather than swallowing whole class bodies. When a method references `this.`, the helper carries a `// NOTE:` line flagging that `this` must be wired at call sites. Control-flow keyword set extended with `throw` (mirrors Java). |
+| JavaScript / TypeScript | **Shipped** | Starter helper with `//`-comment divergence block. Recognises four definition shapes: `function name(...)` (incl. `async` / `export default`), arrow assignments `const|let|var name = (...) => {…}`, `const|let|var name = async function(...) {…}`, and ES6+ class methods. The JS splitter was lifted to method-level granularity in the same commit (matching Python and Java) so detection itself runs on individual methods rather than swallowing whole class bodies. When a method references `this.`, the helper carries a `// NOTE:` line flagging that `this` must be wired at call sites. Control-flow keyword set extended with `throw` (mirrors Java). TypeScript-specific header shapes are handled (fixture: `realworld-typescript`, real `.ts` files): parameter/return-type annotations and generics are carried onto the helper verbatim (never stripped — plain-JS pairs never contain them, so plain-JS output is byte-identical), arrow return annotations (`(x: string): Foo => {`) survive the free-function rewrite, and class-method access modifiers (`public`/`private`/`protected`/`readonly`) are dropped (invalid on a free function) while `async`/`static` are preserved. Interface declarations and type aliases remain out of scope — the splitter never chunks them as functions. |
 | Rust | **Shipped** | Starter helper with `//`-comment divergence block. Recognises `fn name(...)` headers with any combination of `pub` / `pub(crate)` / `async` / `unsafe` / `const` / `extern` modifiers; preserves generics, lifetimes, return types, and `where` clauses verbatim. Impl methods come through the splitter as method-level chunks (the splitter was already method-granular for Rust). When the body references the standalone `self` keyword, the helper carries a `// NOTE: extracted as a free function with &self carried as an explicit parameter…` block flagging that the receiver must be bound at call sites. Control-flow keyword set extended with `panic` so `panic!(…)` macro asymmetry triggers rejection (mirrors Java's `throw`). |
-| Elixir | **Shipped (v2)** | Starter helper with `#`-comment divergence block. Recognises every common def shape: `def`/`defp`/`defmacro`/`defmacrop` block-form headers (`do … end`), `, do:` shorthand (single-line and split-across-lines forms), multi-line wrapping headers (Phoenix-style `def update(\n  conn,\n  …\n) do`), pattern-matched args (`{:ok, value}`, `%{"id" => id}`), and `when` guards. Splitter is method-granular over `defmodule` bodies (mirroring Python's behaviour). Helper preserves the input's keyword (def vs defp vs defmacro/defmacrop), guards, and shorthand vs block form. The patch inserts the helper inside the innermost defmodule enclosing A's chunk (immediately before its closing `end`, indented like a sibling def) so the file compiles as emitted; when no defmodule encloses the chunk (defensive — Elixir cannot have free-standing defs) the helper appends at file scope with a `# NOTE: appended at file scope…` block. Control-flow keyword set is `["raise", "throw", "exit"]` (Elixir has no `return`/`break`/`continue`; functions return their last expression). Real-world fixtures: GenServer (`@impl`, do: shorthand alongside block form, nested `case`), multi-clause pattern-matched defs (`def parse({:ok, _}, ...)` etc.), and `defmacro` DSL builders. |
+| Elixir | **Shipped (v2)** | Starter helper with `#`-comment divergence block. Recognises every common def shape: `def`/`defp`/`defmacro`/`defmacrop` block-form headers (`do … end`), `, do:` shorthand (single-line and split-across-lines forms), multi-line wrapping headers (Phoenix-style `def update(\n  conn,\n  …\n) do`), pattern-matched args (`{:ok, value}`, `%{"id" => id}`), and `when` guards. Splitter is method-granular over `defmodule` bodies (mirroring Python's behaviour). Helper preserves the input's keyword (def vs defp vs defmacro/defmacrop), guards, and shorthand vs block form. The patch inserts the helper inside the innermost defmodule enclosing A's chunk (immediately before its closing `end`, indented like a sibling def) so the file compiles as emitted; when no defmodule encloses the chunk (defensive — Elixir cannot have free-standing defs) the helper appends at file scope with a `# NOTE: appended at file scope…` block. Control-flow keyword set is `["raise", "throw", "exit"]` (Elixir has no `return`/`break`/`continue`; functions return their last expression). At synthesis time, adjacent sibling clauses of the endpoint symbol are grouped into one multi-clause helper, and symbol-scoped `@doc`/`@spec` blocks are carried onto the helper (`@spec` renamed; diverging B-spec surfaced as a `# NOTE:`). Real-world fixtures: GenServer (`@impl`, do: shorthand alongside block form, nested `case`), multi-clause pattern-matched defs (`def parse({:ok, _}, ...)` etc.), `defmacro` DSL builders, and `realworld-spec`/`realworld-multiclause` tiers. |
 
 ## Context
 
@@ -133,7 +133,9 @@ other tool finds duplicate logic across them.
 `internal/similarity/matrix_test.go` (Lang population).
 
 ### 4. Refactor patch emission — turn detection into action
-**Status: Shipped (v1, Go-only).**
+**Status: Shipped (all 6 languages).** The "What landed" notes below
+describe the original Go-only v1 landing; the per-language follow-up
+emitters have all since shipped (see the per-language table above).
 
 **What landed:**
 - `report.Pair.ID`: stable, order-invariant 8-char hex digest of
@@ -413,50 +415,32 @@ them:
   (same name + arity, contiguous apart from blanks/comments/
   attributes) are emitted as one multi-clause helper, renamed
   consistently; clause-count mismatch adds a `# NOTE:` line.
-- **Auto-insertion inside the enclosing `defmodule`** — Elixir and
-  Java helpers both append at file scope and ask the user to relocate.
-  Detecting the chunk's parent container and inserting before its
-  closing `end`/`}` would make the patch immediately compilable.
-- ~~**Python multi-line `def` signatures**~~ — **Shipped**: `pythonHelperHeader` now carries Black-formatted multi-line signatures verbatim (see the Python row in the per-language table above).
-- ~~**TypeScript-specific syntax in the JS emitter**~~ — **Shipped**: annotations/generics carried verbatim, access modifiers dropped on the method-to-free-function rewrite; interfaces/type aliases documented out of scope (see the JS/TS row above).
-**Shipped from this list:** auto-insertion inside the enclosing
-container — `--suggest` patches now insert Java/Elixir helpers inside
-the innermost enclosing class/defmodule so they compile as emitted
-(the file-scope NOTE survives only on the no-container fallback).
-
-- **Elixir `@spec` / `@doc` propagation** — module attributes sitting
-  above a def are skipped by `exHelperHeader` and not carried into the
-  emitted helper. If the contract or docstring is part of the
-  duplication's value, it should propagate. (Multi-clause defs
-  inherit any preceding `@spec` because Elixir attaches it to the
-  function name, not the individual clause — propagation needs to be
-  symbol-scoped, not chunk-scoped.)
-- **Elixir multi-clause grouping** — currently each `def parse(...)`
-  clause is its own chunk (good for clone detection at clause
-  granularity). The next-level feature would be the option to group
-  adjacent clauses by symbol so `--suggest` could produce a single
-  multi-clause helper. Pure ergonomics; no correctness gap.
-- **Python multi-line `def` signatures** — flagged as a TODO at
-  `pythonHelperHeader`. v1 fixtures don't exercise it.
-- **TypeScript-specific syntax in the JS emitter** — return-type
-  annotations (`fn(): T {`), interface declarations, etc. The shared
-  JS emitter handles plain TS today but doesn't strip type
-  annotations.
+- **Auto-insertion inside the enclosing container** — **Shipped.**
+  `--suggest` patches now insert Java/Elixir helpers inside the
+  innermost enclosing class/defmodule (before its closing `}`/`end`)
+  so they compile as emitted; the file-scope NOTE survives only on
+  the no-container fallback.
+- **Python multi-line `def` signatures** — **Shipped**:
+  `pythonHelperHeader` now carries Black-formatted multi-line
+  signatures verbatim (see the Python row in the per-language table
+  above).
+- **TypeScript-specific syntax in the JS emitter** — **Shipped**:
+  annotations/generics carried verbatim, access modifiers dropped on
+  the method-to-free-function rewrite; interfaces/type aliases
+  documented out of scope (see the JS/TS row above).
 
 Bet **5** (clone watchlist + drift alerts) is **shipped** (2026-07-14):
 codetwin now tracks clone families *over time* — snapshot with
 `--update-baseline`, gate CI with `--baseline`, and get one stderr line
 per drift event when a family gains a copy, loses one, or a member's
-body changes while its siblings don't. The next bet to consider is
-**6** (cross-repo / org-level scanning): surface "promote to library"
-candidates across N repos.
+body changes while its siblings don't.
 
-Bet **6** (cross-repo / org-level scanning) shipped 2026-07-14: two or
-more directory roots automatically become "repos", cross-repo clusters
-are tagged and grouped per repo, and `--cross-repo-only` isolates the
-shared-library candidates. The next bet to consider is **5** (clone
-watchlist + drift alerts) — the last unstarted item on the
-next-quarter list.
+Bet **6** (cross-repo / org-level scanning) also shipped 2026-07-14:
+two or more directory roots automatically become "repos", cross-repo
+clusters are tagged and grouped per repo, and `--cross-repo-only`
+isolates the shared-library candidates. With bets 1–6 all shipped, the
+only unstarted item is bet **7** (behavioural equivalence), which
+remains a flagged longshot rather than next-quarter work.
 
 ## Coverage of shipped code
 
@@ -465,13 +449,12 @@ After bet #6 (cross-repo scanning, 2026-07-14):
 | Package | Coverage |
 |---|---|
 | `internal/refactor` | 99.1% |
-| `internal/baseline` | 94.8% _(added 2026-07-14 by bet #5)_ |
-
 | `internal/tokenizer` | 98.7% |
 | `internal/fingerprint` | 97.6% |
 | `internal/git` | 96.7% |
 | `internal/pathutil` | 96.4% |
 | `internal/scan` | 95.8% |
+| `internal/baseline` | 94.8% _(added 2026-07-14 by bet #5)_ |
 | `internal/similarity` | 94.7% |
 | `internal/report` | 94.4% |
 | `internal/splitter` | 94.2% |
@@ -524,7 +507,7 @@ lets bugs slip through.
   but no test parses the actual `./codetwin --json` output and
   checks every documented field is present.
 
-## Integration test plan per remaining bet
+## Integration test plans (bets 4–6, as shipped)
 
 ### Bet #4 follow-ups (JS/TS, Rust, Java, Elixir emitters)
 

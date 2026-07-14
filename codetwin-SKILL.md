@@ -6,8 +6,9 @@ description: >
   opportunities, check for similar functions across files, or scan a codebase for copy-paste across
   Go, JavaScript, TypeScript, Python, Java, Rust, or Elixir. Also trigger when the user says things
   like "find repeated code", "what can be refactored", "check for duplicates", "scan my project
-  for similar functions", or "watch/track clone drift" (baseline snapshots + CI drift gating via
-  --update-baseline / --baseline).
+  for similar functions", "watch/track clone drift" (baseline snapshots + CI drift gating via
+  --update-baseline / --baseline), "did this PR add duplication" (--since), "who introduced this
+  clone" (--blame), or "suggest a refactor for this duplicate" (--suggest).
 ---
 
 # codetwin Skill
@@ -17,7 +18,10 @@ Go, JavaScript/TypeScript, Python, Java, Rust, and Elixir. Function-level
 chunks (plus class-span chunks for Python/Java/JS classes and Elixir
 defmodules, matched class↔class only),
 structural (Winnowing/Jaccard) + semantic (TF-IDF/cosine) scoring,
-DBSCAN clusters.
+DBSCAN clusters. It also reports sub-function partial clones, gates CI on
+duplication a PR introduces (`--since`), annotates findings with git
+provenance (`--blame`), emits starter refactor diffs (`--suggest`), and
+suppresses test↔test findings by default (`--include-tests` restores them).
 
 ## How to use this skill
 
@@ -51,9 +55,10 @@ go install github.com/ccsrvs/codetwin/cmd/codetwin@latest
 ## Quick start
 
 ```bash
-codetwin --threshold 0.40 <path>            # default scan
-codetwin --preview --threshold 0.40 <path>  # with line-numbered previews
-codetwin --json --threshold 0.40 <path>     # JSON for piping into jq
+codetwin <path>                             # default scan (threshold 0.50)
+codetwin --preview <path>                   # with line-numbered previews
+codetwin --json <path>                      # JSON for piping into jq
+codetwin --threshold 0.40 <path>            # wider net, more borderline pairs
 codetwin ../svc-a ../svc-b ../svc-c         # cross-repo scan: >=2 directory
                                             # roots => each root is a "repo";
                                             # --cross-repo-only keeps only
