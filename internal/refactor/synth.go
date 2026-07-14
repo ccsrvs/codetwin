@@ -21,12 +21,30 @@ type Suggestion struct {
 	HelperSrc  string  // full source of the proposed helper, ready to drop into A's file
 	Confidence float64 // CommonLines / max(linesA, linesB)
 	Note       string  // populated when synthesis cannot proceed; HelperSrc is "" in that case
+
+	// Placement metadata, set by Synthesize from snippet A. BuildPatch
+	// uses these to insert the helper inside A's enclosing container
+	// (Java class / Elixir defmodule) rather than appending at file
+	// scope. Zero values (empty Lang / line 0) route to the plain
+	// file-scope append.
+	Lang            tokenizer.Language
+	SourceStartLine int // 1-based first line of A's chunk in A's file
 }
 
 // Synthesize dispatches by language. v1 ships Go, Python, and Java
 // emitters; every other language returns a structured "unsupported"
 // Note so the CLI can surface a clear message without crashing.
+// The returned Suggestion always carries A's language and chunk start
+// line so BuildPatch can place the helper inside A's enclosing
+// container.
 func Synthesize(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	s := synthesizeByLang(a, b, pairID, al)
+	s.Lang = a.Lang
+	s.SourceStartLine = a.StartLine
+	return s
+}
+
+func synthesizeByLang(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
 	if a.Lang != b.Lang {
 		return Suggestion{Note: "rejected: cross-language extraction not supported in v1"}
 	}
@@ -216,12 +234,11 @@ func synthesizePython(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 }
 
 // synthesizeJava produces a starter helper for two Java method-level
-// snippets. Java has no top-level functions: the helper is appended at
-// the end of A's file (matching Go/Python convention) but lands after
-// the wrapping class's closing `}`, so the file won't compile until a
-// human moves the helper inside the appropriate class. The helper
-// header carries a `// NOTE:` comment flagging this. This is the v1
-// "starter, human finishes" contract.
+// snippets. Java has no top-level functions: BuildPatch inserts the
+// helper inside the innermost class/interface/enum/record enclosing
+// A's chunk (see buildPlacedPatch) so the file compiles as emitted.
+// When no enclosing type is found, BuildPatch falls back to a
+// file-scope append and prepends a `// NOTE:` placement comment.
 //
 // Rejection rules (Java splitter only emits methods/constructors, so no
 // anonymous-chunk handling is needed):
@@ -235,16 +252,15 @@ func synthesizePython(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 // wrapping classes are NOT rejected (the advanced fixture has
 // UserStore.fetchA + OrderStore.fetchB and is meant to accept).
 func synthesizeJava(a, b scan.Snippet, pairID string, al Alignment) Suggestion {
+	// No placement NOTE here: helper placement (inside the enclosing
+	// class, or file-scope fallback WITH the note) is the patch layer's
+	// job — see buildPlacedPatch.
 	return synthesizePair(a, b, pairID, al, pairEmitter{
 		commentPrefix:    "//",
 		cfKeywords:       javaControlFlowKeywords,
 		headerRejectNote: "rejected: snippet has no recognisable Java method header",
 		header:           javaHelperHeader,
 		rebody:           javaRebodyAsHelper,
-		notes: func(string) string {
-			return "// NOTE: appended at file scope; move it into the appropriate Java\n" +
-				"// class (or extract to a utility class) before compiling.\n"
-		},
 	})
 }
 
@@ -293,11 +309,11 @@ func rsBodyReferencesSelf(code string) bool {
 // literal copy of A's body, divergence comments, no parameterization,
 // human finishes the refactor.
 //
-// Elixir defs must live inside a `defmodule`, so the helper is
-// emitted as a free `def` block and ALWAYS carries a `# NOTE:` line
-// flagging that the user must move it into an appropriate module
-// before running. (Mirrors Java's "appended at file scope" contract,
-// adapted for Elixir's module-context requirement.)
+// Elixir defs must live inside a `defmodule`, so BuildPatch inserts
+// the helper inside the innermost defmodule enclosing A's chunk (see
+// buildPlacedPatch), producing a file that compiles as emitted. When
+// no enclosing defmodule is found, BuildPatch falls back to a
+// file-scope append and prepends a `# NOTE:` placement comment.
 //
 // Two symbol-scoped extensions run before the shared literal-copy
 // contract (both resolve via exGroupForSnippet, which re-reads the
@@ -368,9 +384,9 @@ func synthesizeElixir(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 		" (pair " + pairID + ").\n")
 	src.WriteString("# This is a literal copy of the first snippet's body. Review the\n")
 	src.WriteString("# divergences below and parameterize as needed before relying on it.\n")
-	src.WriteString("# NOTE: appended at file scope; Elixir defs must live inside a\n")
-	src.WriteString("# defmodule — move this def into the appropriate module (or\n")
-	src.WriteString("# extract to a shared helper module) before compiling.\n")
+	// No file-scope placement NOTE here: placement (inside the enclosing
+	// defmodule, or file-scope fallback WITH the note) is the patch
+	// layer's job — see buildPlacedPatch.
 	if len(ga.clauses) != len(gb.clauses) {
 		src.WriteString(fmt.Sprintf("# NOTE: A has %d clauses, B has %d\n",
 			len(ga.clauses), len(gb.clauses)))

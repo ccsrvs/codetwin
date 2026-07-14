@@ -717,8 +717,10 @@ func TestExHelperHeader_DefForms(t *testing.T) {
 
 // Given the simple/medium/advanced Elixir fixtures, when Synthesize
 // runs, then it accepts and emits a HelperSrc with the helper
-// signature, the divergence block, the module-context NOTE, and both
-// sides' literals. Cycle 10.
+// signature, the divergence block, and both sides' literals. (No
+// placement NOTE: BuildPatch inserts the helper inside the enclosing
+// defmodule; the NOTE only appears on the file-scope fallback.)
+// Cycle 10.
 func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 	cases := []struct {
 		dir           string
@@ -730,8 +732,6 @@ func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 			expectInSrc: []string{
 				"def extracted_price_with_tax_",
 				"# Divergences (B vs A):",
-				"# NOTE:",
-				"defmodule",
 				"0.07",
 				"0.085",
 			},
@@ -745,7 +745,6 @@ func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 				`"admin:"`,
 				`"(active)"`,
 				`"(privileged)"`,
-				"# NOTE:",
 			},
 			minConfidence: 0.4,
 		},
@@ -755,7 +754,6 @@ func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 				"def extracted_fetch_a_",
 				`"/v1"`,
 				`"/v2"`,
-				"# NOTE:",
 			},
 			minConfidence: 0.4,
 		},
@@ -925,23 +923,28 @@ func TestSynthesizeElixir_ConfidenceWithBLongerThanA(t *testing.T) {
 	}
 }
 
-// Given any Elixir snippet, when Synthesize emits the helper, then a
-// `# NOTE:` block always surfaces — Elixir defs cannot live at file
-// scope, so the user must always move the helper into a module.
-// Cycle 9.
-func TestSynthesize_ElixirAlwaysCarriesModuleNote(t *testing.T) {
-	a := scan.Snippet{Name: "x.ex:1-3 a", Lang: tokenizer.Elixir, Code: "def a(x) do\n  x + 1\nend"}
-	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, Code: "def b(x) do\n  x + 2\nend"}
+// Given any Elixir snippet, when Synthesize emits the helper, then the
+// HelperSrc carries NO placement NOTE — placement moved to BuildPatch,
+// which inserts the helper inside the enclosing defmodule (and only
+// prepends the file-scope NOTE on the no-defmodule fallback, covered
+// in patch_test.go). The suggestion must carry the placement metadata
+// BuildPatch needs.
+func TestSynthesize_Elixir_NoPlacementNoteInHelperSrc(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:4-6 a", Lang: tokenizer.Elixir, StartLine: 4, Code: "def a(x) do\n  x + 1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, StartLine: 1, Code: "def b(x) do\n  x + 2\nend"}
 	al := Align(a, b)
 	s := Synthesize(a, b, "deadbeef", al)
 	if s.Note != "" {
 		t.Fatalf("expected accept, got Note=%q", s.Note)
 	}
-	if !strings.Contains(s.HelperSrc, "# NOTE:") {
-		t.Errorf("Elixir helper should always carry a module-context # NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	if strings.Contains(s.HelperSrc, "# NOTE:") {
+		t.Errorf("Elixir HelperSrc should no longer carry a placement # NOTE: line. HelperSrc:\n%s", s.HelperSrc)
 	}
-	if !strings.Contains(s.HelperSrc, "defmodule") {
-		t.Errorf("expected NOTE to mention `defmodule`. HelperSrc:\n%s", s.HelperSrc)
+	if s.Lang != tokenizer.Elixir {
+		t.Errorf("Suggestion.Lang = %q, want %q", s.Lang, tokenizer.Elixir)
+	}
+	if s.SourceStartLine != 4 {
+		t.Errorf("Suggestion.SourceStartLine = %d, want 4 (snippet A's start line)", s.SourceStartLine)
 	}
 }
 
@@ -1616,12 +1619,10 @@ func TestSynthesize_PythonAcceptTiers(t *testing.T) {
 }
 
 // TestSynthesize_JavaAcceptTiers covers the simple/medium/advanced Java
-// fixtures. The helper is appended at file scope (after the wrapping
-// class's closing `}`) — this won't compile until a human moves it
-// into the appropriate class, which is the documented v1 contract for
-// Java. We assert the helper signature, the `// NOTE: appended at file
-// scope` placement comment, the `//`-style divergence block, and that
-// both differing literals show up.
+// fixtures. We assert the helper signature, the `//`-style divergence
+// block, and that both differing literals show up. (No placement NOTE:
+// BuildPatch inserts the helper inside the enclosing class; the NOTE
+// only appears on the file-scope fallback.)
 func TestSynthesize_JavaAcceptTiers(t *testing.T) {
 	cases := []struct {
 		dir           string
@@ -1633,7 +1634,6 @@ func TestSynthesize_JavaAcceptTiers(t *testing.T) {
 			expectInSrc: []string{
 				"public double extracted_priceWithTaxA_",
 				"// Divergences (B vs A):",
-				"// NOTE: appended at file scope",
 				"0.07",
 				"0.085",
 			},
@@ -3014,12 +3014,12 @@ func TestSynthesize_ElixirNoAttributes_ByteIdenticalPin(t *testing.T) {
 	if s.Note != "" {
 		t.Fatalf("expected accept, got Note=%q", s.Note)
 	}
+	// The file-scope placement NOTE is no longer part of HelperSrc — the
+	// patch layer prepends it only on the file-scope fallback (see
+	// buildPlacedPatch); everything else is pinned byte-identical.
 	want := `# codetwin: starter helper extracted from a + b (pair deadbeef).
 # This is a literal copy of the first snippet's body. Review the
 # divergences below and parameterize as needed before relying on it.
-# NOTE: appended at file scope; Elixir defs must live inside a
-# defmodule — move this def into the appropriate module (or
-# extract to a shared helper module) before compiling.
 # Divergences (B vs A):
 #   #1  A[L1-2]: def a(x) do |   x + 1
 #        B[L1-2]: def b(x) do |   x + 2

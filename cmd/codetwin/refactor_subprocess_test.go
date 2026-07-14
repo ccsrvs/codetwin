@@ -518,8 +518,13 @@ func TestSuggest_ElixirSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 	if !strings.Contains(diff, "# Divergences (B vs A):") {
 		t.Errorf("stdout missing divergence comment block. Got:\n%s", diff)
 	}
-	if !strings.Contains(diff, "# NOTE:") {
-		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	// Container-aware placement: the helper lands INSIDE the defmodule
+	// (indented added lines), so the old file-scope NOTE must be gone.
+	if strings.Contains(diff, "appended at file scope") {
+		t.Errorf("stdout carries the file-scope NOTE despite in-module placement. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "+  # codetwin: starter helper") {
+		t.Errorf("stdout missing the module-indented helper banner. Got:\n%s", diff)
 	}
 }
 
@@ -679,8 +684,10 @@ func TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff(t *testing.T) {
 	if !strings.Contains(diff, "extracted_") {
 		t.Errorf("stdout missing extracted_… helper. Got:\n%s", diff)
 	}
-	if !strings.Contains(diff, "# NOTE:") {
-		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	// Container-aware placement: helper lands inside the defmodule, so
+	// the old file-scope NOTE must be gone.
+	if strings.Contains(diff, "appended at file scope") {
+		t.Errorf("stdout carries the file-scope NOTE despite in-module placement. Got:\n%s", diff)
 	}
 }
 
@@ -878,5 +885,63 @@ func TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec(t *testing
 		if !strings.Contains(diff, want) {
 			t.Errorf("stdout missing %q. Got:\n%s", want, diff)
 		}
+	}
+}
+
+// TestSuggest_JavaSimple_HelperInsertedInsideClass: the emitted diff
+// must place the helper INSIDE the enclosing class — the added lines
+// carry one level of member indentation and the obsolete file-scope
+// placement NOTE is gone — so the patched file compiles as emitted.
+func TestSuggest_JavaSimple_HelperInsertedInsideClass(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/java/simple"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	// Select the METHOD pair explicitly — the fixture also produces a
+	// class↔class pair (§5.2 spans), which --suggest rejects by design.
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if p.ID != "" && strings.Contains(p.FileA, "priceWithTax") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("expected a priceWithTax method pair with an id, got:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "+    public double extracted_priceWithTaxA_") {
+		t.Errorf("diff missing the class-indented helper added line. Got:\n%s", diff)
+	}
+	if strings.Contains(diff, "NOTE: appended at file scope") {
+		t.Errorf("diff still carries the file-scope placement NOTE. Got:\n%s", diff)
 	}
 }
