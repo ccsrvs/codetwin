@@ -94,6 +94,9 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         top-level partial_clones array.
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
+--cross-repo-only       report only findings whose endpoints are in different repos.
+                        Requires ≥2 directory roots — each root is a "repo" (see
+                        "Cross-repo scanning" below); composes with --cross-lang-only
 --include-tests         include test↔test pairs and test-only clusters; by default they
                         are suppressed and replaced by a one-line summary
                         (test↔production pairs and mixed clusters always render)
@@ -125,6 +128,8 @@ works the same in a non-git directory as it does in one.
 |---|---|
 | CI gate: fail only on duplication this PR introduces | `codetwin --since main --threshold 0.85 --json <path>` |
 | Find duplicate logic across languages in a polyglot repo | `codetwin --cross-lang-only --threshold 0.50 <path>` |
+| Find shared-library candidates across N service repos | `codetwin --cross-repo-only ../svc-a ../svc-b ../svc-c` |
+| List cross-repo clusters machine-readably | `codetwin --json ../svc-a ../svc-b \| jq '.clusters[] \| select(.cross_repo)'` |
 | Show the freshest clones (newest endpoint first) | `codetwin --blame --sort age --limit 10 <path>` |
 | Annotate every match with origin metadata | `codetwin --blame --preview <path>` |
 | Triage who introduced this clone | `codetwin --blame --json <path> \| jq '.pairs[] \| {a:.file_a,b:.file_b,intro_a:.provenance_a.first_date,intro_b:.provenance_b.first_date}'` |
@@ -133,6 +138,35 @@ works the same in a non-git directory as it does in one.
 `codetwin --help` prints the same flag list with one-line descriptions.
 `codetwin --guide` walks through the score bands, structural/semantic
 sub-scores, and pairs vs clusters in more depth.
+
+### Cross-repo scanning
+
+Passing **two or more directory roots** switches on cross-repo mode
+automatically — each root is treated as a "repo", labelled by the base
+name of its absolute path (duplicates disambiguate by input order:
+`api`, `api~2`, …). Snippet names gain the label as a prefix with paths
+relative to their root (`svc-a:src/handler.go:10-30 Parse`); clusters
+spanning ≥2 repos are tagged `cross-repo` in the terminal report with
+members grouped per repo; JSON gains `repo_a`/`repo_b` on pairs and
+partial clones plus `member_repos`/`cross_repo` on clusters (all
+omitted on single-root scans, whose output is unchanged).
+
+Cross-repo clusters are "promote to a shared library" candidates —
+the same logic maintained independently in every listed repo. Use
+`--cross-repo-only` to filter the report down to repo-spanning
+findings.
+
+Notes for agents:
+
+- Single-root and file-argument invocations never namespace — expect
+  the prefix ONLY when you passed ≥2 directories (`codetwin ./internal
+  ./cmd` reports `internal:…`/`cmd:…` names).
+- `ignore_pairs` endpoints match the UN-prefixed, root-relative name.
+- The per-file cache is keyed by absolute path, so repeated org-level
+  scans are incremental.
+- `--since`/`--blame` exit 1 when the roots live in different git
+  repositories (they resolve exactly one repo); roots inside the same
+  repository work as usual.
 
 ### Refactor suggestions (`--suggest`)
 

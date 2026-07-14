@@ -1320,6 +1320,14 @@ USAGE:
   Paths can be files or directories (scanned recursively).
   Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs
 
+  Two or more DIRECTORY roots switch on cross-repo mode: each root is a
+  "repo" (labelled by its base name; duplicates become name~2, name~3 …
+  by input order), snippet names gain a "repo:" prefix with paths shown
+  relative to their root, clusters spanning >=2 repos are tagged
+  cross-repo with members grouped per repo, and JSON gains
+  repo_a/repo_b/member_repos/cross_repo fields. Single-root and
+  file-argument runs are unchanged.
+
 FLAGS:
   --threshold float    minimum score to report (default 0.50)
   --plain              no ANSI colors, suitable for pipes and CI
@@ -1347,6 +1355,8 @@ FLAGS:
   --debug              print phase checkpoints with elapsed time to stderr
   --cross-lang-only    report only pairs whose two snippets are in different languages
                        (e.g. duplicate logic across Go service + TS dashboard)
+  --cross-repo-only    report only findings whose endpoints are in different repos
+                       (requires >=2 directory roots; composes with --cross-lang-only)
   --include-tests      include test↔test pairs and test-only clusters; by default
                        they are suppressed and replaced by a one-line summary
                        (test↔production pairs and mixed clusters always render)
@@ -1366,6 +1376,8 @@ EXAMPLES:
   codetwin --plain ./src > report.txt
   codetwin --json ./src | jq '.pairs[] | select(.score > 0.8)'
   codetwin ./utils/a.go ./utils/b.go
+  codetwin ../svc-a ../svc-b ../svc-c              # cross-repo scan
+  codetwin --cross-repo-only ../svc-a ../svc-b     # only repo-spanning findings
 
 SCORING:
   > 95%%  Exact clone       — extract shared utility, delete one

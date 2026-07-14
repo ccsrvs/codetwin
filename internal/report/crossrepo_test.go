@@ -131,6 +131,27 @@ func TestRender_CrossRepoCluster_TagsHeaderAndGroupsMembersPerRepo(t *testing.T)
 	}
 }
 
+func TestRender_CrossRepoClusterWithDirectFileMember_GroupsUnderNoRepo(t *testing.T) {
+	// Mixed invocation: two directory roots plus a direct file argument
+	// whose snippet has no repo label. The empty label renders as a
+	// "(no repo)" group so the member is never silently dropped.
+	clusters := []Cluster{{
+		ID:          0,
+		Members:     []string{"svc-a:x.go:1-10 F", "svc-b:y.go:1-10 F", "lone.go:1-10 F"},
+		MemberRepos: []string{"svc-a", "svc-b", ""},
+		Score:       0.9,
+	}}
+	var buf strings.Builder
+	Render(&buf, nil, clusters, Options{Plain: true, Threshold: 0.5})
+	out := buf.String()
+	if !strings.Contains(out, "(no repo) — 1 snippet") {
+		t.Errorf("direct-file member should group under (no repo):\n%s", out)
+	}
+	if !strings.Contains(out, "· lone.go:1-10 F") {
+		t.Errorf("direct-file member missing from cluster:\n%s", out)
+	}
+}
+
 func TestRender_SingleRepoCluster_IsByteIdenticalToPreMultiRepoOutput(t *testing.T) {
 	// The compatibility contract: a cluster without MemberRepos (any
 	// single-root scan) must render exactly as before the cross-repo

@@ -51,6 +51,10 @@ go install github.com/ccsrvs/codetwin/cmd/codetwin@latest
 codetwin --threshold 0.40 <path>            # default scan
 codetwin --preview --threshold 0.40 <path>  # with line-numbered previews
 codetwin --json --threshold 0.40 <path>     # JSON for piping into jq
+codetwin ../svc-a ../svc-b ../svc-c         # cross-repo scan: >=2 directory
+                                            # roots => each root is a "repo";
+                                            # --cross-repo-only keeps only
+                                            # repo-spanning findings
 ```
 
 For anything beyond that — sort modes, limits, ignore rules, the
