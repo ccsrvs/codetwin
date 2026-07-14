@@ -95,6 +95,15 @@ func collectCases(t *testing.T) []benchCase {
 
 	addDir(filepath.Join(root, "bench", "negative"), false, 0)
 
+	// Idiom negatives: same-language pairs that share only a language
+	// idiom (map-accumulator loops, comprehension+guard, async/try
+	// shape), not logic — the semantic-saturation noise class from the
+	// algorithms review §3.3. Standard negative ceiling applies: with
+	// structural corroboration required for same-language pairs, no
+	// amount of trigram-cosine saturation may push these into the
+	// default report band.
+	addDir(filepath.Join(root, "bench", "negative-idiom"), false, 0)
+
 	// Short negatives: labeled noise pairs under 10 non-blank lines,
 	// asserted against the dampened score rather than the raw one.
 	shortBase := filepath.Join(root, "bench", "negative-short")
