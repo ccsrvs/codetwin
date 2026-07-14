@@ -77,30 +77,64 @@ func SynthesizeBlock(a, b scan.Snippet, blockID string, al Alignment) Suggestion
 	}
 }
 
-// trimBlockToCommon shrinks both block slices to the line range
-// covered by the alignment's first and last common spans, dropping the
-// leading/trailing hole lines the detector's token-span rounding can
-// include, then re-aligns the trimmed slices. No common span → inputs
-// pass through unchanged (the emitters reject that case anyway).
+// maxBoundaryTrim caps how many lines trimBlockToCommon may cut from
+// each edge of each side. The detector's token-span rounding drags in
+// at most a line or two of the neighboring divergent code (typically
+// the hosts' own function headers); anything deeper isn't rounding
+// noise.
+const maxBoundaryTrim = 2
+
+// trimBlockToCommon drops the leading/trailing hole lines the
+// detector's token-span rounding can include in a block's line range,
+// then re-aligns the trimmed slices. Two guards keep it from eating
+// real content:
+//
+//   - Trimming only happens when the line alignment is dense (common
+//     lines cover at least half the smaller side). Renamed blocks
+//     match at the normalized-token level but share few verbatim
+//     lines, so their sparse alignment says nothing about boundaries —
+//     they pass through untrimmed and the helper stays a literal copy
+//     of A's slice.
+//   - Each edge of each side loses at most maxBoundaryTrim lines.
+//
+// No common span → inputs pass through unchanged (the emitters reject
+// that case anyway).
 func trimBlockToCommon(a, b scan.Snippet, al Alignment) (scan.Snippet, scan.Snippet, Alignment) {
 	if len(al.Common) == 0 {
 		return a, b, al
 	}
+	aLines := a.EndLine - a.StartLine + 1
+	bLines := b.EndLine - b.StartLine + 1
+	minLines := aLines
+	if bLines < minLines {
+		minLines = bLines
+	}
+	if al.CommonLines()*2 < minLines {
+		return a, b, al // sparse alignment (renamed block): don't trust it
+	}
 	first := al.Common[0]
 	last := al.Common[len(al.Common)-1]
-	// Alignment line numbers are 1-based half-open within Code;
-	// convert to absolute inclusive lines for SliceBlock.
-	aStart := a.StartLine + first.AStart - 1
-	aEnd := a.StartLine + last.AEnd - 2
-	bStart := b.StartLine + first.BStart - 1
-	bEnd := b.StartLine + last.BEnd - 2
-	if aStart == a.StartLine && aEnd == a.EndLine &&
-		bStart == b.StartLine && bEnd == b.EndLine {
+	// Alignment line numbers are 1-based half-open within Code.
+	aLead := clampTrim(first.AStart - 1)
+	aTail := clampTrim(aLines - (last.AEnd - 1))
+	bLead := clampTrim(first.BStart - 1)
+	bTail := clampTrim(bLines - (last.BEnd - 1))
+	if aLead == 0 && aTail == 0 && bLead == 0 && bTail == 0 {
 		return a, b, al // nothing to trim
 	}
-	ta := SliceBlock(a, aStart, aEnd, a.Name)
-	tb := SliceBlock(b, bStart, bEnd, b.Name)
+	ta := SliceBlock(a, a.StartLine+aLead, a.EndLine-aTail, a.Name)
+	tb := SliceBlock(b, b.StartLine+bLead, b.EndLine-bTail, b.Name)
 	return ta, tb, Align(ta, tb)
+}
+
+func clampTrim(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > maxBoundaryTrim {
+		return maxBoundaryTrim
+	}
+	return n
 }
 
 // synthesizeGoBlock wraps side A's block span in a fresh Go helper.

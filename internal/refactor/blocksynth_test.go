@@ -246,6 +246,26 @@ func TestSynthesizeBlock_TrimsBoundaryHoles(t *testing.T) {
 	}
 }
 
+func TestSynthesizeBlock_SparseAlignmentSkipsTrim(t *testing.T) {
+	// A renamed block matches at the normalized-token level but shares
+	// few verbatim lines; the sparse line alignment must NOT be used
+	// to trim boundaries — the helper stays a literal copy of A's
+	// slice, edges included.
+	aCode := "\tif reqA == nil {\n\t\treturn errA\n\t}\n\tcountA := len(reqA.Items)\n\tuseA(countA)\n"
+	bCode := "\tif reqB == nil {\n\t\treturn errB\n\t}\n\tcountB := len(reqB.Items)\n\tuseB(countB)\n"
+	a := blockSnippet("a.go:5-9", tokenizer.Go, aCode, 5)
+	b := blockSnippet("b.go:5-9", tokenizer.Go, bCode, 5)
+	s := SynthesizeBlock(a, b, "deadbeef", Align(a, b))
+	if s.Note != "" {
+		t.Fatalf("unexpected rejection: %q", s.Note)
+	}
+	for _, want := range []string{"\tif reqA == nil {", "\tuseA(countA)"} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("sparse-alignment helper lost edge line %q:\n%s", want, s.HelperSrc)
+		}
+	}
+}
+
 func TestSynthesizeBlock_UnsupportedLanguageRejects(t *testing.T) {
 	code := "  const a = 1;\n  use(a);\n"
 	a := blockSnippet("a.js:3-4", tokenizer.JavaScript, code, 3)
