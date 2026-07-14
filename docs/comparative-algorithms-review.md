@@ -356,10 +356,29 @@ granularity work.
 > follow-up (`elixir-module-clone` bench case; modules with < 2 defs
 > are not span-chunked — one-callback modules would be pure noise —
 > and the change added a splitter schema component to cache.SchemaTag
-> so pre-module-span caches invalidate). Remaining follow-ups: Go
-> struct+methodset symbol-grouping (span-based chunks don't apply —
-> methods live outside the type block), and JS class *expressions*
-> (`const A = class {}`), which are not span-chunked.
+> so pre-module-span caches invalidate). Rust `impl` spans and Go
+> struct+methodset grouping landed next (`rust-impl-clone` /
+> `go-methodset-clone` bench cases; splitter.SchemaVersion bumped to
+> 3). Rust impl blocks are contiguous containers chunked like Java
+> classes, with the TYPE name as symbol (trait impls of one type share
+> it). Go has no contiguous container — methods live outside the type
+> block — so its "class" chunk is SYNTHETIC: the struct decl plus its
+> in-file methodset (>= 2 methods, decl-anchored, pointer/value
+> receivers unified) joined in file order under the COVERING line
+> range. The covering range over-approximates by design: --since
+> overlap and blame degrade gracefully (whole-stretch over-match),
+> previews render the joined text, and the same-file nesting filter
+> consequently suppresses group-vs-interleaved-unrelated-function pairs
+> too (acceptable — cross-file group↔group is the value). One
+> correctness consequence made class-kind chunks ineligible for the
+> §5.3 block-candidate channel across ALL languages: the block
+> detector's chunk-relative→absolute line arithmetic would lie on
+> joined non-contiguous Code, and container-level blocks only re-find
+> text the method chunks already cover. Remaining follow-ups: JS class
+> *expressions* (`const A = class {}`) are not span-chunked, Go
+> methods-only files (type declared in a sibling file) get no group,
+> and Go `type (...)` declaration blocks are not scanned for struct
+> decls.
 
 Java/JS splitters deliberately reject class headers so methods
 dominate; Python and Go have no class/struct chunks at all. Emitting a

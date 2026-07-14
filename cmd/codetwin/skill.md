@@ -11,11 +11,13 @@ codetwin operates in five internal stages — all handled automatically:
    Go `func`, JS `function`/arrow/class method, Rust `fn`, Java method,
    Elixir `def`). A 500-line module with one duplicated 20-line helper
    scores high on the helper rather than getting washed out by 480
-   lines of unrelated code. Python/Java/JS classes and Elixir
-   defmodules (with 2+ defs) ALSO become class-span chunks, compared
-   only against other classes — a copied, renamed class or module with
-   reordered methods surfaces as one class↔class finding (named with
-   the class/module symbol) on top of its method pairs.
+   lines of unrelated code. Python/Java/JS classes, Elixir defmodules
+   (with 2+ defs), Rust impl blocks, and Go struct+methodset groups
+   (type decl + its 2+ in-file methods, joined) ALSO become class-kind
+   chunks, compared only against other classes — a copied, renamed
+   class or module with reordered methods surfaces as one class↔class
+   finding (named with the class/module/type symbol) on top of its
+   method pairs.
 2. **Tokenize & normalize** — strip comments, imports, replace literals/
    identifiers with canonical tokens
 3. **Winnowing fingerprints** — structural (Jaccard) similarity via k-gram hashing

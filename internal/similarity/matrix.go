@@ -185,8 +185,18 @@ func BuildMatrix(
 					// itself won't render (below threshold), but a shared
 					// sub-function block might hide inside it. Collected
 					// here because the band reaches below the
-					// materialization floor.
+					// materialization floor. Class-kind pairs are excluded
+					// (checking one side suffices — the kind gate above
+					// guarantees both sides match): every method inside a
+					// container is emitted as its own function chunk and
+					// participates in the block channel independently, so
+					// container-level block detection only re-finds the
+					// same text — and for Go struct+methodset groups the
+					// joined non-contiguous Code would make the block
+					// detector's chunk-relative line arithmetic report
+					// ranges that don't exist in the source.
 					if sameLang && structural > 0 &&
+						snippets[i].Kind != splitter.KindClass &&
 						combined >= BlockCandidateFloor && combined < threshold {
 						localBlockCands = append(localBlockCands, [2]int{i, j})
 					}

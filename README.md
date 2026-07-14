@@ -335,6 +335,24 @@ addition to** the method chunks inside them:
   would just duplicate the single def plus `defmodule`/`end`
   boilerplate, and Elixir's pervasive one-callback modules would
   otherwise pair up as module↔module near-noise.
+- **Rust** — `impl Foo { ... }` and `impl Trait for Foo { ... }` blocks.
+  The symbol is always the TYPE name (`Foo`), so an inherent impl and
+  the trait impls of one type share a symbol; each block is its own
+  chunk. An impl declared inside a function body is not chunked (same
+  rule as a JS class inside a function).
+- **Go** — struct+methodset **groups**. Go methods live *outside* the
+  type block, so there is no contiguous span to cut: instead the
+  splitter builds one **synthetic** chunk per struct type declared in a
+  file with **two or more in-file methods** — the type decl plus every
+  `func (r Foo)` / `func (r *Foo)` method (pointer and value receivers
+  unify), joined in file order. Source interleaved between them is
+  excluded from the chunk's text, but the chunk's *line range* is the
+  covering range (decl start to last method end), which
+  over-approximates: `--since` overlap and blame treat the whole
+  stretch as the chunk (a safe over-match), and previews render the
+  joined text. Interfaces never group (no methodset can exist), and a
+  methods-only file — the type declared in a sibling file — gets no
+  group (grouping is decl-anchored).
 
 This catches the case method-level granularity underreports: a whole
 class copied and renamed with its methods slightly reordered surfaces
@@ -347,14 +365,15 @@ chunks**. A big class weakly resembling a small function across files
 is container-vs-part noise, not a clone; those mixed-kind comparisons
 are skipped entirely (matrix cell stays 0, nothing materializes, no
 cluster or block-candidate edges). Same-file class-vs-own-method
-overlap was already suppressed by the nested-chunk filter. Class↔class
-pairs participate in clusters and the block channel like any other
-same-kind pair.
-
-Go and Rust have no class-span equivalent: Go methods live *outside*
-the type block, so "class-level" there means struct+methodset symbol
-grouping — a possible follow-up, tracked in
-`docs/comparative-algorithms-review.md` §5.2.
+overlap was already suppressed by the nested-chunk filter — for Go
+groups this extends to anything inside the covering range, including
+unrelated functions interleaved between the methods (same-file
+container findings are rarely the value; cross-file group↔group is).
+Class↔class pairs participate in clusters like any other same-kind
+pair, but not in the partial-clone block channel: every method inside
+a container is already its own function chunk there, so container-level
+block detection would only re-find the same text — and a Go group's
+joined non-contiguous code would misreport block line ranges.
 
 With `--preview` on, each side renders a line-numbered excerpt of its
 exact block range (capped by `--preview-lines`); in JSON the
@@ -726,10 +745,12 @@ Breaks each file into per-definition chunks: every Python `def`, Go `func`
 Elixir `def`/`defp`. Each chunk is then compared independently. A 500-line
 module with one duplicated 20-line helper now scores high on that helper
 instead of being washed out by 480 lines of unrelated code. For the
-container languages (Python, Java, JS/TS, Elixir) the splitter ALSO emits
-one class-span chunk per `class`/`interface`/`enum`/`record`/`defmodule`
-declaration, tagged with a distinct chunk kind — see "Class-level
-matching" below.
+container languages (Python, Java, JS/TS, Elixir, Rust) the splitter ALSO
+emits one class-span chunk per
+`class`/`interface`/`enum`/`record`/`defmodule`/`impl` declaration, and
+for Go one synthetic struct+methodset group per type with two or more
+in-file methods — all tagged with a distinct chunk kind — see
+"Class-level matching" below.
 
 **Fingerprint** (`internal/fingerprint`)
 Implements the Winnowing algorithm. Slides a window over k-gram hashes and
