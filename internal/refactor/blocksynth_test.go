@@ -204,8 +204,11 @@ func TestSynthesizeBlock_PythonEmitsWrappedHelper(t *testing.T) {
 }
 
 func TestSynthesizeBlock_DivergentLineGetsDivergenceComment(t *testing.T) {
-	aCode := "\tx := load()\n\tvalidate(x)\n\tstore(x, primaryDB)\n"
-	bCode := "\tx := load()\n\tvalidate(x)\n\tstore(x, replicaDB)\n"
+	// Divergent line in the block's interior: boundary holes are
+	// trimmed away (see TestSynthesizeBlock_TrimsBoundaryHoles), but
+	// interior holes must surface as divergence comments.
+	aCode := "\tx := load()\n\tstore(x, primaryDB)\n\tfinish(x)\n"
+	bCode := "\tx := load()\n\tstore(x, replicaDB)\n\tfinish(x)\n"
 	a := blockSnippet("a.go:5-7", tokenizer.Go, aCode, 5)
 	b := blockSnippet("b.go:9-11", tokenizer.Go, bCode, 9)
 	al := Align(a, b)
@@ -218,6 +221,28 @@ func TestSynthesizeBlock_DivergentLineGetsDivergenceComment(t *testing.T) {
 	}
 	if !strings.Contains(s.HelperSrc, "primaryDB") || !strings.Contains(s.HelperSrc, "replicaDB") {
 		t.Errorf("divergence comment should show both sides:\n%s", s.HelperSrc)
+	}
+}
+
+func TestSynthesizeBlock_TrimsBoundaryHoles(t *testing.T) {
+	// The detector's token-span rounding can drag a divergent boundary
+	// line into the block range (typically the hosts' own function
+	// headers). Those must be trimmed out of the helper body.
+	aCode := "func hostA(db DB) error {\n\tx := load()\n\tvalidate(x)\n\trows := db.query()\n"
+	bCode := "func hostB(q Queue) error {\n\tx := load()\n\tvalidate(x)\n\tjobs := q.drain()\n"
+	a := blockSnippet("a.go:12-15", tokenizer.Go, aCode, 12)
+	b := blockSnippet("b.go:12-15", tokenizer.Go, bCode, 12)
+	s := SynthesizeBlock(a, b, "deadbeef", Align(a, b))
+	if s.Note != "" {
+		t.Fatalf("unexpected rejection: %q", s.Note)
+	}
+	for _, reject := range []string{"hostA", "db.query", "func hostA"} {
+		if strings.Contains(s.HelperSrc, reject) {
+			t.Errorf("boundary hole line %q leaked into helper:\n%s", reject, s.HelperSrc)
+		}
+	}
+	if !strings.Contains(s.HelperSrc, "\tx := load()\n\tvalidate(x)\n") {
+		t.Errorf("common region missing from helper body:\n%s", s.HelperSrc)
 	}
 }
 

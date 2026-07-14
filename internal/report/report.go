@@ -137,6 +137,13 @@ type BlockClone struct {
 	// PathA / PathB are the absolute paths of the two files, carried
 	// for --since diff filtering. Never rendered.
 	PathA, PathB string
+
+	// ChunkA / ChunkB are the enclosing snippets' names (the
+	// splitter's "path:start-end Symbol" form), carried so downstream
+	// consumers (--suggest, --preview) can resolve each side back to
+	// its host snippet and slice the block's code out of it. Never
+	// rendered or serialized.
+	ChunkA, ChunkB string
 }
 
 // RangeNameA returns side A's "file:start-end" range name, the unit

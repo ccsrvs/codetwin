@@ -6,12 +6,14 @@ package main
 // the PARTIAL CLONES section / `partial_clones` JSON array.
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 
 	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/git"
+	"github.com/ccsrvs/codetwin/internal/refactor"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 )
@@ -52,9 +54,9 @@ func detectBlockClones(
 		fileB, symB := splitChunkName(b.Name)
 		for _, m := range blocks.Detect(a, b, minBlockLines) {
 			bc := report.BlockClone{
-				FileA: fileA, SymbolA: symA, PathA: a.Path,
+				FileA: fileA, SymbolA: symA, PathA: a.Path, ChunkA: a.Name,
 				AStartLine: m.AStartLine, AEndLine: m.AEndLine,
-				FileB: fileB, SymbolB: symB, PathB: b.Path,
+				FileB: fileB, SymbolB: symB, PathB: b.Path, ChunkB: b.Name,
 				BStartLine: m.BStartLine, BEndLine: m.BEndLine,
 				Containment: m.Containment,
 				LinesA:      m.ALines, LinesB: m.BLines,
@@ -143,6 +145,75 @@ func filterBlocksBySince(bcs []report.BlockClone, repoRoot string, diff git.Diff
 	return kept, dropped
 }
 
+// blockPseudoSnippets resolves a block clone back to its two host
+// snippets and slices each side's chunk code down to the block's line
+// range, yielding the pseudo-snippets the refactor pipeline consumes.
+// The second return is the host snippet of side A (whose EndLine is
+// where the emitted helper gets inserted after).
+func blockPseudoSnippets(bc report.BlockClone, snippets []scan.Snippet) (pa, pb, hostA scan.Snippet, err error) {
+	a, ok := findSnippet(bc.ChunkA, snippets)
+	if !ok {
+		return pa, pb, hostA, fmt.Errorf("snippet not found: %s", bc.ChunkA)
+	}
+	b, ok := findSnippet(bc.ChunkB, snippets)
+	if !ok {
+		return pa, pb, hostA, fmt.Errorf("snippet not found: %s", bc.ChunkB)
+	}
+	pa = refactor.SliceBlock(a, bc.AStartLine, bc.AEndLine, bc.RangeNameA())
+	pb = refactor.SliceBlock(b, bc.BStartLine, bc.BEndLine, bc.RangeNameB())
+	return pa, pb, a, nil
+}
+
+// synthesizeBlockSuggestion runs the block-mode refactor pipeline
+// (slice → align → synthesize) for one partial clone.
+func synthesizeBlockSuggestion(bc report.BlockClone, snippets []scan.Snippet) (refactor.Suggestion, scan.Snippet, error) {
+	pa, pb, hostA, err := blockPseudoSnippets(bc, snippets)
+	if err != nil {
+		return refactor.Suggestion{}, hostA, err
+	}
+	al := refactor.Align(pa, pb)
+	return refactor.SynthesizeBlock(pa, pb, bc.ID, al), hostA, nil
+}
+
+// buildBlockSuggestionMap synthesizes a block-mode Suggestion for
+// every visible partial clone, packaged as jsonPatch entries keyed by
+// block ID. Used by --suggest-all to populate `suggested_patch` on the
+// partial_clones array. Blocks whose host snippets can't be resolved
+// are skipped silently, mirroring buildSuggestionMap.
+func buildBlockSuggestionMap(blocks []report.BlockClone, snippets []scan.Snippet) map[string]jsonPatch {
+	out := make(map[string]jsonPatch, len(blocks))
+	for _, bc := range blocks {
+		sug, hostA, err := synthesizeBlockSuggestion(bc, snippets)
+		if err != nil {
+			continue
+		}
+		patch := jsonPatch{
+			HelperName: sug.HelperName,
+			Confidence: sug.Confidence,
+			Note:       sug.Note,
+		}
+		if sug.HelperSrc != "" {
+			diff, err := refactor.BuildPatchInsertAfter(hostA.Path, hostA.EndLine, sug)
+			if err != nil {
+				patch.Note = "error: " + err.Error()
+			} else {
+				patch.UnifiedDiff = diff
+			}
+		}
+		out[bc.ID] = patch
+	}
+	return out
+}
+
+func findBlockByID(id string, blocks []report.BlockClone) (report.BlockClone, bool) {
+	for _, b := range blocks {
+		if b.ID == id {
+			return b, true
+		}
+	}
+	return report.BlockClone{}, false
+}
+
 // jsonBlockClone is the `partial_clones` array element schema.
 type jsonBlockClone struct {
 	ID          string  `json:"id"`
@@ -157,9 +228,15 @@ type jsonBlockClone struct {
 	Containment float64 `json:"containment"`
 	LinesA      int     `json:"lines_a"`
 	LinesB      int     `json:"lines_b"`
+
+	// SuggestedPatch is populated by --suggest-all (block-mode
+	// synthesis); nil otherwise. Same shape as the pair-level field.
+	SuggestedPatch *jsonPatch `json:"suggested_patch,omitempty"`
 }
 
-func toJSONBlockClones(bcs []report.BlockClone) []jsonBlockClone {
+// toJSONBlockClones converts the visible blocks to their JSON schema,
+// attaching --suggest-all block suggestions by ID when present.
+func toJSONBlockClones(bcs []report.BlockClone, suggestions map[string]jsonPatch) []jsonBlockClone {
 	if len(bcs) == 0 {
 		return nil
 	}
@@ -171,6 +248,12 @@ func toJSONBlockClones(bcs []report.BlockClone) []jsonBlockClone {
 			FileB: b.FileB, StartLineB: b.BStartLine, EndLineB: b.BEndLine, SymbolB: b.SymbolB,
 			Containment: b.Containment,
 			LinesA:      b.LinesA, LinesB: b.LinesB,
+		}
+		if suggestions != nil {
+			if patch, ok := suggestions[b.ID]; ok {
+				p := patch
+				out[i].SuggestedPatch = &p
+			}
 		}
 	}
 	return out

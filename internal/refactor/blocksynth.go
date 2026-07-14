@@ -53,10 +53,19 @@ func SliceBlock(s scan.Snippet, startLine, endLine int, name string) scan.Snippe
 // Python are implemented; every other language returns a structured
 // "not implemented" Note so the CLI can reject with a clear message
 // (mirroring the v1 pair-level scope boundary).
+//
+// Before dispatch the block slices are trimmed to the aligned common
+// region: the detector's line ranges are token-span bounds, which can
+// drag in a divergent boundary line on each end (typically the hosts'
+// own function headers) — those lines aren't part of the shared block
+// and would poison the helper body, so leading/trailing holes are cut
+// and the alignment recomputed. Interior holes (the rare edited line
+// inside the block) survive and surface as divergence comments.
 func SynthesizeBlock(a, b scan.Snippet, blockID string, al Alignment) Suggestion {
 	if a.Lang != b.Lang {
 		return Suggestion{Note: "rejected: cross-language extraction not supported"}
 	}
+	a, b, al = trimBlockToCommon(a, b, al)
 	switch a.Lang {
 	case tokenizer.Go:
 		return synthesizeGoBlock(a, b, blockID, al)
@@ -66,6 +75,32 @@ func SynthesizeBlock(a, b scan.Snippet, blockID string, al Alignment) Suggestion
 		return Suggestion{Note: fmt.Sprintf(
 			"block extraction not implemented for %s (supported: go, python)", a.Lang)}
 	}
+}
+
+// trimBlockToCommon shrinks both block slices to the line range
+// covered by the alignment's first and last common spans, dropping the
+// leading/trailing hole lines the detector's token-span rounding can
+// include, then re-aligns the trimmed slices. No common span → inputs
+// pass through unchanged (the emitters reject that case anyway).
+func trimBlockToCommon(a, b scan.Snippet, al Alignment) (scan.Snippet, scan.Snippet, Alignment) {
+	if len(al.Common) == 0 {
+		return a, b, al
+	}
+	first := al.Common[0]
+	last := al.Common[len(al.Common)-1]
+	// Alignment line numbers are 1-based half-open within Code;
+	// convert to absolute inclusive lines for SliceBlock.
+	aStart := a.StartLine + first.AStart - 1
+	aEnd := a.StartLine + last.AEnd - 2
+	bStart := b.StartLine + first.BStart - 1
+	bEnd := b.StartLine + last.BEnd - 2
+	if aStart == a.StartLine && aEnd == a.EndLine &&
+		bStart == b.StartLine && bEnd == b.EndLine {
+		return a, b, al // nothing to trim
+	}
+	ta := SliceBlock(a, aStart, aEnd, a.Name)
+	tb := SliceBlock(b, bStart, bEnd, b.Name)
+	return ta, tb, Align(ta, tb)
 }
 
 // synthesizeGoBlock wraps side A's block span in a fresh Go helper.
