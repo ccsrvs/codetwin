@@ -62,6 +62,15 @@ func parseSnippetName(name string) (path, symbol string) {
 	return path, symbol
 }
 
+// ParseSnippetName is the exported form of parseSnippetName. The baseline
+// package reuses it so clone-watchlist member identity and ignore_pairs
+// endpoints share exactly one normalization: the ":start-end" line range is
+// discarded (routine edits shift line numbers) and the optional splitter
+// symbol is returned separately.
+func ParseSnippetName(name string) (path, symbol string) {
+	return parseSnippetName(name)
+}
+
 // CompileIgnorePairs turns the `ignore_pairs` config slice into a matcher.
 // Both endpoints are validated; invalid globs and empty endpoints are
 // collected and reported together so the user fixes every problem in one
