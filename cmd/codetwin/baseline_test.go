@@ -68,7 +68,7 @@ func baselineFixtureSnapshot(t *testing.T, dir string) baseline.Snapshot {
 	for i, s := range snips {
 		names[i] = s.Name
 	}
-	clusters := buildReportClusters(groups, matrix, names, 0.50)
+	clusters := buildReportClusters(groups, matrix, names, make([]string, len(snips)), 0.50)
 
 	memberLists := make([][]string, len(clusters))
 	for i, c := range clusters {
