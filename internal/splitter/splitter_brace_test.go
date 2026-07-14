@@ -19,7 +19,7 @@ func matchKeyword(keyword, symbol string) braceMatcher {
 func TestSplitBraceBased_Given_NoMatches_When_Split_Then_ReturnsNoChunks(t *testing.T) {
 	code := "alpha\nbeta\ngamma\n"
 
-	chunks := splitBraceBased(code, matchAlwaysFalse, false)
+	chunks := splitBraceBased(code, matchAlwaysFalse, false, nil)
 
 	if len(chunks) != 0 {
 		t.Errorf("expected no chunks, got %d", len(chunks))
@@ -27,7 +27,7 @@ func TestSplitBraceBased_Given_NoMatches_When_Split_Then_ReturnsNoChunks(t *test
 }
 
 func TestSplitBraceBased_Given_EmptyInput_When_Split_Then_ReturnsNoChunks(t *testing.T) {
-	chunks := splitBraceBased("", matchAlwaysFalse, false)
+	chunks := splitBraceBased("", matchAlwaysFalse, false, nil)
 
 	if len(chunks) != 0 {
 		t.Errorf("expected no chunks, got %d", len(chunks))
@@ -38,7 +38,7 @@ func TestSplitBraceBased_Given_SingleBracedDefinition_When_Split_Then_EmitsChunk
 	code := "header {\n  body\n}\n"
 	match := matchKeyword("header {", "Run")
 
-	chunks := splitBraceBased(code, match, false)
+	chunks := splitBraceBased(code, match, false, nil)
 
 	want := []Chunk{{StartLine: 1, EndLine: 3, Symbol: "Run", Code: "header {\n  body\n}"}}
 	if !reflect.DeepEqual(chunks, want) {
@@ -50,7 +50,7 @@ func TestSplitBraceBased_Given_BodylessHeader_When_EmitBodylessFalse_Then_NoChun
 	code := "stub_header\nunrelated\n"
 	match := matchKeyword("stub_header", "Stub")
 
-	chunks := splitBraceBased(code, match, false)
+	chunks := splitBraceBased(code, match, false, nil)
 
 	if len(chunks) != 0 {
 		t.Errorf("expected no chunks for bodyless header with emitBodyless=false, got %d: %+v", len(chunks), chunks)
@@ -61,7 +61,7 @@ func TestSplitBraceBased_Given_BodylessHeader_When_EmitBodylessTrue_Then_EmitsSi
 	code := "arrow_header\nunrelated\n"
 	match := matchKeyword("arrow_header", "Lambda")
 
-	chunks := splitBraceBased(code, match, true)
+	chunks := splitBraceBased(code, match, true, nil)
 
 	want := []Chunk{{StartLine: 1, EndLine: 1, Symbol: "Lambda", Code: "arrow_header"}}
 	if !reflect.DeepEqual(chunks, want) {
@@ -83,7 +83,7 @@ func TestSplitBraceBased_Given_TwoSiblingDefinitions_When_Split_Then_EmitsBothIn
 		return "", false
 	}
 
-	chunks := splitBraceBased(code, match, false)
+	chunks := splitBraceBased(code, match, false, nil)
 
 	if len(chunks) != 2 {
 		t.Fatalf("expected 2 chunks, got %d: %+v", len(chunks), chunks)
@@ -110,7 +110,7 @@ func TestSplitBraceBased_Given_MatcherWouldMatchInsideBody_When_Split_Then_Skips
 		return "", false
 	}
 
-	chunks := splitBraceBased(code, match, false)
+	chunks := splitBraceBased(code, match, false, nil)
 
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk (nested match must be skipped), got %d: %+v", len(chunks), chunks)
@@ -134,7 +134,7 @@ func TestSplitBraceBased_Given_HeaderWithFollowingDefinitionAfterBody_When_Split
 		return "", false
 	}
 
-	chunks := splitBraceBased(code, match, false)
+	chunks := splitBraceBased(code, match, false, nil)
 
 	if len(chunks) != 2 {
 		t.Fatalf("expected 2 chunks, got %d", len(chunks))

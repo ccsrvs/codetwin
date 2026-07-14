@@ -75,16 +75,26 @@ func TestSuggest_JavaSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 	}
 	var doc struct {
 		Pairs []struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
 		} `json:"pairs"`
 	}
 	if err := json.Unmarshal(jsonOut, &doc); err != nil {
 		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
 	}
-	if len(doc.Pairs) == 0 || doc.Pairs[0].ID == "" {
-		t.Fatalf("expected at least one pair with an id, got:\n%s", jsonOut)
+	// Pick the METHOD pair — since §5.2 the fixture also produces a
+	// class↔class pair (the A/B class spans), which --suggest rejects
+	// by design.
+	var pairID string
+	for _, p := range doc.Pairs {
+		if p.ID != "" && strings.Contains(p.FileA, "priceWithTax") {
+			pairID = p.ID
+			break
+		}
 	}
-	pairID := doc.Pairs[0].ID
+	if pairID == "" {
+		t.Fatalf("expected a priceWithTax method pair with an id, got:\n%s", jsonOut)
+	}
 
 	cmd := exec.Command(bin,
 		"--no-cache", "--no-progress",
@@ -110,9 +120,9 @@ func TestSuggest_JavaSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 }
 
 // TestSuggestAll_JavaSimple_PopulatesSuggestedPatch: --suggest-all
-// --json should embed a non-empty unified_diff on every visible pair.
-// We assert the pair[0]'s suggested_patch surfaces the helper name and
-// that the diff is non-empty (rejection would set Note instead).
+// --json should populate suggested_patch on every visible pair: a real
+// unified_diff on the method pair, and (since §5.2) a class-level
+// rejection note on the A/B class-span pair.
 func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	bin := subprocessBin(t)
 	fixtureDir := "../../testdata/refactor/java/simple"
@@ -128,6 +138,7 @@ func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	var doc struct {
 		Pairs []struct {
 			ID             string `json:"id"`
+			FileA          string `json:"file_a"`
 			SuggestedPatch *struct {
 				UnifiedDiff string `json:"unified_diff"`
 				HelperName  string `json:"helper_name"`
@@ -141,16 +152,33 @@ func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	if len(doc.Pairs) == 0 {
 		t.Fatalf("expected at least one pair, got none")
 	}
-	p := doc.Pairs[0]
-	if p.SuggestedPatch == nil {
-		t.Fatal("suggested_patch field missing on pair")
+	methodSeen, classSeen := false, false
+	for _, p := range doc.Pairs {
+		if p.SuggestedPatch == nil {
+			t.Errorf("suggested_patch field missing on pair %s", p.FileA)
+			continue
+		}
+		if strings.Contains(p.FileA, "priceWithTax") {
+			methodSeen = true
+			if p.SuggestedPatch.UnifiedDiff == "" {
+				t.Errorf("unified_diff empty (note=%q)", p.SuggestedPatch.Note)
+			}
+			if !strings.HasPrefix(p.SuggestedPatch.HelperName, "extracted_priceWithTaxA_") {
+				t.Errorf("helper_name = %q, want extracted_priceWithTaxA_… prefix",
+					p.SuggestedPatch.HelperName)
+			}
+		} else {
+			classSeen = true
+			if !strings.Contains(p.SuggestedPatch.Note, "class-level pair") {
+				t.Errorf("class pair note = %q, want class-level rejection", p.SuggestedPatch.Note)
+			}
+		}
 	}
-	if p.SuggestedPatch.UnifiedDiff == "" {
-		t.Errorf("unified_diff empty (note=%q)", p.SuggestedPatch.Note)
+	if !methodSeen {
+		t.Error("expected the priceWithTax method pair in --suggest-all output")
 	}
-	if !strings.HasPrefix(p.SuggestedPatch.HelperName, "extracted_priceWithTaxA_") {
-		t.Errorf("helper_name = %q, want extracted_priceWithTaxA_… prefix",
-			p.SuggestedPatch.HelperName)
+	if !classSeen {
+		t.Error("expected the A/B class-span pair in --suggest-all output")
 	}
 }
 
@@ -490,8 +518,13 @@ func TestSuggest_ElixirSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 	if !strings.Contains(diff, "# Divergences (B vs A):") {
 		t.Errorf("stdout missing divergence comment block. Got:\n%s", diff)
 	}
-	if !strings.Contains(diff, "# NOTE:") {
-		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	// Container-aware placement: the helper lands INSIDE the defmodule
+	// (indented added lines), so the old file-scope NOTE must be gone.
+	if strings.Contains(diff, "appended at file scope") {
+		t.Errorf("stdout carries the file-scope NOTE despite in-module placement. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "+  # codetwin: starter helper") {
+		t.Errorf("stdout missing the module-indented helper banner. Got:\n%s", diff)
 	}
 }
 
@@ -651,8 +684,10 @@ func TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff(t *testing.T) {
 	if !strings.Contains(diff, "extracted_") {
 		t.Errorf("stdout missing extracted_… helper. Got:\n%s", diff)
 	}
-	if !strings.Contains(diff, "# NOTE:") {
-		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	// Container-aware placement: helper lands inside the defmodule, so
+	// the old file-scope NOTE must be gone.
+	if strings.Contains(diff, "appended at file scope") {
+		t.Errorf("stdout carries the file-scope NOTE despite in-module placement. Got:\n%s", diff)
 	}
 }
 
@@ -674,16 +709,27 @@ func TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
 	}
 	var doc struct {
 		Pairs []struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
 		} `json:"pairs"`
 	}
 	if err := json.Unmarshal(jsonOut, &doc); err != nil {
 		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
 	}
-	if len(doc.Pairs) == 0 {
-		t.Fatalf("expected the reject-throw fixture to surface a pair: %s", jsonOut)
+	// Pick the METHOD pair — the §5.2 class↔class pair also surfaces
+	// here, but the control-flow-asymmetry note under test lives on
+	// the method pair (the class pair gets the generic class-level
+	// rejection).
+	var pairID string
+	for _, p := range doc.Pairs {
+		if p.ID != "" && strings.Contains(p.FileA, "process") {
+			pairID = p.ID
+			break
+		}
 	}
-	pairID := doc.Pairs[0].ID
+	if pairID == "" {
+		t.Fatalf("expected the reject-throw fixture to surface the process method pair: %s", jsonOut)
+	}
 
 	cmd := exec.Command(bin,
 		"--no-cache", "--no-progress",
@@ -705,5 +751,197 @@ func TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Errorf("expected empty stdout on rejection, got:\n%s", stdout.String())
+	}
+}
+
+// TestSuggest_TypeScriptRealworld_ExitsZeroAndPrintsAnnotatedHelper:
+// discover the class-method pair (loadA/loadB) of the .ts fixture via
+// --json, then invoke --suggest <id>. Asserts exit 0 and that the diff
+// carries the TS parameter and return-type annotations on the helper
+// header (with the `private` access modifier dropped). Also pins that
+// the pipeline treats .ts files as JavaScript end-to-end. Bet #4
+// deferred follow-up.
+func TestSuggest_TypeScriptRealworld_ExitsZeroAndPrintsAnnotatedHelper(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/js/realworld-typescript"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+			FileB string `json:"file_b"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if strings.Contains(p.FileA, "load") && strings.Contains(p.FileB, "load") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("no loadA/loadB pair found in JSON output:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "@@") {
+		t.Errorf("stdout missing hunk header. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "async function extracted_load") {
+		t.Errorf("stdout missing annotated TS helper header. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, ": Promise<Widget>") {
+		t.Errorf("stdout missing return-type annotation on helper. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "// Divergences (B vs A):") {
+		t.Errorf("stdout missing divergence comment block. Got:\n%s", diff)
+	}
+}
+
+// TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec:
+// end-to-end regression for the Bet #4 Elixir follow-ups. On the
+// realworld-spec fixture's multi-clause render pair, --suggest must
+// exit 0 and print a diff containing every clause of the endpoint
+// symbol (renamed consistently, guards verbatim) plus the @doc/@spec
+// block with the @spec rewritten to the helper's name.
+func TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/elixir/realworld-spec"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+			FileB string `json:"file_b"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if strings.Contains(p.FileA, "render") && strings.Contains(p.FileB, "render") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("expected a render/render pair; got:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "@@") {
+		t.Errorf("stdout missing hunk header. Got:\n%s", diff)
+	}
+	if got := strings.Count(diff, "def extracted_render_"); got < 2 {
+		t.Errorf("expected all clauses of the endpoint symbol (>= 2 renamed defs), got %d. Diff:\n%s", got, diff)
+	}
+	for _, want := range []string{
+		"@spec extracted_render_",
+		"when is_binary(value)",
+		"# NOTE: A has ",
+	} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("stdout missing %q. Got:\n%s", want, diff)
+		}
+	}
+}
+
+// TestSuggest_JavaSimple_HelperInsertedInsideClass: the emitted diff
+// must place the helper INSIDE the enclosing class — the added lines
+// carry one level of member indentation and the obsolete file-scope
+// placement NOTE is gone — so the patched file compiles as emitted.
+func TestSuggest_JavaSimple_HelperInsertedInsideClass(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/java/simple"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	// Select the METHOD pair explicitly — the fixture also produces a
+	// class↔class pair (§5.2 spans), which --suggest rejects by design.
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if p.ID != "" && strings.Contains(p.FileA, "priceWithTax") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("expected a priceWithTax method pair with an id, got:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "+    public double extracted_priceWithTaxA_") {
+		t.Errorf("diff missing the class-indented helper added line. Got:\n%s", diff)
+	}
+	if strings.Contains(diff, "NOTE: appended at file scope") {
+		t.Errorf("diff still carries the file-scope placement NOTE. Got:\n%s", diff)
 	}
 }

@@ -63,7 +63,7 @@ func TestBuildReportClusters_CohesiveClusterPassesThrough(t *testing.T) {
 	groups := map[int][]int{0: {0, 1, 2}}
 	names := []string{"a.go", "b.go", "c.go"}
 
-	clusters := buildReportClusters(groups, m, names, 0.50)
+	clusters := buildReportClusters(groups, m, names, nil, 0.50)
 	if len(clusters) != 1 {
 		t.Fatalf("expected 1 cluster, got %d: %+v", len(clusters), clusters)
 	}
@@ -96,7 +96,7 @@ func TestBuildReportClusters_ChainedClusterSplitsAtThreshold(t *testing.T) {
 	groups := map[int][]int{0: {0, 1, 2, 3}}
 	names := []string{"a.go", "b.go", "c.go", "d.go"}
 
-	clusters := buildReportClusters(groups, m, names, 0.70)
+	clusters := buildReportClusters(groups, m, names, nil, 0.70)
 	if len(clusters) != 2 {
 		t.Fatalf("expected 2 clusters after split, got %d: %+v", len(clusters), clusters)
 	}
@@ -127,7 +127,7 @@ func TestBuildReportClusters_SingletonComponentsDropAsNoise(t *testing.T) {
 	groups := map[int][]int{0: {0, 1, 2}}
 	names := []string{"a.go", "b.go", "c.go"}
 
-	clusters := buildReportClusters(groups, m, names, 0.70)
+	clusters := buildReportClusters(groups, m, names, nil, 0.70)
 	if len(clusters) != 1 {
 		t.Fatalf("expected 1 cluster (singleton dropped), got %d: %+v", len(clusters), clusters)
 	}
@@ -141,7 +141,7 @@ func TestBuildReportClusters_WholeClusterCanDissolve(t *testing.T) {
 	// two singletons → both drop → no clusters remain.
 	m := symMatrix(2, map[[2]int]float64{{0, 1}: 0.60})
 	groups := map[int][]int{0: {0, 1}}
-	clusters := buildReportClusters(groups, m, []string{"a.go", "b.go"}, 0.70)
+	clusters := buildReportClusters(groups, m, []string{"a.go", "b.go"}, nil, 0.70)
 	if len(clusters) != 0 {
 		t.Fatalf("expected cluster to dissolve entirely, got %+v", clusters)
 	}
@@ -158,7 +158,7 @@ func TestBuildReportClusters_DeterministicIDsAcrossMapOrder(t *testing.T) {
 	names := []string{"zz.go", "zx.go", "aa.go", "ab.go"}
 	for run := 0; run < 20; run++ {
 		groups := map[int][]int{0: {0, 1}, 1: {2, 3}}
-		clusters := buildReportClusters(groups, m, names, 0.50)
+		clusters := buildReportClusters(groups, m, names, nil, 0.50)
 		if len(clusters) != 2 {
 			t.Fatalf("run %d: expected 2 clusters, got %+v", run, clusters)
 		}

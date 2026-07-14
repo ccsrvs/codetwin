@@ -20,7 +20,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 )
 
 const (
@@ -217,7 +217,7 @@ func caseSnippets(t *testing.T, dir string) (a, b []scan.Snippet) {
 	c := cache.New()
 	for _, m := range matches {
 		base := strings.ToLower(filepath.Base(m)) // Java fixtures are A.java/B.java
-		snips, warn := scan.ProcessFile(m, minLines, nil, c, "")
+		snips, warn := scan.ProcessFile(m, minLines, nil, c, "", scan.GranularityFunction)
 		if warn != "" {
 			t.Fatalf("scan %s: %s", m, warn)
 		}
@@ -241,7 +241,9 @@ type scored struct {
 func pairScore(a, b scan.Snippet, va, vb similarity.NormalizedVector) scored {
 	structural := fingerprint.Jaccard(a.Fps.Set, b.Fps.Set)
 	semantic := similarity.CosineFromNormalized(va, vb)
-	sameLang := a.Lang == b.Lang && a.Lang != tokenizer.Unknown
+	// Mirrors BuildMatrix: Unknown↔Unknown counts as same-language
+	// (two unclassifiable files are more likely the same language).
+	sameLang := a.Lang == b.Lang
 	return scored{structural, semantic, similarity.CombinedForLangs(structural, semantic, sameLang)}
 }
 
@@ -279,6 +281,11 @@ func TestBench_GroundTruth(t *testing.T) {
 		for _, sa := range c.a {
 			va := vec(sa)
 			for _, sb := range c.b {
+				// Mirror BuildMatrix's kind gate: class chunks only
+				// score against other class chunks (§5.2).
+				if !similarity.ComparableKinds(sa, sb) {
+					continue
+				}
 				if s := pairScore(sa, sb, va, vec(sb)); s.combined > best.combined {
 					best = s
 					bestA, bestB = sa, sb
@@ -410,6 +417,12 @@ func TestBench_GroundTruth(t *testing.T) {
 				sameLogic(all[pool[i].caseIdx].benchCase, all[pool[j].caseIdx].benchCase) {
 				continue
 			}
+			// Mixed-kind pairs never materialize in a real scan
+			// (BuildMatrix's §5.2 kind gate), so they don't belong in
+			// the report-noise proxy either.
+			if !similarity.ComparableKinds(pool[i].s, pool[j].s) {
+				continue
+			}
 			s := pairScore(pool[i].s, pool[j].s, pool[i].v, pool[j].v).combined
 			noise = append(noise, s)
 			worst = append(worst, noisePair{s, pool[i].s.Name, pool[j].s.Name})
@@ -450,4 +463,131 @@ func labelForBest(s scored, a, b scan.Snippet) (string, float64) {
 
 func fmtF(f float64) string {
 	return fmt.Sprintf("%.2f", f)
+}
+
+// ── Class-level granularity (§5.2) ───────────────────────────────────────────
+
+// classCasePairs runs one testdata/bench/classes case through the real
+// matrix pipeline — BuildMatrix applies the mixed-kind gate, the
+// same-file nesting filter, and the length dampener exactly as a scan
+// would — and returns the snippets plus materialized pairs.
+func classCasePairs(t *testing.T, name string) ([]scan.Snippet, []report.Pair) {
+	t.Helper()
+	a, b := caseSnippets(t, filepath.Join("../../testdata/bench/classes", name))
+	snips := append(append([]scan.Snippet{}, a...), b...)
+	streams := make([][]string, len(snips))
+	for i, s := range snips {
+		streams[i] = s.Tokens
+	}
+	corpus := similarity.NewCorpus(streams)
+	vectors := make([]similarity.NormalizedVector, len(snips))
+	for i, s := range snips {
+		vectors[i] = similarity.Normalize(corpus.Vectorize(s.Tokens))
+	}
+	_, pairs, _ := similarity.BuildMatrix(
+		snips, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil)
+	return snips, pairs
+}
+
+// classNames returns the Name set of the case's class-kind snippets.
+func classNames(snips []scan.Snippet) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range snips {
+		if s.Kind == splitter.KindClass {
+			out[s.Name] = true
+		}
+	}
+	return out
+}
+
+// TestBench_ClassGranularity is the §5.2 contract: cross-file
+// class↔class pairs must surface as strong clones (the case
+// method-level granularity underreports — a renamed class with slightly
+// reordered methods), while class↔function pairs across files are
+// mixed-kind noise and must never materialize. The elixir-module-clone
+// case extends the contract to Elixir `defmodule` spans, the
+// rust-impl-clone case to Rust `impl` blocks, and the
+// go-methodset-clone case to Go struct+methodset groups (synthetic
+// chunks joining a type decl with its NON-CONTIGUOUS in-file methods)
+// — all of which carry splitter.KindClass exactly like Python/Java/JS
+// class spans.
+func TestBench_ClassGranularity(t *testing.T) {
+	// Positive: same class renamed, methods slightly reordered.
+	for _, name := range []string{
+		"python-class-clone", "java-class-clone", "elixir-module-clone",
+		"rust-impl-clone", "go-methodset-clone",
+	} {
+		snips, pairs := classCasePairs(t, name)
+		classes := classNames(snips)
+		if len(classes) != 2 {
+			t.Fatalf("%s: expected 2 class chunks (one per file), got %d: %v", name, len(classes), classes)
+		}
+		var best float64
+		found := false
+		for _, p := range pairs {
+			if classes[p.NameA] && classes[p.NameB] {
+				found = true
+				if p.Score > best {
+					best = p.Score
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: no class↔class pair materialized", name)
+		} else if best < positiveMin {
+			t.Errorf("%s: class↔class pair score = %s, want >= %s", name, fmtF(best), fmtF(positiveMin))
+		} else {
+			t.Logf("%-40s class pair score=%s ok", "classes/"+name, fmtF(best))
+		}
+	}
+
+	// Kind-purity verification for the container languages, through the
+	// real matrix pipeline: every materialized pair that touches a
+	// class-kind chunk must be class↔class. Mixed-kind pairs (container
+	// vs a def/fn/method — its own via the same-file nesting filter, a
+	// cross-file one via the kind gate) must never materialize. For Go,
+	// this pins the Option-A covering-range consequence too: the group
+	// chunk's range contains its methods AND the interleaved unrelated
+	// function, so no group-vs-part pair may surface either way.
+	for _, name := range []string{"elixir-module-clone", "rust-impl-clone", "go-methodset-clone"} {
+		snips, pairs := classCasePairs(t, name)
+		containers := classNames(snips)
+		for _, p := range pairs {
+			if containers[p.NameA] != containers[p.NameB] {
+				t.Errorf("%s: mixed-kind pair materialized: %s <-> %s (%s)",
+					name, p.NameA, p.NameB, fmtF(p.Score))
+			}
+			if (containers[p.NameA] || containers[p.NameB]) &&
+				strings.Split(p.NameA, ":")[0] == strings.Split(p.NameB, ":")[0] {
+				t.Errorf("%s: container paired within its own file: %s <-> %s (%s)",
+					name, p.NameA, p.NameB, fmtF(p.Score))
+			}
+		}
+	}
+
+	// Negative: a class in a.js vs the same methods as loose functions
+	// in b.js. The class↔function pairs are mixed-kind and must produce
+	// NO pair at all; the methods inside the class must still match the
+	// loose functions individually.
+	snips, pairs := classCasePairs(t, "js-class-vs-loose-funcs")
+	classes := classNames(snips)
+	if len(classes) != 1 {
+		t.Fatalf("js-class-vs-loose-funcs: expected exactly 1 class chunk (in a.js), got %d: %v", len(classes), classes)
+	}
+	var methodBest float64
+	for _, p := range pairs {
+		if classes[p.NameA] || classes[p.NameB] {
+			t.Errorf("js-class-vs-loose-funcs: class chunk must not pair with anything, got %s <-> %s (%s)",
+				p.NameA, p.NameB, fmtF(p.Score))
+		}
+		if !classes[p.NameA] && !classes[p.NameB] && p.Score > methodBest {
+			methodBest = p.Score
+		}
+	}
+	if methodBest < positiveMin {
+		t.Errorf("js-class-vs-loose-funcs: best method↔function pair = %s, want >= %s (method-level matching must keep working)",
+			fmtF(methodBest), fmtF(positiveMin))
+	} else {
+		t.Logf("%-40s no class pair; method pair score=%s ok", "classes/js-class-vs-loose-funcs", fmtF(methodBest))
+	}
 }

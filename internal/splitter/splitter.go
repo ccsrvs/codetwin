@@ -12,18 +12,57 @@ package splitter
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
+)
+
+// SchemaVersion identifies the splitter's OUTPUT schema: bump it
+// whenever a change to chunk extraction alters the chunk set produced
+// for unchanged source (new chunk kinds, new container spans, boundary
+// fixes). It is folded into cache.SchemaTag so any bump auto-invalidates
+// cached chunks — without it, a splitter change silently serves stale
+// chunk sets, because the file content (and thus the cache key) is
+// unchanged.
+//
+// v2: Elixir `defmodule` blocks are emitted as KindClass spans; entries
+// cached under v1 lack the module chunks and would drop module↔module
+// findings.
+//
+// v3: Rust `impl` blocks are emitted as KindClass spans and Go
+// struct+methodset groups are emitted as synthetic KindClass chunks;
+// entries cached under v2 lack both and would drop container↔container
+// findings for those languages.
+const SchemaVersion = 3
+
+// ChunkKind classifies the granularity of a chunk. Downstream scoring
+// only compares chunks of the same kind: a class span weakly resembling
+// a small function across files is container-vs-part noise, not a
+// clone (see similarity.ComparableKinds).
+type ChunkKind string
+
+const (
+	// KindFunction covers functions, methods, closures, and the
+	// whole-file fallback chunk — everything that was chunkable before
+	// class-level granularity existed.
+	KindFunction ChunkKind = "function"
+	// KindClass covers class-span chunks: Python `class` blocks, Java
+	// class/interface/enum/record bodies, JS/TS `class` declarations,
+	// Elixir `defmodule` blocks, Rust `impl` blocks, and Go
+	// struct+methodset groups (synthetic, non-contiguous — see
+	// goMethodsetGroups).
+	KindClass ChunkKind = "class"
 )
 
 // Chunk is a contiguous span of source code, optionally named after the
 // definition that opens it.
 type Chunk struct {
 	Path      string
-	StartLine int    // 1-based, inclusive
-	EndLine   int    // 1-based, inclusive
-	Symbol    string // best-effort symbol name (function/class), may be empty
+	StartLine int       // 1-based, inclusive
+	EndLine   int       // 1-based, inclusive
+	Symbol    string    // best-effort symbol name (function/class), may be empty
+	Kind      ChunkKind // KindFunction (default) or KindClass
 	Code      string
 }
 
@@ -41,6 +80,21 @@ func (c Chunk) Name() string {
 	return fmt.Sprintf("%s:%d-%d", c.Path, c.StartLine, c.EndLine)
 }
 
+// WholeFile returns the single whole-file chunk for a source file: Symbol
+// empty and StartLine 1, so Name() renders as just the path. This is both
+// Split's no-definitions fallback shape and the unit emitted for every file
+// under file-level granularity (scan.GranularityFile), which bypasses the
+// per-definition splitters entirely.
+func WholeFile(path, code string) Chunk {
+	lines := strings.Split(code, "\n")
+	// KindFunction is the ordinary comparable kind: whole-file chunks —
+	// both the no-definitions fallback and every file-mode chunk — take
+	// it so they score against each other and (in function mode) against
+	// per-definition chunks, matching pre-Kind behavior. Only class-span
+	// chunks are segregated by kind.
+	return Chunk{Path: path, StartLine: 1, EndLine: len(lines), Code: code, Kind: KindFunction}
+}
+
 // CountNonBlankLines reports how many newline-separated lines in code have
 // non-whitespace content. Used to gate display of tiny matches.
 func CountNonBlankLines(code string) int {
@@ -51,6 +105,21 @@ func CountNonBlankLines(code string) int {
 		}
 	}
 	return n
+}
+
+// chunkSpan builds the Chunk for lines[start..end] (0-based, inclusive
+// on both ends), converting to Chunk's 1-based line convention. It is
+// the one construction path shared by every splitter loop that emits a
+// matched span. kind is KindClass for class-span chunks and "" for
+// ordinary definitions — Split normalizes "" to KindFunction.
+func chunkSpan(lines []string, start, end int, symbol string, kind ChunkKind) Chunk {
+	return Chunk{
+		StartLine: start + 1,
+		EndLine:   end + 1,
+		Symbol:    symbol,
+		Kind:      kind,
+		Code:      strings.Join(lines[start:end+1], "\n"),
+	}
 }
 
 // Split breaks code into per-definition chunks. The returned slice always
@@ -66,18 +135,20 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 	case tokenizer.JavaScript:
 		chunks = splitJavaScript(code)
 	case tokenizer.Rust:
-		chunks = splitBraceLang(code, rustFnRe)
+		chunks = splitRust(code)
 	case tokenizer.Java:
 		chunks = splitJava(code)
 	case tokenizer.Elixir:
 		chunks = splitElixir(code)
 	}
 	if len(chunks) == 0 {
-		lines := strings.Split(code, "\n")
-		chunks = []Chunk{{StartLine: 1, EndLine: len(lines), Code: code}}
+		chunks = []Chunk{WholeFile(path, code)}
 	}
 	for i := range chunks {
 		chunks[i].Path = path
+		if chunks[i].Kind == "" {
+			chunks[i].Kind = KindFunction
+		}
 	}
 	return chunks
 }
@@ -85,18 +156,26 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 // ── Python ────────────────────────────────────────────────────────────────────
 
 var (
-	pyDefRe  = regexp.MustCompile(`^(\s*)(?:async\s+)?def\s+(\w+)`)
-	pyDecoRe = regexp.MustCompile(`^([ \t]*)@`)
+	pyDefRe   = regexp.MustCompile(`^(\s*)(?:async\s+)?def\s+(\w+)`)
+	pyClassRe = regexp.MustCompile(`^(\s*)class\s+(\w+)`)
+	pyDecoRe  = regexp.MustCompile(`^([ \t]*)@`)
 )
 
+// splitPython emits one chunk per def AND one class-span chunk per
+// `class` block (§5.2 class-level granularity). Class chunks share the
+// def machinery: decorator attachment, multi-line signature scanning,
+// and indent-based body termination. A class chunk necessarily
+// contains its method chunks; the downstream same-file nesting filter
+// and the class-only kind gate keep that overlap out of reports.
 func splitPython(code string) []Chunk {
 	lines := strings.Split(code, "\n")
 
 	type defInfo struct {
-		defLine    int // 0-based index of the `def` line
+		defLine    int // 0-based index of the `def`/`class` line
 		chunkStart int // 0-based index where the chunk starts (defLine, or earlier if decorated)
 		indent     int
 		name       string
+		kind       ChunkKind
 	}
 	type pendingDeco struct {
 		startLine int // 0-based start of the decorator block
@@ -124,8 +203,17 @@ func splitPython(code string) []Chunk {
 			continue
 		}
 
-		// Def? Attach the earliest pending decorator at the same indent.
-		if m := pyDefRe.FindStringSubmatch(line); m != nil {
+		// Def or class? Attach the earliest pending decorator at the
+		// same indent. Both use the same indent-terminated body logic;
+		// only the chunk kind differs.
+		var m []string
+		kind := KindFunction
+		if m = pyDefRe.FindStringSubmatch(line); m == nil {
+			if m = pyClassRe.FindStringSubmatch(line); m != nil {
+				kind = KindClass
+			}
+		}
+		if m != nil {
 			defIndent := indentLen(m[1])
 			chunkStart := i
 			for _, p := range pending {
@@ -135,7 +223,7 @@ func splitPython(code string) []Chunk {
 				}
 			}
 			defs = append(defs, defInfo{
-				defLine: i, chunkStart: chunkStart, indent: defIndent, name: m[2],
+				defLine: i, chunkStart: chunkStart, indent: defIndent, name: m[2], kind: kind,
 			})
 			pending = nil
 			i++
@@ -176,12 +264,7 @@ func splitPython(code string) []Chunk {
 				break
 			}
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: d.chunkStart + 1,
-			EndLine:   end + 1,
-			Symbol:    d.name,
-			Code:      strings.Join(lines[d.chunkStart:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, d.chunkStart, end, d.name, d.kind))
 	}
 	return chunks
 }
@@ -291,6 +374,17 @@ func pythonSignatureEndLine(lines []string, defLine int) int {
 	return len(lines) - 1
 }
 
+// PythonSignatureEnd exposes pythonSignatureEndLine's paren/string-aware
+// signature scanning for reuse outside the splitter — the refactor
+// emitter uses it to carry Black-formatted multi-line `def` signatures
+// into synthesized helpers verbatim. Same contract: returns the 0-based
+// index of the line whose top-level `:` closes the signature starting
+// at defLine (defLine itself for a single-line signature; the last line
+// index on malformed input).
+func PythonSignatureEnd(lines []string, defLine int) int {
+	return pythonSignatureEndLine(lines, defLine)
+}
+
 // pythonDecoratorEndLine returns the 0-based index of the last line of a
 // decorator block beginning at decoLine. A simple `@cached` returns
 // decoLine itself; a multi-line `@retry(\n    attempts=3,\n)` returns the
@@ -334,6 +428,15 @@ var (
 	goFuncRe = regexp.MustCompile(`^func\s+(?:\([^)]*\)\s+)?(\w+)`)
 	rustFnRe = regexp.MustCompile(`^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)`)
 
+	// rustImplRe matches an `impl` block header and captures the TYPE
+	// name: `impl Foo`, `impl<T> Foo<T>`, and `impl Trait for Foo` all
+	// yield `Foo`. The type name (rather than "Trait for Foo") is the
+	// symbol so multiple impl blocks for one type — the idiomatic
+	// inherent-impl + trait-impls layout — share a symbol; their chunk
+	// Names stay distinct via the line ranges. Module paths on the trait
+	// or type (`fmt::Display`, `crate::Foo`) resolve to the last segment.
+	rustImplRe = regexp.MustCompile(`^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b(?:<[^>]*>)?\s+(?:[\w:]+(?:<[^>]*>)?\s+for\s+)?(?:&\s*(?:mut\s+)?)?(?:\w+::)*(\w+)`)
+
 	// Anonymous-func forms in Go. Together with goFuncRe these let splitGo
 	// emit closures, goroutines, and defers as their own chunks; the
 	// downstream nested-pair filter (chunksNestedSameFile) suppresses
@@ -343,12 +446,29 @@ var (
 	goGoroutineRe  = regexp.MustCompile(`^[ \t]*go\s+func\s*\(`)
 	goDeferFuncRe  = regexp.MustCompile(`^[ \t]*defer\s+func\s*\(`)
 	goBareFuncRe   = regexp.MustCompile(`^[ \t]*func\s*\(`)
+
+	// goTypeStructRe matches a top-level struct type declaration
+	// (column 0, so types declared inside function bodies — which can't
+	// have methods anyway — are skipped) and captures the type name.
+	// Generic parameter lists (`type Pair[K comparable, V any] struct`)
+	// are allowed. Interface declarations deliberately do NOT match:
+	// methods can't be declared on an interface receiver, so no
+	// methodset exists to group.
+	goTypeStructRe = regexp.MustCompile(`^type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+struct\b`)
+
+	// goMethodRe matches a top-level method header and captures the
+	// receiver's TYPE name: `func (c *Counter) Add`, `func (Counter)
+	// Add`, and `func (p Pair[K, V]) Get` all yield the bare type name,
+	// so pointer and value receivers unify into one methodset.
+	goMethodRe = regexp.MustCompile(`^func\s*\((?:\s*\w+)?\s*\*?\s*([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*\)\s*\w+`)
 )
 
 // splitGo extracts top-level named funcs/methods plus anonymous closures
 // (assignment, var, goroutine, defer, bare/IIFE). The loop advances by one
 // line per iteration — not past the matched body — so anonymous funcs
 // nested inside an outer function body are also visited and emitted.
+// Struct+methodset groups (the Go equivalent of a class chunk — §5.2)
+// are appended after the per-definition chunks; see goMethodsetGroups.
 func splitGo(code string) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
@@ -375,11 +495,91 @@ func splitGo(code string) []Chunk {
 		if !ok {
 			continue
 		}
+		chunks = append(chunks, chunkSpan(lines, i, end, symbol, ""))
+	}
+	return append(chunks, goMethodsetGroups(lines)...)
+}
+
+// lineSpan is a 0-based inclusive line range within a file.
+type lineSpan struct{ start, end int }
+
+// goMethodsetGroups builds one SYNTHETIC KindClass chunk per struct
+// type declared in the file with at least two in-file methods: Go
+// methods live OUTSIDE the type block, so the "class" is a
+// NON-CONTIGUOUS set of spans — the decl plus every `func (r Foo)` /
+// `func (r *Foo)` — that no single source range covers.
+//
+// Chunk shape (and its documented consequences):
+//   - Code is the decl's and the methods' source joined in file order.
+//     Source interleaved between them (unrelated functions, other
+//     types) is EXCLUDED — a copied-then-renamed type scores on its own
+//     text no matter what grew between its methods.
+//   - StartLine/EndLine are the COVERING range (first span's start to
+//     last span's end), which over-approximates: tools keyed on the
+//     range (--since overlap, blame) degrade gracefully by treating the
+//     whole stretch as the chunk, and previews render the joined text.
+//     The same-file nesting filter therefore suppresses group-vs-
+//     anything within the range — the group's own methods and the
+//     interleaved unrelated functions alike — which is fine: cross-file
+//     group↔group findings are the point. Class-kind chunks are also
+//     excluded from the §5.3 block-candidate channel, where the joined
+//     Code's chunk-relative line arithmetic would misreport ranges.
+//
+// Gates, mirroring Elixir's defmodule rules: a type needs >= 2 in-file
+// methods (a single-method group would just duplicate the method
+// finding plus decl boilerplate), the decl must be in the file
+// (grouping is decl-anchored — a methods-only file, common when a
+// type's methods span several files, gets no group), and interfaces
+// never group (no methodset can exist).
+func goMethodsetGroups(lines []string) []Chunk {
+	type declInfo struct {
+		name string
+		span lineSpan
+	}
+	var decls []declInfo
+	seen := map[string]bool{}
+	methods := map[string][]lineSpan{}
+	for i := 0; i < len(lines); i++ {
+		if m := goTypeStructRe.FindStringSubmatch(lines[i]); m != nil {
+			end, ok := findBraceEnd(lines, i)
+			if !ok {
+				continue
+			}
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				decls = append(decls, declInfo{name: m[1], span: lineSpan{i, end}})
+			}
+			i = end
+			continue
+		}
+		if m := goMethodRe.FindStringSubmatch(lines[i]); m != nil {
+			end, ok := findBraceEnd(lines, i)
+			if !ok {
+				continue
+			}
+			methods[m[1]] = append(methods[m[1]], lineSpan{i, end})
+			i = end
+		}
+	}
+
+	var chunks []Chunk
+	for _, d := range decls {
+		ms := methods[d.name]
+		if len(ms) < 2 {
+			continue
+		}
+		spans := append([]lineSpan{d.span}, ms...)
+		sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+		parts := make([]string, len(spans))
+		for k, sp := range spans {
+			parts[k] = strings.Join(lines[sp.start:sp.end+1], "\n")
+		}
 		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    symbol,
-			Code:      strings.Join(lines[i:end+1], "\n"),
+			StartLine: spans[0].start + 1,
+			EndLine:   spans[len(spans)-1].end + 1,
+			Symbol:    d.name,
+			Kind:      KindClass,
+			Code:      strings.Join(parts, "\n"),
 		})
 	}
 	return chunks
@@ -396,11 +596,27 @@ type braceMatcher func(line string) (symbol string, ok bool)
 // matcher decides what counts as a header; emitBodyless controls whether a
 // matched header without a `{...}` block becomes a single-line chunk
 // (true for JS arrow shorthands) or is skipped (false for everything else).
-func splitBraceBased(code string, match braceMatcher, emitBodyless bool) []Chunk {
+//
+// container, when non-nil, matches class-like headers (§5.2): a matched
+// container emits a KindClass chunk spanning its whole `{...}` body and
+// the loop then DESCENDS into that body (advances one line instead of
+// jumping past the closer) so the methods inside are still emitted as
+// their own chunks. Definition headers, by contrast, jump past their
+// body — so a class declared inside a function body is not emitted.
+func splitBraceBased(code string, match braceMatcher, emitBodyless bool, container braceMatcher) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
 	i := 0
 	for i < len(lines) {
+		if container != nil {
+			if symbol, ok := container(lines[i]); ok {
+				if end, hasBody := findBraceEnd(lines, i); hasBody {
+					chunks = append(chunks, chunkSpan(lines, i, end, symbol, KindClass))
+				}
+				i++
+				continue
+			}
+		}
 		symbol, ok := match(lines[i])
 		if !ok {
 			i++
@@ -409,47 +625,53 @@ func splitBraceBased(code string, match braceMatcher, emitBodyless bool) []Chunk
 		end, hasBody := findBraceEnd(lines, i)
 		if !hasBody {
 			if emitBodyless {
-				chunks = append(chunks, Chunk{
-					StartLine: i + 1,
-					EndLine:   i + 1,
-					Symbol:    symbol,
-					Code:      lines[i],
-				})
+				chunks = append(chunks, chunkSpan(lines, i, i, symbol, ""))
 			}
 			i++
 			continue
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    symbol,
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, i, end, symbol, ""))
 		i = end + 1
 	}
 	return chunks
 }
 
-// splitBraceLang chunks code using a "find a definition header, then
-// brace-balance to its closer" strategy. Works for Go and Rust.
-func splitBraceLang(code string, headerRe *regexp.Regexp) []Chunk {
-	return splitBraceBased(code, func(line string) (string, bool) {
-		m := headerRe.FindStringSubmatch(line)
+// splitRust chunks Rust into fn-level chunks PLUS one class-span chunk
+// per `impl` block (§5.2). The container matcher emits the impl's whole
+// `{...}` body as a KindClass chunk and then descends into it, so the
+// fns inside are still extracted as their own chunks. fn chunks jump
+// past their bodies, so an impl declared inside a function body is not
+// emitted — the same rule as a JS class inside a function body.
+func splitRust(code string) []Chunk {
+	return splitBraceBased(code, matchHeaderRe(rustFnRe), false, rustImplMatch)
+}
+
+// rustImplMatch reports whether a line opens an impl block, returning
+// the implemented TYPE's name for the class-span chunk.
+var rustImplMatch = matchHeaderRe(rustImplRe)
+
+// matchHeaderRe adapts a header regexp whose first capture group is the
+// symbol name into a braceMatcher. Shared by splitBraceLang and the
+// class-container matchers (javaTypeMatch, jsClassMatch).
+func matchHeaderRe(re *regexp.Regexp) braceMatcher {
+	return func(line string) (string, bool) {
+		m := re.FindStringSubmatch(line)
 		if m == nil {
 			return "", false
 		}
 		return m[1], true
-	}, false)
+	}
 }
 
 // ── Java ──────────────────────────────────────────────────────────────────────
 
 var (
-	// javaTypeDeclRe matches lines that declare a type (class/interface/enum/
-	// record). Methods inside these types are what we want to extract; the
-	// type header itself would otherwise pull in the entire class body as a
-	// single chunk and dominate the report.
-	javaTypeDeclRe = regexp.MustCompile(`^[ \t]*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*(?:class|interface|enum|record|@interface)\s+`)
+	// javaTypeDeclRe matches lines that declare a type (class/interface/
+	// enum/record) and captures its name. Type headers are emitted as
+	// class-span chunks (§5.2) — in addition to, never instead of, the
+	// method chunks inside — and are rejected by the method matcher so a
+	// type body never masquerades as a method.
+	javaTypeDeclRe = regexp.MustCompile(`^[ \t]*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*(?:class|interface|enum|record|@interface)\s+(\w+)`)
 
 	// javaMethodRe matches plausible method or constructor headers. Allows
 	// any combination of access/non-access modifiers, an optional generic
@@ -460,14 +682,20 @@ var (
 )
 
 // splitJava chunks a Java compilation unit into method- and constructor-
-// level chunks. Class/interface/enum/record headers are deliberately not
-// matched — they'd swallow the whole body. Interface method stubs (no
-// `{`) and field declarations both naturally fall out: the former because
-// findBraceEnd reports no body, the latter because the regex requires
-// `name(`.
+// level chunks PLUS one class-span chunk per type declaration
+// (class/interface/enum/record — §5.2). The container matcher emits the
+// type's whole `{...}` body as a KindClass chunk and then descends into
+// it, so nested types produce both spans and the methods inside are
+// still extracted. Interface method stubs (no `{`) and field
+// declarations both naturally fall out: the former because findBraceEnd
+// reports no body, the latter because the method regex requires `name(`.
 func splitJava(code string) []Chunk {
-	return splitBraceBased(code, javaHeaderMatch, false)
+	return splitBraceBased(code, javaHeaderMatch, false, javaTypeMatch)
 }
+
+// javaTypeMatch reports whether a line declares a type, returning the
+// type name for the class-span chunk.
+var javaTypeMatch = matchHeaderRe(javaTypeDeclRe)
 
 // javaHeaderMatch reports whether a line opens a method or constructor
 // definition. Type declarations and Java keywords with method-like
@@ -513,11 +741,30 @@ func findBraceEnd(lines []string, start int) (int, bool) {
 
 // ── JavaScript / TypeScript ───────────────────────────────────────────────────
 
+// TypeScript notes: `.ts`/`.tsx` files come through Detect as
+// JavaScript, so these patterns cover TS header shapes too. jsArrowRe
+// allows an optional `: ReturnType` between the parameter list and the
+// `=>`; jsMethodRe allows TS access modifiers (public/private/
+// protected/readonly/override) and an optional `: ReturnType` before
+// the opening `{`. Interface declarations and type aliases are
+// deliberately NOT chunked — they aren't functions, so they stay out of
+// both detection and the refactor emitter's scope.
 var (
-	jsFuncRe   = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
-	jsArrowRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)`)
-	jsClassRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?class\s+\w+`)
-	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*\{`)
+	jsFuncRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
+	// jsArrowRe accepts an optional TS return annotation between `)` and
+	// `=>` (e.g. `const f = (x: string): Foo => {`).
+	jsArrowRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]*)?=>|\w+\s*=>)`)
+	// jsClassRe matches class DECLARATIONS (optionally exported /
+	// abstract-TS-style) and captures the name. Class expressions
+	// (`const A = class { ... }`) are deliberately not matched — the
+	// header shape overlaps the arrow/function-expression matchers and
+	// class expressions are rare as clone containers; noted as a
+	// follow-up in docs/comparative-algorithms-review.md §5.2.
+	jsClassRe = regexp.MustCompile(`^[ \t]*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+(\w+)`)
+	// jsMethodRe accepts TS access modifiers and an optional return
+	// annotation before the body brace (`private async load(id: string):
+	// Promise<Item> {`); optional groups keep plain-JS matching unchanged.
+	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:public|private|protected|readonly|override|async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*(?::[^{]*)?\{`)
 )
 
 // jsMethodReservedNames are control-flow / language keywords whose
@@ -529,18 +776,28 @@ var jsMethodReservedNames = map[string]bool{
 	"function": true, "class": true, "throw": true,
 }
 
+// splitJavaScript chunks JS/TS into function/method-level chunks PLUS
+// one class-span chunk per class declaration (§5.2). The container
+// matcher emits the class's whole `{...}` body as a KindClass chunk and
+// then descends into it, so each method is still extracted as its own
+// chunk.
 func splitJavaScript(code string) []Chunk {
-	return splitBraceBased(code, jsHeaderMatch, true)
+	return splitBraceBased(code, jsHeaderMatch, true, jsClassMatch)
 }
+
+// jsClassMatch reports whether a line opens a class declaration,
+// returning the class name for the class-span chunk.
+var jsClassMatch = matchHeaderRe(jsClassRe)
 
 // jsHeaderMatch tries each JavaScript/TypeScript header pattern in order
 // (named function, arrow assigned to const/let/var, class method) and
-// returns the first symbol found. Class declarations are deliberately
-// rejected so the loop falls through into the class body, where each
-// method is extracted as its own chunk — matching Python's and Java's
-// method-level granularity. emitBodyless=true at the splitBraceBased
-// call site captures single-expression arrow shorthands that have no
-// `{...}` body.
+// returns the first symbol found. Class declarations are rejected here
+// — the container matcher (jsClassMatch) emits their span, and the loop
+// falls through into the class body, where each method is extracted as
+// its own chunk — matching Python's and Java's method-level
+// granularity. emitBodyless=true at the splitBraceBased call site
+// captures single-expression arrow shorthands that have no `{...}`
+// body.
 func jsHeaderMatch(line string) (string, bool) {
 	if jsClassRe.MatchString(line) {
 		return "", false
@@ -560,20 +817,68 @@ func jsHeaderMatch(line string) (string, bool) {
 
 // ── Elixir ────────────────────────────────────────────────────────────────────
 
-var exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp|defmacro|defmacrop)\s+(\w+)`)
+var (
+	exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp|defmacro|defmacrop)\s+(\w+)`)
 
-// splitElixir chunks an Elixir source file into per-def blocks. Each
+	// exModuleRe matches a `defmodule` header, capturing the (possibly
+	// dotted) module name. Only the block form (`defmodule Foo do … end`)
+	// is span-chunked: real-world defmodules always fit the name and the
+	// `do` on one line, so a header that doesn't end in bare `do` (the
+	// `, do:` shorthand, or a hypothetical wrapped header) is skipped
+	// rather than risking a misparse.
+	exModuleRe = regexp.MustCompile(`^([ \t]*)defmodule\s+([\w.]+)`)
+)
+
+// splitElixir chunks an Elixir source file into per-def blocks PLUS one
+// module-span chunk per `defmodule Foo do … end` block (§5.2
+// class-level granularity — Elixir's container equivalent). Each def
 // chunk runs from the def's header line through either the matching
 // `end` keyword (block form: `def name(args) do … end`) or the last
 // continuation line of the body expression (shorthand form: `def
-// name(args), do: expr`). Module wrappers (`defmodule`) are not
-// chunked; their inner defs are. Recognised heads: `def`, `defp`,
-// `defmacro`, `defmacrop`.
+// name(args), do: expr`). Recognised heads: `def`, `defp`, `defmacro`,
+// `defmacrop`.
+//
+// A defmodule header emits a KindClass chunk spanning through its
+// matching `end` (indent-based, reusing the def machinery) and the
+// loop then DESCENDS into the body (advances one line) so the defs —
+// and any nested defmodule, which gets its own span, mirroring Java's
+// nested types — are still emitted. Def chunks, by contrast, jump past
+// their bodies, so a defmodule generated inside a def/defmacro body
+// (e.g. inside a `quote` block) is not emitted — the same rule as a JS
+// class declared inside a function body.
+//
+// A module span is only emitted when the module body contains at
+// least two definition headers. The §5.2 value-add is AGGREGATION — a
+// copied module whose reordered defs would otherwise scatter across
+// method-level pairs — and a single-def module aggregates nothing:
+// its span is the def chunk plus `defmodule`/`end` boilerplate, which
+// duplicates the def finding while inflating similarity (Elixir's
+// pervasive one-callback modules — `use GenServer` plus one handle_*
+// — would flood reports with module↔module near-noise; the
+// negative-short bench fixture pins this). Def-less modules (e.g.
+// schema-only DSL blocks) likewise get no span and keep today's
+// whole-file fallback behavior.
 func splitElixir(code string) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
 	i := 0
 	for i < len(lines) {
+		if m := exModuleRe.FindStringSubmatch(lines[i]); m != nil {
+			if exHeaderEndsWithDo(lines[i]) {
+				modIndent := indentLen(m[1])
+				if end := exFindMatchingEnd(lines, i, modIndent); end >= 0 && exCountDefs(lines, i+1, end-1) >= 2 {
+					chunks = append(chunks, Chunk{
+						StartLine: i + 1,
+						EndLine:   end + 1,
+						Symbol:    m[2],
+						Kind:      KindClass,
+						Code:      strings.Join(lines[i:end+1], "\n"),
+					})
+				}
+			}
+			i++
+			continue
+		}
 		m := exDefRe.FindStringSubmatch(lines[i])
 		if m == nil {
 			i++
@@ -585,15 +890,24 @@ func splitElixir(code string) []Chunk {
 			i++
 			continue
 		}
-		chunks = append(chunks, Chunk{
-			StartLine: i + 1,
-			EndLine:   end + 1,
-			Symbol:    m[2],
-			Code:      strings.Join(lines[i:end+1], "\n"),
-		})
+		chunks = append(chunks, chunkSpan(lines, i, end, m[2], ""))
 		i = end + 1
 	}
 	return chunks
+}
+
+// exCountDefs counts definition headers (def/defp/defmacro/defmacrop)
+// on lines[from..to] inclusive. Nested modules' defs count toward the
+// outer module too — the outer span aggregates them just the same.
+// Used by splitElixir's ≥2-defs module-span gate.
+func exCountDefs(lines []string, from, to int) int {
+	n := 0
+	for j := from; j <= to && j < len(lines); j++ {
+		if exDefRe.MatchString(lines[j]) {
+			n++
+		}
+	}
+	return n
 }
 
 // exFindDefEnd determines where a def chunk ends. The header itself

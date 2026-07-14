@@ -1,11 +1,15 @@
 package cache
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 func TestLoad_MissingReturnsEmptyCache(t *testing.T) {
@@ -42,7 +46,9 @@ func TestRoundTrip_SaveAndLoad(t *testing.T) {
 				NonBlankLn: 1,
 				Hashes:     []uint32{1, 2, 3},
 				Positions:  map[uint32][]int{1: {0}, 2: {1}, 3: {2}},
-				K:          5,
+				// Must be the live constant: Load treats entries whose
+				// chunks carry any other K as stale misses.
+				K: fingerprint.DefaultK,
 			},
 		},
 	})
@@ -113,6 +119,131 @@ func TestLoad_CorruptFileReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestLoad_ChunkKMismatchIsAMiss guards the DefaultK-retune trap: a cache
+// written under an old fingerprint.DefaultK stores per-chunk K values that
+// no longer match the current constant. Serving those entries would hand
+// downstream code fingerprints built from differently-sized k-grams —
+// silently wrong similarity scores. Entries whose chunks carry a stale K
+// must be treated as misses on Load (and get rebuilt). We simulate the
+// retune by writing a chunk with K = DefaultK+1, as if DefaultK had been
+// bumped since the file was written.
+func TestLoad_ChunkKMismatchIsAMiss(t *testing.T) {
+	dir := t.TempDir()
+	c := New()
+	c.Put("stale", Entry{
+		ContentHash: "x",
+		Chunks:      []Chunk{{Name: "f", K: fingerprint.DefaultK + 1, Hashes: []uint32{1}}},
+	})
+	c.Put("fresh", Entry{
+		ContentHash: "y",
+		Chunks:      []Chunk{{Name: "g", K: fingerprint.DefaultK, Hashes: []uint32{2}}},
+	})
+	if err := c.Save(dir); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	c2, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := c2.Get("stale"); ok {
+		t.Error("entry with chunk K != fingerprint.DefaultK must be a miss, was served")
+	}
+	if _, ok := c2.Get("fresh"); !ok {
+		t.Error("entry with current K should still be served")
+	}
+}
+
+// TestLoad_SchemaMismatchReturnsEmpty: a cache written under a different
+// algorithm-parameter schema (different k/w, tokenizer schema, or cache
+// version) must be dropped wholesale on Load — no manual Version bump
+// should ever be required for a parameter retune to invalidate.
+func TestLoad_SchemaMismatchReturnsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	old := &Cache{
+		Version: Version,
+		Schema:  SchemaTag() + ";retuned",
+		Entries: map[string]Entry{"k1": {ContentHash: "x"}},
+		dirty:   true,
+	}
+	if err := old.Save(dir); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(c.Entries) != 0 {
+		t.Errorf("schema-mismatched cache should yield empty Entries, got %d", len(c.Entries))
+	}
+	if c.Schema != SchemaTag() {
+		t.Errorf("fresh cache should carry the current schema tag, got %q", c.Schema)
+	}
+}
+
+// TestSchemaTag_HasSplitterComponent: the schema tag must fold in the
+// splitter's output schema version. Without it, a splitter change (new
+// chunk kinds, new spans — e.g. Elixir defmodule class chunks) would
+// silently serve stale cached chunk sets: the file content is
+// unchanged, so nothing else invalidates the entry.
+func TestSchemaTag_HasSplitterComponent(t *testing.T) {
+	if !strings.Contains(SchemaTag(), ";split=s") {
+		t.Errorf("SchemaTag %q lacks a splitter schema component (want a \";split=s<N>\" segment)", SchemaTag())
+	}
+}
+
+// TestLoad_PreSplitterSchemaCacheRejected: a cache file written under
+// the pre-splitter-component tag format (as shipped before Elixir
+// module spans) must be dropped wholesale on Load — its entries were
+// split without module chunks and would silently drop module findings.
+func TestLoad_PreSplitterSchemaCacheRejected(t *testing.T) {
+	dir := t.TempDir()
+	oldTag := fmt.Sprintf("cache=%d;fp=k%d,w%d,s%d;tok=s%d",
+		Version, fingerprint.DefaultK, fingerprint.DefaultW,
+		fingerprint.SchemaVersion, tokenizer.SchemaVersion)
+	old := &Cache{
+		Version: Version,
+		Schema:  oldTag,
+		Entries: map[string]Entry{"k1": {ContentHash: "x"}},
+		dirty:   true,
+	}
+	if err := old.Save(dir); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(c.Entries) != 0 {
+		t.Errorf("cache written under the pre-splitter tag %q must be rejected, got %d entries served", oldTag, len(c.Entries))
+	}
+}
+
+// TestSchemaTag_DistinctPerComponent: every algorithm parameter folded
+// into the schema tag must change the tag on its own, so a retune of any
+// single one auto-invalidates the cache.
+func TestSchemaTag_DistinctPerComponent(t *testing.T) {
+	base := schemaTag(3, 10, 4, 1, 1, 1)
+	variants := map[string]string{
+		"cache version":      schemaTag(4, 10, 4, 1, 1, 1),
+		"fingerprint k":      schemaTag(3, 11, 4, 1, 1, 1),
+		"winnowing w":        schemaTag(3, 10, 5, 1, 1, 1),
+		"fingerprint schema": schemaTag(3, 10, 4, 2, 1, 1),
+		"tokenizer schema":   schemaTag(3, 10, 4, 1, 2, 1),
+		"splitter schema":    schemaTag(3, 10, 4, 1, 1, 2),
+	}
+	for name, v := range variants {
+		if v == base {
+			t.Errorf("changing %s did not change the schema tag: %q", name, base)
+		}
+	}
+	if got := schemaTag(3, 10, 4, 1, 1, 1); got != base {
+		t.Errorf("schemaTag must be deterministic: %q vs %q", got, base)
+	}
+}
+
 func TestPatternsHash_OrderInsensitive(t *testing.T) {
 	a := PatternsHash([]string{"^log\\.", "^debug\\."})
 	b := PatternsHash([]string{"^debug\\.", "^log\\."})
@@ -139,8 +270,8 @@ func TestPatternsHash_EmptyIsStable(t *testing.T) {
 }
 
 func TestKey_DeterministicForSameInputs(t *testing.T) {
-	k1 := Key("/a/b/c.go", "abc", "xyz")
-	k2 := Key("/a/b/c.go", "abc", "xyz")
+	k1 := Key("/a/b/c.go", "abc", "xyz", "function")
+	k2 := Key("/a/b/c.go", "abc", "xyz", "function")
 	if k1 != k2 {
 		t.Errorf("Key should be deterministic: %q vs %q", k1, k2)
 	}
@@ -152,14 +283,28 @@ func TestKey_DistinctForDifferentInputs(t *testing.T) {
 		a, b      string
 		different bool
 	}{
-		{"different path", Key("/a.go", "h1", "p"), Key("/b.go", "h1", "p"), true},
-		{"different content", Key("/a.go", "h1", "p"), Key("/a.go", "h2", "p"), true},
-		{"different patterns", Key("/a.go", "h1", "p1"), Key("/a.go", "h1", "p2"), true},
+		{"different path", Key("/a.go", "h1", "p", "function"), Key("/b.go", "h1", "p", "function"), true},
+		{"different content", Key("/a.go", "h1", "p", "function"), Key("/a.go", "h2", "p", "function"), true},
+		{"different patterns", Key("/a.go", "h1", "p1", "function"), Key("/a.go", "h1", "p2", "function"), true},
+		{"different granularity", Key("/a.go", "h1", "p", "function"), Key("/a.go", "h1", "p", "file"), true},
 	}
 	for _, c := range cases {
 		if c.different && c.a == c.b {
 			t.Errorf("%s: keys should differ but match: %q", c.name, c.a)
 		}
+	}
+}
+
+// TestKey_FunctionGranularityKeepsLegacyKeys pins the compatibility
+// contract: function-level keys (and the empty-string legacy spelling)
+// hash identically to keys derived before the granularity dimension
+// existed, so upgrading codetwin does not cold-start existing caches.
+func TestKey_FunctionGranularityKeepsLegacyKeys(t *testing.T) {
+	if Key("/a.go", "h1", "p", "function") != Key("/a.go", "h1", "p", "") {
+		t.Error(`Key(..., "function") must equal Key(..., "") — the legacy key shape`)
+	}
+	if Key("/a.go", "h1", "p", "file") == Key("/a.go", "h1", "p", "") {
+		t.Error(`Key(..., "file") must NOT collide with the legacy key shape`)
 	}
 }
 

@@ -15,7 +15,7 @@ shown as a label and a number. Bands use strict `>` thresholds:
 | NEAR CLONE | > 85% | Virtually identical with one or two token-level edits (a swapped literal, a different default arg). Treat as a clone unless the difference is intentional. |
 | STRUCTURAL TWIN | > 85%, lexical < 20% | Same token shape, different content: the pair's raw identifier/string vocabulary barely overlaps, so this is likely parallel boilerplate (table tests, per-field validators, generated handlers) rather than copy-paste. See "Structural twins" below. |
 | STRONG CLONE | > 65% | Same shape and most of the same structure, with substantive divergences. Parameterize the differing parts. |
-| REFACTOR TARGET | > 45% | Same general approach to the same problem, with real differences in execution. Evaluate whether a shared abstraction reduces duplication; sometimes "no" is the right answer. |
+| REFACTOR TARGET | > 45% | Same general approach to the same problem, with real differences in execution (`refactor_candidate` in JSON). Evaluate whether a shared abstraction reduces duplication; sometimes "no" is the right answer. |
 | WEAK SIMILARITY | ≤ 45% | Probably coincidental token overlap. Hidden by default; visible with `--verbose`. |
 
 ## The two sub-scores
@@ -126,6 +126,34 @@ is an isolated duplicate that doesn't generalize beyond two callers.
 individually, pairs before clusters). `--json` output is always flat —
 machine consumers see every pair regardless.
 
+### Reading cross-repo clusters
+
+When codetwin was invoked with two or more directory roots, each root
+is a "repo" and snippet names carry a `repo:` prefix with the path
+shown relative to its root (`svc-a:src/handler.go:10-30 Parse`). A
+cluster whose members span at least two repos gets a **cross-repo** tag
+in its header, and its members render grouped per repo:
+
+```
+  Cluster 1 — 2 snippets · avg similarity 100% · cohesion 100% · cross-repo
+    svc-a — 1 snippet
+      · svc-a:pricing.go:7-26 ApplyDiscount
+    svc-b — 1 snippet
+      · svc-b:billing.go:7-26 ApplyDiscount
+```
+
+Read a cross-repo cluster as a **shared-library candidate**: the same
+logic is maintained independently in every listed repo, so a fix in one
+copy won't reach the others until someone extracts it. Triage them
+above same-repo clusters — the repo group lines tell you at a glance
+which teams the extraction has to involve. A cluster confined to one
+repo renders flat (the name prefix already names the repo) and is an
+ordinary within-repo refactor.
+
+`--cross-repo-only` filters the whole report down to repo-spanning
+findings. In JSON, look for `cross_repo: true` on clusters and
+`repo_a`/`repo_b` on pairs and partial clones.
+
 ## Partial clones (PARTIAL CLONES section)
 
 Everything above scores *whole functions* against each other, and that
@@ -159,9 +187,85 @@ them; `--limit` caps them; `--min-block-lines 0` turns the channel off.
 Test↔test partial clones are suppressed by default like test↔test
 pairs (see below).
 
+With `--preview` on, each side shows a line-numbered excerpt of its
+exact block range (the numbers are absolute source lines, capped by
+`--preview-lines`), so you can read the duplicated lines without
+opening either file:
+
+```
+  [PARTIAL CLONE   ]  92% contained · 15 lines
+    orders.go:120-134 ⊂ ProcessOrders
+       120 │ 	seen := make(map[string]bool, len(req.Items))
+       121 │ 	for _, item := range req.Items {
+       ...
+```
+
 Acting on one is usually the easiest refactor in the report: the block
 is contiguous on both sides, so extract it into a helper and call it
-from both hosts.
+from both hosts. `--suggest <id>` (the finding's 8-char `id` in the
+JSON output) does the first step for you: it emits a unified diff that
+wraps side A's block in a fresh helper — `extractedBlock_<id>` in Go,
+`extracted_block_<id>` in Python — inserted right after the enclosing
+function. The helper body is a literal copy of the block; parameters
+are not inferred (a `TODO(codetwin)` comment lists the free
+identifiers the block appears to use, and the human finishes the
+extraction). Block suggestions ship for Go and Python; other languages
+print a `note:` on stderr and exit 1.
+
+## Granularity (--granularity file)
+
+The default report compares per-definition chunks. `--granularity file`
+compares whole files instead: every source file becomes one snippet
+named by its bare path, and the same scoring, clustering, and labels
+apply to those file-sized chunks.
+
+When to reach for it:
+
+- **Module-level consolidation.** Two files that carry the same set of
+  functions — reordered, lightly edited — plus the same surrounding
+  declarations show up in the default report as several mid-band
+  function pairs, none individually compelling. In file mode they show
+  up as one strong whole-file pair, which matches the real refactoring
+  unit: "these two files should be one module."
+- **Unsupported languages.** Languages without a splitter already fall
+  back to whole-file chunks; file mode makes that the rule for every
+  language, so a mixed-language scan compares like with like.
+
+Interpretation shifts accordingly: a 70% whole-file pair means the two
+*modules* share most of their content, even if no single function pair
+would clear the strong-clone band. Expect far fewer findings (fewer,
+bigger chunks), and expect short-file dampening to rarely matter —
+whole files usually exceed the `--min-confidence-lines` floor. Function
+mode remains the right default for "which helpers should be extracted";
+file mode answers "which files should be merged."
+
+## Class-level findings
+
+For Python, Java, JS/TS, Elixir, Rust, and Go, containers are chunked
+twice: once per method/def/fn and once as a whole class span (named
+`path:start-end ClassName` — for Elixir, the span is the
+`defmodule Foo do ... end` block and the symbol is the dotted module
+name; for Rust it is each `impl` block and the symbol is the TYPE name
+even for trait impls; for Go it is a synthetic struct+methodset group —
+the type decl plus its in-file methods joined under the covering line
+range, since Go methods live outside the type block). A class↔class
+finding means the *container* matches — a copied class or module,
+renamed, possibly with its methods reordered — which method-level pairs
+alone underreport (each method pair looks small and independent).
+Elixir modules wrapping fewer than two defs get no span, and Go types
+need two or more in-file methods to group: a single-def container's
+span would only duplicate the def finding, and one-callback modules
+(`use GenServer` + one `handle_*`) are pervasive enough to become
+noise.
+Class chunks are only ever compared against other class chunks: a class
+never pairs with a loose function or a single method across files
+(container-vs-part comparisons are dilution noise, not clones), and a
+class never pairs with its own methods (same-file nesting suppression).
+So when you see both a class↔class finding and several method pairs
+between the same two files, they're the same duplication reported at
+two granularities: fix it at the class level. `--suggest` on a class
+pair is rejected with a note — extraction targets functions/methods,
+so run it on the method pairs inside.
 
 ## Test code segregation (default)
 
@@ -269,12 +373,66 @@ or on a system without git installed, codetwin exits 1 with a clear
 error rather than silently degrading — the user explicitly opted in to
 a git-dependent feature, so silent fallback would hide the real problem.
 
+## Clone watchlist drift events (--baseline)
+
+`--update-baseline <file>` snapshots the clusters a scan found;
+`--baseline <file>` compares a later scan against the snapshot and
+prints one stderr line per change, in a stable format:
+
+```
+drift: <kind> cluster <n>: <detail>
+```
+
+`<n>` is the cluster's position in the *current* run (for
+`cluster-dissolved`, the baseline's — the cluster no longer exists);
+`<detail>` always names the members involved, so each line stands on
+its own. Any drift makes the run exit 1, which is the CI gate.
+
+How to read each kind:
+
+- **`member-added`** — a cluster gained a member. Someone pasted a new
+  copy of an existing clone family. This is the watchlist's version of
+  "new duplication introduced"; the detail names the new copy.
+- **`member-removed`** — a cluster lost a member. Usually good news
+  (a copy was deleted or refactored onto a shared helper), but verify
+  the member was removed on purpose rather than drifting so far it no
+  longer matches.
+- **`member-changed`** — the member still belongs to its cluster, but
+  its body changed. This is the classic drift alarm: a bug fixed (or a
+  feature added) in one copy but not its siblings. Diff the changed
+  member against the other cluster members and decide whether the edit
+  should propagate.
+- **`cluster-appeared`** — a whole new clone family with no baseline
+  counterpart. Treat like a fresh detection: read the cluster in the
+  normal report above the drift lines.
+- **`cluster-dissolved`** — a baseline family is gone: its members were
+  deleted, deduplicated, or drifted below the clustering band. The
+  detail lists the baseline members so you can check which it was.
+
+A body change only counts when the *normalized* token stream changes —
+formatting, comments, and renaming identifiers or literals never fire
+`member-changed`; added/removed statements or changed control flow do.
+Member identity strips line ranges and scan-root prefixes, so edits
+above a function (or scanning from a different directory) don't read
+as drift either.
+
+When the drift is intentional, refresh the snapshot with
+`--update-baseline` and commit the file. If codetwin refuses to compare
+at all ("different scan parameters" or "schema version"), the snapshot
+and the current run aren't comparable — match the flags it lists, or
+regenerate the baseline.
+
 ## Refactor suggestions
 
-`--suggest <pair-id>` emits a unified diff that *adds* a starter
-helper to the file containing snippet A. The helper is a literal copy
-of A's body, prefaced by a `Divergences (B vs A):` comment block
-listing exactly what differs (`//` for Go, `#` for Python). Codetwin
+`--suggest <id>` emits a unified diff that *adds* a starter helper to
+the file containing snippet A. The ID may name a pair or a partial
+clone — both carry stable 8-char IDs in the JSON output, and pairs win
+the (astronomically unlikely) collision. For a pair the helper is a
+literal copy of A's body; for a partial clone it is A's block span
+wrapped in a fresh helper signature (see the PARTIAL CLONES section).
+Either way it's prefaced by a `Divergences (B vs A):` comment block
+listing exactly what differs (`//` for Go/Java/JS-TS/Rust, `#` for
+Python/Elixir). Codetwin
 doesn't rewrite the call sites — it plants a starting point so a human
 (or the Claude skill) can finish the extraction with full visibility
 on every divergence.
@@ -300,9 +458,11 @@ A few things worth knowing:
   helpers — Go, Python, Java, JavaScript/TypeScript, Rust, and Elixir.
   The synthesizer needs language-specific logic to spot the function
   header and produce a sensible helper body. For Java, the helper is
-  appended at file scope (after the wrapping class's closing `}`) and
-  carries a `// NOTE: appended at file scope` comment; the human moves
-  it into the appropriate class before compiling. For
+  inserted inside the innermost class enclosing the source method
+  (before its closing `}`, indented as a sibling member) so the
+  patched file compiles as emitted; only when no enclosing type is
+  found does it fall back to a file-scope append with a `// NOTE:
+  appended at file scope` comment. For
   JavaScript/TypeScript, ES6+ class methods are unwrapped and emitted
   as free `function` helpers; when the body references `this`, the
   helper carries a `// NOTE: extracted as a free function from a
@@ -315,9 +475,22 @@ A few things worth knowing:
   `defmacro`/`defmacrop` block-form, `, do:` shorthand (single-line
   and split forms), multi-line wrapping headers, pattern-matched
   args, and `when` guards. The helper preserves the input's keyword
-  form and shorthand-vs-block style and ALWAYS carries a `# NOTE:
-  appended at file scope; Elixir defs must live inside a defmodule…`
-  comment, since Elixir cannot have free-standing defs.
+  form and shorthand-vs-block style; adjacent clauses of the same
+  name/arity are grouped into one multi-clause helper, and any
+  symbol-scoped `@doc`/`@spec` block above the def is carried onto
+  the helper (`@spec` renamed to match). The helper is inserted
+  inside the innermost defmodule enclosing the source def (before
+  its closing `end`, indented as a sibling def) so the patched file
+  compiles as emitted; only when no defmodule encloses the chunk
+  does it fall back to a file-scope append with a `# NOTE: appended
+  at file scope…` comment.
+- **Partial-clone (block) coverage.** Block suggestions ship for Go
+  and Python only. The block is a statement run, not a function, so
+  the emitter wraps it in a fresh signature with no parameters and a
+  `TODO(codetwin)` comment listing the block's free identifiers
+  (lexical heuristic — package names may appear; full inference is out
+  of scope). The diff inserts the helper right after side A's
+  enclosing function instead of at end-of-file.
 
 ## A note on config
 

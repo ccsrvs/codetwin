@@ -13,7 +13,11 @@
 // Cache invalidation is automatic on:
 //   - file content change (content hash mismatch)
 //   - ignore_patterns change (patterns hash mismatch)
-//   - codetwin tokenizer/splitter upgrades (Version constant bump)
+//   - cache storage format change (Version constant bump)
+//   - algorithm parameter change — fingerprint.DefaultK/DefaultW,
+//     fingerprint.SchemaVersion, tokenizer.SchemaVersion,
+//     splitter.SchemaVersion — via the SchemaTag stored in the cache
+//     file (no Version bump needed)
 package cache
 
 import (
@@ -25,6 +29,10 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/splitter"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // Filename is the on-disk cache file in the working directory.
@@ -36,7 +44,40 @@ const Filename = ".codetwin-cache.bin"
 // v3: added Chunk.LexTerms (raw-code lexical vocabulary for the
 // structural-twin label gate). Caches written by earlier versions lack
 // the field and are invalidated wholesale on Load.
-const Version uint32 = 3
+//
+// Version is only ONE component of the schema check — algorithm
+// parameters (fingerprint k/w, fingerprint hash schema, tokenizer
+// schema, splitter schema) are folded in via SchemaTag, so retuning
+// any of them invalidates the cache without a manual bump here.
+// Reserve Version bumps for changes to the cache's own storage format.
+//
+// v4: added Chunk.Kind and class-span chunks for Python/Java/JS
+// (§5.2 class-level granularity). Entries written by earlier versions
+// were split without class chunks, so they must be invalidated
+// wholesale — a stale entry would silently drop class findings.
+const Version uint32 = 4
+
+// SchemaTag encodes every algorithm parameter whose change makes cached
+// per-file output stale: the cache storage version, the fingerprint
+// k-gram size and winnowing window, the fingerprint hash schema, the
+// tokenizer output schema, and the splitter output schema. Load drops
+// any cache whose stored tag differs from the current one, so a retune
+// of ANY of these constants auto-invalidates old caches — the
+// historical trap was that only a manual Version bump did. The splitter
+// component closes the last such gap: a splitter change (new chunk
+// kinds or spans, e.g. Elixir defmodule class chunks) alters the chunk
+// set for UNCHANGED file content, which no content hash can catch.
+func SchemaTag() string {
+	return schemaTag(Version, fingerprint.DefaultK, fingerprint.DefaultW,
+		fingerprint.SchemaVersion, tokenizer.SchemaVersion, splitter.SchemaVersion)
+}
+
+// schemaTag is the parameterized core of SchemaTag, split out so tests
+// can prove each component independently changes the tag.
+func schemaTag(cacheVersion uint32, k, w, fpSchema, tokSchema, splitSchema int) string {
+	return fmt.Sprintf("cache=%d;fp=k%d,w%d,s%d;tok=s%d;split=s%d",
+		cacheVersion, k, w, fpSchema, tokSchema, splitSchema)
+}
 
 // Chunk mirrors enough of the tokenizer + fingerprint output to reconstruct
 // a snippet without rerunning either. Tokens are stored as raw strings;
@@ -45,6 +86,7 @@ const Version uint32 = 3
 type Chunk struct {
 	Name       string
 	Lang       string
+	Kind       string // mirrors splitter.Chunk.Kind ("function" or "class")
 	StartLine  int
 	EndLine    int
 	Code       string
@@ -74,6 +116,13 @@ type Entry struct {
 type Cache struct {
 	mu      sync.Mutex
 	Version uint32
+	// Schema is the SchemaTag the cache was written under. Load rejects
+	// caches whose tag differs from the current build's — this is what
+	// makes a fingerprint.DefaultK/DefaultW retune or a tokenizer schema
+	// bump auto-invalidate without touching Version. Caches written
+	// before this field existed decode with Schema == "" and are
+	// likewise rejected (they simply miss and get rebuilt).
+	Schema  string
 	Entries map[string]Entry
 	dirty   bool
 }
@@ -97,15 +146,29 @@ func Load(dir string) (*Cache, error) {
 		// Corrupt cache → start fresh rather than fail the run.
 		return New(), nil
 	}
-	if c.Version != Version || c.Entries == nil {
+	if c.Version != Version || c.Schema != SchemaTag() || c.Entries == nil {
 		return New(), nil
+	}
+	// Defense-in-depth behind the SchemaTag check: entries whose chunks
+	// were fingerprinted under a different k-gram size than the current
+	// fingerprint.DefaultK are stale (their hashes cover differently
+	// sized token windows) and must miss. SchemaTag should already have
+	// rejected such caches wholesale; this guards hand-carried or
+	// tag-collided files at per-entry granularity.
+	for key, e := range c.Entries {
+		for _, ch := range e.Chunks {
+			if ch.K != fingerprint.DefaultK {
+				delete(c.Entries, key)
+				break
+			}
+		}
 	}
 	return &c, nil
 }
 
-// New returns a fresh empty cache at the current Version.
+// New returns a fresh empty cache at the current Version and SchemaTag.
 func New() *Cache {
-	return &Cache{Version: Version, Entries: map[string]Entry{}}
+	return &Cache{Version: Version, Schema: SchemaTag(), Entries: map[string]Entry{}}
 }
 
 // Get returns the cached entry for key, if any. The returned bool reports
@@ -193,16 +256,28 @@ func PatternsHash(patterns []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Key combines a file's absolute path, its content hash, and the active
-// ignore_patterns hash into a stable cache key. Path is included so two
-// files with identical content but different paths don't share an entry
-// (their chunk names differ).
-func Key(absPath, contentHash, patternsHash string) string {
+// Key combines a file's absolute path, its content hash, the active
+// ignore_patterns hash, and the chunking granularity into a stable cache
+// key. Path is included so two files with identical content but different
+// paths don't share an entry (their chunk names differ).
+//
+// Granularity is part of the key because entries store granularity-shaped
+// chunks: a function-level entry holds per-definition chunks, a file-level
+// entry holds one whole-file chunk, and serving one to the other mode
+// would silently change results. Function-level (or empty, its legacy
+// spelling) contributes nothing to the hash, so caches written before the
+// granularity dimension existed stay warm; any other granularity gets its
+// own key segment, letting both modes coexist in one cache file.
+func Key(absPath, contentHash, patternsHash, granularity string) string {
 	h := sha256.New()
 	h.Write([]byte(absPath))
 	h.Write([]byte{0})
 	h.Write([]byte(contentHash))
 	h.Write([]byte{0})
 	h.Write([]byte(patternsHash))
+	if granularity != "" && granularity != "function" {
+		h.Write([]byte{0})
+		h.Write([]byte(granularity))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 func TestRender_NoPairs(t *testing.T) {
@@ -514,6 +516,34 @@ func TestPrepare_CrossLangOnlyDropsPairsWithUnknownLang(t *testing.T) {
 	}
 	if out[0].NameA != "g2" {
 		t.Errorf("expected the Go/Python pair, got %s/%s", out[0].NameA, out[0].NameB)
+	}
+}
+
+// TestPrepare_CrossLangOnlyDropsUnknownLanguagePairs: the tokenizer's
+// Unknown sentinel is the string "unknown" (not ""), and it must get the
+// same treatment as an empty Lang — a pair involving an unclassified
+// snippet cannot be confirmed cross-language, so --cross-lang-only drops
+// it. In particular an Unknown↔Unknown pair is NOT cross-language (two
+// unclassifiable files are more likely the same language — the matrix
+// blends them as same-language for the same reason), and an
+// Unknown↔known pair must not surface as a noisy pseudo-cross match.
+func TestPrepare_CrossLangOnlyDropsUnknownLanguagePairs(t *testing.T) {
+	// Drift guard: isCrossLang mirrors tokenizer.Unknown as a string
+	// literal to keep the report package free of internal imports.
+	if string(tokenizer.Unknown) != "unknown" {
+		t.Fatalf("tokenizer.Unknown = %q; update report.isCrossLang's mirrored literal", tokenizer.Unknown)
+	}
+	pairs := []Pair{
+		{NameA: "u1", NameB: "u2", Score: 0.9, LangA: "unknown", LangB: "unknown"},
+		{NameA: "u3", NameB: "g1", Score: 0.8, LangA: "unknown", LangB: "go"},
+		{NameA: "g2", NameB: "p1", Score: 0.7, LangA: "go", LangB: "python"},
+	}
+	out, _, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	if len(out) != 1 {
+		t.Fatalf("expected only the go/python pair, got %d pairs: %+v", len(out), out)
+	}
+	if out[0].NameA != "g2" {
+		t.Errorf("expected the go/python pair, got %s/%s", out[0].NameA, out[0].NameB)
 	}
 }
 

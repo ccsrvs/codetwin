@@ -5,6 +5,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
+)
+
+// Placement NOTEs prepended to the helper when a Java/Elixir
+// suggestion has to fall back to a file-scope append because no
+// enclosing container was found around A's chunk.
+const (
+	javaFileScopeNote = "// NOTE: appended at file scope; move it into the appropriate Java\n" +
+		"// class (or extract to a utility class) before compiling.\n"
+	elixirFileScopeNote = "# NOTE: appended at file scope; Elixir defs must live inside a\n" +
+		"# defmodule — move this def into the appropriate module (or\n" +
+		"# extract to a shared helper module) before compiling.\n"
 )
 
 // BuildPatch produces a unified diff that appends the suggestion's
@@ -14,12 +27,39 @@ import (
 // skill) can finish the refactor with full visibility on what was
 // extracted and how A and B diverge.
 //
-// The diff uses up to 3 lines of trailing context anchored on the
-// final lines of pathA so `git apply` succeeds even when the
-// surrounding file has unrelated commits since the snapshot codetwin
-// scanned. Returns ("", nil) when s.HelperSrc is empty (rejection
+// The diff uses up to 3 lines of context anchored around the insertion
+// point so `git apply` succeeds even when the surrounding file has
+// unrelated commits since the snapshot codetwin scanned. Placement
+// depends on the language (see buildPlacedPatch): Java and Elixir
+// helpers are inserted inside A's enclosing container so the patched
+// file compiles as emitted; every other language appends at the end of
+// the file. Returns ("", nil) when s.HelperSrc is empty (rejection
 // case) — callers should check Suggestion.Note instead.
 func BuildPatch(pathA string, s Suggestion) (string, error) {
+	return buildPatchFromFile(pathA, s, func(fileContent string) string {
+		return buildPlacedPatch(pathA, fileContent, s)
+	})
+}
+
+// BuildPatchInsertAfter produces a unified diff that inserts the
+// suggestion's HelperSrc into pathA right after the 1-based line
+// afterLine — block-mode --suggest uses it to land the helper directly
+// after the enclosing function instead of at end-of-file, so the
+// starter sits next to the code it was extracted from. When afterLine
+// reaches (or passes) the end of the file this degenerates to the
+// plain append patch. Returns ("", nil) when s.HelperSrc is empty
+// (rejection case) — callers should check Suggestion.Note instead.
+func BuildPatchInsertAfter(pathA string, afterLine int, s Suggestion) (string, error) {
+	return buildPatchFromFile(pathA, s, func(fileContent string) string {
+		return buildInsertAfterPatch(pathA, fileContent, s.HelperSrc, afterLine)
+	})
+}
+
+// buildPatchFromFile is the shared front half of BuildPatch and
+// BuildPatchInsertAfter: short-circuit on an empty HelperSrc (the
+// rejection case — callers should check Suggestion.Note), read pathA,
+// and delegate to the pure diff builder.
+func buildPatchFromFile(pathA string, s Suggestion, build func(fileContent string) string) (string, error) {
 	if s.HelperSrc == "" {
 		return "", nil
 	}
@@ -27,7 +67,77 @@ func BuildPatch(pathA string, s Suggestion) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", pathA, err)
 	}
-	return buildAppendPatch(pathA, string(data), s.HelperSrc), nil
+	return build(string(data)), nil
+}
+
+// buildInsertAfterPatch is BuildPatchInsertAfter's pure core: a single
+// hunk anchored on up to 3 lines of context on each side of the
+// insertion point, with a blank separator line before the helper (and
+// after it when the following line isn't already blank).
+func buildInsertAfterPatch(pathA, fileContent, helperSrc string, afterLine int) string {
+	trimmed := strings.TrimSuffix(fileContent, "\n")
+	var fileLines []string
+	if trimmed != "" {
+		fileLines = strings.Split(trimmed, "\n")
+	}
+	if afterLine >= len(fileLines) {
+		return buildAppendPatch(pathA, fileContent, helperSrc)
+	}
+	if afterLine < 0 {
+		afterLine = 0
+	}
+
+	preStart := afterLine - 3
+	if preStart < 0 {
+		preStart = 0
+	}
+	preCtx := fileLines[preStart:afterLine]
+	postEnd := afterLine + 3
+	if postEnd > len(fileLines) {
+		postEnd = len(fileLines)
+	}
+	postCtx := fileLines[afterLine:postEnd]
+
+	helperLines := strings.Split(strings.TrimRight(helperSrc, "\n"), "\n")
+	// Blank separator before the helper; another after it unless the
+	// next original line is already blank.
+	added := len(helperLines) + 1
+	trailingBlank := len(postCtx) > 0 && postCtx[0] != ""
+	if trailingBlank {
+		added++
+	}
+
+	hunkOldStart := preStart + 1
+	hunkOldLen := len(preCtx) + len(postCtx)
+	hunkNewStart := hunkOldStart
+	hunkNewLen := hunkOldLen + added
+
+	rel := strings.TrimPrefix(filepath.ToSlash(pathA), "/")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- a/%s\n", rel)
+	fmt.Fprintf(&b, "+++ b/%s\n", rel)
+	fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", hunkOldStart, hunkOldLen, hunkNewStart, hunkNewLen)
+	for _, l := range preCtx {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	b.WriteString("+\n")
+	for _, l := range helperLines {
+		b.WriteString("+")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	if trailingBlank {
+		b.WriteString("+\n")
+	}
+	for _, l := range postCtx {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // buildAppendPatch is BuildPatch's pure core: given the current file
@@ -116,6 +226,105 @@ func buildAppendPatch(pathA, fileContent, helperSrc string) string {
 			b.WriteString(l)
 			b.WriteString("\n")
 		}
+	}
+	return b.String()
+}
+
+// buildPlacedPatch routes a suggestion to its insertion strategy:
+//
+//   - Java: insert immediately before the closing `}` of the innermost
+//     class/interface/enum/record enclosing A's chunk, indented like
+//     A's chunk itself (a sibling member of the same container).
+//   - Elixir: insert immediately before the closing `end` of the
+//     innermost defmodule enclosing A's chunk, indented like a sibling
+//     def.
+//   - Everything else — and the defensive Java/Elixir case where no
+//     enclosing container is found (free-standing code, placement
+//     metadata missing) — appends at the end of the file. The
+//     fallback prepends the language's file-scope placement NOTE so
+//     the "move this before compiling" contract is still flagged.
+func buildPlacedPatch(pathA, fileContent string, s Suggestion) string {
+	switch s.Lang {
+	case tokenizer.Java:
+		if line, ok := javaEnclosingTypeClose(fileContent, s.SourceStartLine); ok {
+			helper := indentBlock(s.HelperSrc, lineIndent(fileContent, s.SourceStartLine))
+			return buildInsertBeforePatch(pathA, fileContent, helper, line)
+		}
+		return buildAppendPatch(pathA, fileContent, javaFileScopeNote+s.HelperSrc)
+	case tokenizer.Elixir:
+		if line, ok := elixirEnclosingModuleEnd(fileContent, s.SourceStartLine); ok {
+			helper := indentBlock(s.HelperSrc, lineIndent(fileContent, s.SourceStartLine))
+			return buildInsertBeforePatch(pathA, fileContent, helper, line)
+		}
+		return buildAppendPatch(pathA, fileContent, elixirFileScopeNote+s.HelperSrc)
+	}
+	return buildAppendPatch(pathA, fileContent, s.HelperSrc)
+}
+
+// buildInsertBeforePatch returns a unified diff that inserts helperSrc
+// immediately before the (1-based) insertBefore line of fileContent,
+// with up to 3 lines of context on each side. A blank separator line
+// is added above the helper when the preceding line is non-blank, so
+// the helper reads like any other member. Counterpart of
+// buildAppendPatch for mid-file insertion; insertion points past the
+// end of the file degrade to a plain append.
+func buildInsertBeforePatch(pathA, fileContent, helperSrc string, insertBefore int) string {
+	trimmed := strings.TrimSuffix(fileContent, "\n")
+	var fileLines []string
+	if trimmed != "" {
+		fileLines = strings.Split(trimmed, "\n")
+	}
+	if insertBefore < 1 {
+		insertBefore = 1
+	}
+	if insertBefore > len(fileLines) {
+		return buildAppendPatch(pathA, fileContent, helperSrc)
+	}
+
+	insIdx := insertBefore - 1 // 0-based index of the line pushed down
+	leadStart := insIdx - 3
+	if leadStart < 0 {
+		leadStart = 0
+	}
+	lead := fileLines[leadStart:insIdx]
+	trailEnd := insIdx + 3
+	if trailEnd > len(fileLines) {
+		trailEnd = len(fileLines)
+	}
+	trail := fileLines[insIdx:trailEnd]
+
+	helperLines := strings.Split(strings.TrimRight(helperSrc, "\n"), "\n")
+	needSep := len(lead) > 0 && strings.TrimSpace(lead[len(lead)-1]) != ""
+
+	oldStart := leadStart + 1
+	oldLen := len(lead) + len(trail)
+	newLen := oldLen + len(helperLines)
+	if needSep {
+		newLen++
+	}
+
+	rel := strings.TrimPrefix(filepath.ToSlash(pathA), "/")
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- a/%s\n", rel)
+	fmt.Fprintf(&b, "+++ b/%s\n", rel)
+	fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", oldStart, oldLen, oldStart, newLen)
+	for _, l := range lead {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	if needSep {
+		b.WriteString("+\n")
+	}
+	for _, l := range helperLines {
+		b.WriteString("+")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	for _, l := range trail {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
 	}
 	return b.String()
 }

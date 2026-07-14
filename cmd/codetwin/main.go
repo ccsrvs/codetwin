@@ -23,13 +23,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/ccsrvs/codetwin/internal/baseline"
 	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
@@ -71,7 +71,7 @@ func main() {
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
-	minLines := flag.Int("min-lines", 3, "skip files with fewer than N non-blank lines")
+	minLines := flag.Int("min-lines", 3, "skip chunks with fewer than N non-blank lines")
 	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
@@ -80,17 +80,21 @@ func main() {
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
 	minConfLines := flag.Int("min-confidence-lines", similarity.DefaultMinConfidenceLines, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
 	minBlockLines := flag.Int("min-block-lines", blocks.DefaultMinBlockLines, "report sub-function partial clones (shared blocks inside below-threshold pairs) spanning at least N non-blank lines on both sides; 0 disables block detection")
+	granularityFlag := flag.String("granularity", string(scan.GranularityFunction), "chunking unit: function (per-definition chunks, the default) | file (each source file is one whole-file snippet)")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
+	crossRepoOnly := flag.Bool("cross-repo-only", false, "only report findings whose endpoints are in different repos; requires two or more directory roots (each root is a repo)")
 	includeTests := flag.Bool("include-tests", false, "include test↔test pairs and test-only clusters in the report; by default they are suppressed and replaced by a one-line summary")
 	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
-	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair (look up the 8-char pair ID in --json output). v1 supports Go, Python, and Java; other languages print a 'note' explaining why.")
-	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair. Off by default — synthesis adds work proportional to pair count.")
+	updateBaselinePath := flag.String("update-baseline", "", "after the scan, write a clone-watchlist snapshot of the visible clusters to <file> and exit 0 (the normal report still prints). Compare later runs against it with --baseline.")
+	baselinePath := flag.String("baseline", "", "compare this scan's clusters against the snapshot in <file>: drift events print to stderr (one line each) and any drift exits 1 — a CI gate. Create the snapshot with --update-baseline; both runs must use the same threshold/eps/min-pts/granularity/include-tests.")
+	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair or partial-clone block (look up the 8-char ID in --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir; blocks: Go and Python. Other languages print a 'note' explaining why.")
+	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair and partial clone. Off by default — synthesis adds work proportional to finding count.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
 	showVersion := flag.Bool("version", false, "print the codetwin version and exit")
@@ -140,20 +144,53 @@ func main() {
 		applyConfigDefaults(cfg.Defaults, applied,
 			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
 			preview, previewLines, sortMode, limit, minConfLines, includeTests,
-			minBlockLines)
+			minBlockLines, granularityFlag)
 	}
 
-	ignoreMatcher, err := compileIgnoreMatcher(cfg)
+	// Validate after config defaults are applied so a bad value fails
+	// identically whether it came from --granularity or .codetwin.json.
+	granularity, err := scan.ParseGranularity(*granularityFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Clone watchlist (bet #5): validate the flag combination and load
+	// the comparison snapshot BEFORE any file processing, so schema or
+	// scan-params mismatches fail fast. baselineParams must be built
+	// after config defaults so .codetwin.json overrides are captured.
+	if *updateBaselinePath != "" && *baselinePath != "" {
+		fmt.Fprintln(os.Stderr, "error: --baseline and --update-baseline are mutually exclusive (snapshot with --update-baseline, gate with --baseline)")
+		os.Exit(1)
+	}
+	baselineParams := baseline.Params{
+		Threshold: *threshold, Eps: *eps, MinPts: *minPts,
+		Granularity: string(granularity), IncludeTests: *includeTests,
+	}
+	var baseSnap *baseline.Snapshot
+	if *baselinePath != "" {
+		snap := loadBaselineForCompare(*baselinePath, baselineParams)
+		baseSnap = &snap
+	}
+
+	// cfgRules is a nil-safe view of cfg for rule compilation: with no
+	// config file every rule list is empty and compileIfAny yields nil
+	// matchers whose absence downstream code already handles.
+	var cfgRules config.Config
+	if cfg != nil {
+		cfgRules = *cfg
+	}
+	ignoreMatcher, err := compileIfAny(cfgRules.IgnorePaths, config.CompileIgnorePaths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error in ignore_paths: %v\n", err)
 		os.Exit(1)
 	}
-	stripPatterns, err := compileStripPatterns(cfg)
+	stripPatterns, err := compileIfAny(cfgRules.IgnorePatterns, config.CompileIgnorePatterns)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning in ignore_patterns: %v\n", err)
 		// Continue with whatever patterns compiled successfully.
 	}
-	pairIgnoreMatcher, err := compilePairIgnoreMatcher(cfg)
+	pairIgnoreMatcher, err := compileIfAny(cfgRules.IgnorePairs, config.CompileIgnorePairs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error in ignore_pairs: %v\n", err)
 		os.Exit(1)
@@ -167,12 +204,21 @@ func main() {
 
 	debugf("starting; loaded config=%v patternsHash=%q", cfg != nil, "")
 
-	files, err := collectFiles(paths, ignoreMatcher)
+	files, repos, err := collectFiles(paths, ignoreMatcher)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error collecting files: %v\n", err)
 		os.Exit(1)
 	}
-	debugf("collectFiles: %d files", len(files))
+	debugf("collectFiles: %d files (%d directory roots)", len(files), len(repos.dirs))
+
+	// Cross-repo mode (roadmap bet #6) switches on automatically when
+	// two or more directory roots are given: each root is a repo.
+	// --cross-repo-only without that is a contradiction — no snippet
+	// would carry a repo label and every finding would be filtered out.
+	if *crossRepoOnly && !repos.MultiRepo() {
+		fmt.Fprintln(os.Stderr, "error: --cross-repo-only requires at least two directory roots (e.g. codetwin ../svc-a ../svc-b)")
+		os.Exit(1)
+	}
 
 	if len(files) < 2 {
 		fmt.Fprintln(os.Stderr, "error: need at least 2 source files to compare")
@@ -199,6 +245,17 @@ func main() {
 				fmt.Fprintf(os.Stderr, "error: git: %v\n", err)
 			}
 			os.Exit(1)
+		}
+		// Multi-root scans must not mix git repositories: --since and
+		// --blame resolve exactly one repo, so roots spread across
+		// different working trees would produce silently wrong output.
+		// Fail fast instead (documented limitation).
+		if repos.MultiRepo() {
+			label, _ := requestedGitFlags(*since, *blame)
+			if err := repos.ensureSingleGitRepo(label); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	}
 	if *since != "" {
@@ -239,6 +296,7 @@ func main() {
 	}
 	snippets, fileWarnings := scan.ProcessFiles(
 		files, *minLines, stripPatterns, cacheState, patternsHash,
+		granularity,
 		func() { done.Add(1) },
 	)
 	if progStop != nil {
@@ -247,6 +305,15 @@ func main() {
 	}
 	debugf("scan.ProcessFiles: %d snippets from %d files (%d warnings)",
 		len(snippets), len(files), len(fileWarnings))
+	// Cross-repo namespacing: with two or more directory roots, each
+	// snippet gets its root's repo label and a "label:" name prefix.
+	// Runs before the sort so every downstream surface (pair IDs,
+	// clusters, previews) sees one consistent set of names. Single-root
+	// and file-argument invocations skip this entirely.
+	if repos.MultiRepo() {
+		namespaceSnippets(snippets, repos)
+		debugf("multi-repo: %d roots, labels %v", len(repos.dirs), repos.labels)
+	}
 	// Workers complete in nondeterministic order; sort by name so snippet
 	// indices (and therefore pair construction order, cluster IDs, and any
 	// equal-score tie ordering) are stable across runs.
@@ -369,7 +436,17 @@ func main() {
 	for i, s := range snippets {
 		snippetNames[i] = s.Name
 	}
-	clusters := buildReportClusters(groups, matrix, snippetNames, *threshold)
+	// Per-member repo labels feed cluster grouping and the cross-repo
+	// tag. nil on single-root scans so Cluster.MemberRepos stays nil and
+	// rendering / JSON are untouched.
+	var snippetRepos []string
+	if repos.MultiRepo() {
+		snippetRepos = make([]string, len(snippets))
+		for i, s := range snippets {
+			snippetRepos[i] = s.Repo
+		}
+	}
+	clusters := buildReportClusters(groups, matrix, snippetNames, snippetRepos, *threshold)
 	markTestOnlyClusters(clusters, snippets)
 	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
@@ -386,6 +463,7 @@ func main() {
 		Sort:          report.SortMode(*sortMode),
 		Limit:         *limit,
 		CrossLangOnly: *crossLangOnly,
+		CrossRepoOnly: *crossRepoOnly,
 		IncludeTests:  *includeTests,
 		Flat:          *flat,
 	}
@@ -405,17 +483,34 @@ func main() {
 		len(visiblePairs), len(visibleClusters), len(visibleBlocks),
 		suppressed.TestTestPairs, suppressed.TestOnlyClusters, suppressed.TestTestBlocks)
 
+	// Clone watchlist: snapshot exactly what the report shows — the
+	// prepared, post-suppression clusters — so test segregation and
+	// --include-tests compose naturally with baselines. Drift is
+	// computed here (before output) so --json can embed it; the stderr
+	// lines and exit code land in finishBaseline after the report.
+	var curSnap baseline.Snapshot
+	var driftEvents []baseline.Event
+	if *updateBaselinePath != "" || *baselinePath != "" {
+		curSnap = buildBaselineSnapshot(visibleClusters, snippets, paths, baselineParams)
+		if baseSnap != nil {
+			driftEvents = baseline.Diff(*baseSnap, curSnap)
+			debugf("--baseline: %d drift events against %d baseline clusters", len(driftEvents), len(baseSnap.Clusters))
+		}
+	}
+
 	// --suggest <pair-id> short-circuits the rest of the report. We
 	// look up across all materialized pairs (not just visiblePairs) so
 	// the user can target a sub-threshold pair without having to
 	// re-tune --threshold. Materialization reaches down to
 	// similarity.MaterializationFloor(threshold) — a 0.20 band below
-	// the threshold (never below 0.30).
+	// the threshold (never below 0.30). Partial-clone block IDs are
+	// searched too (all detected blocks, not just visible ones); pairs
+	// win the 1-in-4-billion ID collision.
 	if *suggest != "" {
 		if showProgress {
 			fmt.Fprint(os.Stderr, "\r\033[K")
 		}
-		if err := emitSuggestion(*suggest, pairs, snippets); err != nil {
+		if err := emitSuggestion(*suggest, pairs, partialClones, snippets); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -428,6 +523,7 @@ func main() {
 			fmt.Fprint(os.Stderr, "\r\033[Kbuilding previews...")
 		}
 		opts.Previews = buildPreviews(visiblePairs, visibleClusters, snippets, *previewLines)
+		addBlockPreviews(opts.Previews, visibleBlocks, snippets, *previewLines)
 		debugf("previews built: %d", len(opts.Previews))
 	}
 
@@ -436,13 +532,16 @@ func main() {
 	}
 
 	if *jsonOut {
-		var suggestions map[string]jsonPatch
+		var suggestions, blockSuggestions map[string]jsonPatch
 		if *suggestAll {
 			suggestions = buildSuggestionMap(visiblePairs, snippets)
-			debugf("--suggest-all: built %d suggestions", len(suggestions))
+			blockSuggestions = buildBlockSuggestionMap(visibleBlocks, snippets)
+			debugf("--suggest-all: built %d pair + %d block suggestions",
+				len(suggestions), len(blockSuggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, suppressed)
+		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, blockSuggestions, suppressed, driftEvents)
 		debugf("done (json)")
+		finishBaseline(*updateBaselinePath, *baselinePath, curSnap, driftEvents)
 		return
 	}
 
@@ -450,6 +549,7 @@ func main() {
 	// idempotent on sorted+filtered+limited data.
 	report.Render(os.Stdout, visiblePairs, visibleClusters, opts)
 	debugf("done (rendered)")
+	finishBaseline(*updateBaselinePath, *baselinePath, curSnap, driftEvents)
 }
 
 // buildPreviews computes a Preview map for every snippet that appears in
@@ -465,10 +565,7 @@ func buildPreviews(
 	snippets []scan.Snippet,
 	previewLines int,
 ) map[string]report.Preview {
-	nameIdx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		nameIdx[s.Name] = i
-	}
+	nameIdx := snippetIndex(snippets)
 
 	visible := make(map[int]struct{})
 	for _, p := range visiblePairs {
@@ -570,10 +667,15 @@ func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
 //
 // IDs are assigned deterministically by first member name, so cluster
 // numbering is stable across runs regardless of map iteration order.
+// repos, when non-nil, is parallel to names and carries each snippet's
+// repo label from a multi-root scan; each cluster then gets a
+// MemberRepos slice parallel to its Members. nil (single-root) leaves
+// MemberRepos nil so repo-aware rendering and JSON stay switched off.
 func buildReportClusters(
 	groups map[int][]int,
 	matrix [][]float64,
 	names []string,
+	repos []string,
 	threshold float64,
 ) []report.Cluster {
 	memberLists := make([][]int, 0, len(groups))
@@ -596,11 +698,19 @@ func buildReportClusters(
 	for _, members := range memberLists {
 		avg, min := clusterStats(members, matrix)
 		memberNames := make([]string, len(members))
+		var memberRepos []string
+		if repos != nil {
+			memberRepos = make([]string, len(members))
+		}
 		for k, idx := range members {
 			memberNames[k] = names[idx]
+			if memberRepos != nil {
+				memberRepos[k] = repos[idx]
+			}
 		}
 		clusters = append(clusters, report.Cluster{
-			Members: memberNames, Score: avg, MinScore: min,
+			Members: memberNames, MemberRepos: memberRepos,
+			Score: avg, MinScore: min,
 		})
 	}
 	// Deterministic renumbering: order by first member name. Clusters are
@@ -616,17 +726,25 @@ func buildReportClusters(
 
 // ── Refactor suggestions (--suggest / --suggest-all) ─────────────────────────
 
-// emitSuggestion looks up a pair by 8-char ID, runs the refactor
-// pipeline (align → synthesize → patch), and writes the resulting
-// unified diff to stdout. When synthesis is rejected, prints a single
-// "note: <reason>" line on stderr and exits 1 — that matches the
-// failure semantics of `--since` on a non-existent ref and gives CI
-// pipelines a clean way to detect "no patch produced."
-func emitSuggestion(id string, pairs []report.Pair, snippets []scan.Snippet) error {
-	pair, ok := findPairByID(id, pairs)
-	if !ok {
-		return fmt.Errorf("no pair matches id %q (lower --threshold or check the id from --json output)", id)
+// emitSuggestion looks up an 8-char ID across pairs and partial-clone
+// blocks (pairs take precedence on the 1-in-4-billion collision), runs
+// the matching refactor pipeline (align → synthesize → patch), and
+// writes the resulting unified diff to stdout. When synthesis is
+// rejected, prints a single "note: <reason>" line on stderr and exits
+// 1 — that matches the failure semantics of `--since` on a
+// non-existent ref and gives CI pipelines a clean way to detect "no
+// patch produced."
+func emitSuggestion(id string, pairs []report.Pair, blocks []report.BlockClone, snippets []scan.Snippet) error {
+	if pair, ok := findPairByID(id, pairs); ok {
+		return emitPairSuggestion(pair, snippets)
 	}
+	if bc, ok := findBlockByID(id, blocks); ok {
+		return emitBlockSuggestion(bc, snippets)
+	}
+	return fmt.Errorf("no pair or partial clone matches id %q (lower --threshold or check the id from --json output)", id)
+}
+
+func emitPairSuggestion(pair report.Pair, snippets []scan.Snippet) error {
 	a, ok := findSnippet(pair.NameA, snippets)
 	if !ok {
 		return fmt.Errorf("snippet not found: %s", pair.NameA)
@@ -649,6 +767,29 @@ func emitSuggestion(id string, pairs []report.Pair, snippets []scan.Snippet) err
 	return nil
 }
 
+// emitBlockSuggestion is emitSuggestion's block-mode path: slice both
+// hosts' chunk code to the matched block spans, run the block-mode
+// pipeline (Align → SynthesizeBlock), and emit a diff that inserts the
+// helper right after side A's enclosing function. Rejections (notably
+// languages without a block-mode emitter) follow the pair-level
+// contract: "note: <reason>" on stderr, exit 1.
+func emitBlockSuggestion(bc report.BlockClone, snippets []scan.Snippet) error {
+	s, hostA, err := synthesizeBlockSuggestion(bc, snippets)
+	if err != nil {
+		return err
+	}
+	if s.Note != "" {
+		fmt.Fprintf(os.Stderr, "note: %s\n", s.Note)
+		os.Exit(1)
+	}
+	diff, err := refactor.BuildPatchInsertAfter(hostA.Path, hostA.EndLine, s)
+	if err != nil {
+		return fmt.Errorf("build patch: %w", err)
+	}
+	fmt.Print(diff)
+	return nil
+}
+
 // buildSuggestionMap synthesizes a Suggestion for every visible pair
 // and packages it as a jsonPatch. Used by --suggest-all to populate
 // `suggested_patch` on each pair in the JSON output. Pairs whose
@@ -656,10 +797,7 @@ func emitSuggestion(id string, pairs []report.Pair, snippets []scan.Snippet) err
 // rendered anyway.
 func buildSuggestionMap(pairs []report.Pair, snippets []scan.Snippet) map[string]jsonPatch {
 	out := make(map[string]jsonPatch, len(pairs))
-	byName := make(map[string]scan.Snippet, len(snippets))
-	for _, s := range snippets {
-		byName[s.Name] = s
-	}
+	byName := snippetsByName(snippets)
 	for _, p := range pairs {
 		a, okA := byName[p.NameA]
 		b, okB := byName[p.NameB]
@@ -668,40 +806,53 @@ func buildSuggestionMap(pairs []report.Pair, snippets []scan.Snippet) map[string
 		}
 		al := refactor.Align(a, b)
 		sug := refactor.Synthesize(a, b, p.ID, al)
-		patch := jsonPatch{
-			HelperName: sug.HelperName,
-			Confidence: sug.Confidence,
-			Note:       sug.Note,
-		}
-		if sug.HelperSrc != "" {
-			diff, err := refactor.BuildPatch(a.Path, sug)
-			if err != nil {
-				patch.Note = "error: " + err.Error()
-			} else {
-				patch.UnifiedDiff = diff
-			}
-		}
-		out[p.ID] = patch
+		out[p.ID] = suggestionPatch(sug, func() (string, error) {
+			return refactor.BuildPatch(a.Path, sug)
+		})
 	}
 	return out
 }
 
-func findPairByID(id string, pairs []report.Pair) (report.Pair, bool) {
-	for _, p := range pairs {
-		if p.ID == id {
-			return p, true
+// suggestionPatch packages a Suggestion as a jsonPatch, attaching the
+// unified diff when synthesis produced a helper (a diff-build error
+// replaces the Note). Shared by the pair and block --suggest-all
+// builders.
+func suggestionPatch(sug refactor.Suggestion, buildDiff func() (string, error)) jsonPatch {
+	patch := jsonPatch{
+		HelperName: sug.HelperName,
+		Confidence: sug.Confidence,
+		Note:       sug.Note,
+	}
+	if sug.HelperSrc != "" {
+		diff, err := buildDiff()
+		if err != nil {
+			patch.Note = "error: " + err.Error()
+		} else {
+			patch.UnifiedDiff = diff
 		}
 	}
-	return report.Pair{}, false
+	return patch
+}
+
+// findByKey returns the first item whose key equals want — the shared
+// linear-lookup shape behind findPairByID, findBlockByID, and
+// findSnippet.
+func findByKey[T any](items []T, want string, key func(T) string) (T, bool) {
+	for _, it := range items {
+		if key(it) == want {
+			return it, true
+		}
+	}
+	var zero T
+	return zero, false
+}
+
+func findPairByID(id string, pairs []report.Pair) (report.Pair, bool) {
+	return findByKey(pairs, id, func(p report.Pair) string { return p.ID })
 }
 
 func findSnippet(name string, snippets []scan.Snippet) (scan.Snippet, bool) {
-	for _, s := range snippets {
-		if s.Name == name {
-			return s, true
-		}
-	}
-	return scan.Snippet{}, false
+	return findByKey(snippets, name, func(s scan.Snippet) string { return s.Name })
 }
 
 // ── JSON output ───────────────────────────────────────────────────────────────
@@ -721,6 +872,21 @@ type jsonOutput struct {
 	// particular with --include-tests, so that flag preserves the exact
 	// pre-segregation JSON schema for CI consumers.
 	Suppressed *jsonSuppressed `json:"suppressed,omitempty"`
+
+	// Drift lists clone-watchlist events from --baseline mode. Omitted
+	// when there is no drift (and in runs without --baseline), so the
+	// schema stays byte-stable for consumers that don't use baselines.
+	Drift []jsonDriftEvent `json:"drift,omitempty"`
+}
+
+// jsonDriftEvent mirrors baseline.Event in the JSON schema. Cluster is
+// an index into the current run's cluster list — except for
+// cluster-dissolved, where it indexes the baseline's list (the cluster
+// no longer exists in this run); Detail always carries member keys.
+type jsonDriftEvent struct {
+	Kind    string `json:"kind"`
+	Cluster int    `json:"cluster"`
+	Detail  string `json:"detail"`
 }
 
 // jsonSuppressed mirrors report.Suppressed in the JSON schema.
@@ -746,6 +912,8 @@ type jsonPair struct {
 	Label          string          `json:"label"`
 	LangA          string          `json:"lang_a,omitempty"`
 	LangB          string          `json:"lang_b,omitempty"`
+	RepoA          string          `json:"repo_a,omitempty"`
+	RepoB          string          `json:"repo_b,omitempty"`
 	ProvenanceA    *jsonProvenance `json:"provenance_a,omitempty"`
 	ProvenanceB    *jsonProvenance `json:"provenance_b,omitempty"`
 	SuggestedPatch *jsonPatch      `json:"suggested_patch,omitempty"`
@@ -795,6 +963,11 @@ type jsonCluster struct {
 	// score over all distinct member pairs. A MinScore far below Score
 	// flags a transitively chained family.
 	MinScore float64 `json:"min_score"`
+	// MemberRepos (parallel to Members) and CrossRepo appear only on
+	// multi-root scans; single-root JSON is schema-identical to the
+	// pre-multi-repo output.
+	MemberRepos []string `json:"member_repos,omitempty"`
+	CrossRepo   bool     `json:"cross_repo,omitempty"`
 }
 
 type jsonPreview struct {
@@ -808,8 +981,11 @@ type jsonPreview struct {
 // terminal renderer. When suggestions is non-nil, each pair's
 // suggested_patch field is populated by ID lookup. Non-zero suppressed
 // counts add a top-level `suppressed` summary object.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions map[string]jsonPatch, suppressed report.Suppressed) {
-	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones)}
+func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed, drift []baseline.Event) {
+	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones, blockSuggestions)}
+	for _, e := range drift {
+		out.Drift = append(out.Drift, jsonDriftEvent{Kind: string(e.Kind), Cluster: e.Cluster, Detail: e.Detail})
+	}
 	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 || suppressed.TestTestBlocks > 0 {
 		out.Suppressed = &jsonSuppressed{
 			TestTestPairs:    suppressed.TestTestPairs,
@@ -830,6 +1006,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
 			Label: report.JSONLabel(p),
 			LangA: p.LangA, LangB: p.LangB,
+			RepoA: p.RepoA, RepoB: p.RepoB,
 			ProvenanceA: toJSONProvenance(p.ProvenanceA),
 			ProvenanceB: toJSONProvenance(p.ProvenanceB),
 		}
@@ -845,7 +1022,10 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 		out.Pairs = append(out.Pairs, jp)
 	}
 	for _, c := range clusters {
-		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score, MinScore: c.MinScore})
+		out.Clusters = append(out.Clusters, jsonCluster{
+			ID: c.ID, Members: c.Members, Score: c.Score, MinScore: c.MinScore,
+			MemberRepos: c.MemberRepos, CrossRepo: c.CrossRepo(),
+		})
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -857,18 +1037,25 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 
 // ── File collection ───────────────────────────────────────────────────────────
 
-func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error) {
+// collectFiles walks the given paths and returns the supported source
+// files plus a repoMap recording which directory root each file came
+// from. The repoMap only takes effect downstream when two or more
+// directory roots were given (repoMap.MultiRepo) — that's the automatic
+// cross-repo mode; direct file arguments never carry a repo label.
+func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, *repoMap, error) {
 	deduped, err := pathutil.Dedupe(paths)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	repos := newRepoMap()
 	var files []string
 	for _, p := range deduped {
 		info, err := os.Stat(p)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if info.IsDir() {
+			label := repos.addRoot(p)
 			err = filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
@@ -887,17 +1074,18 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error
 				}
 				if !d.IsDir() && supportedExts[filepath.Ext(path)] {
 					files = append(files, path)
+					repos.addFile(path, p, label)
 				}
 				return nil
 			})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		} else if supportedExts[filepath.Ext(p)] && !ignore.Match(p, false) {
 			files = append(files, p)
 		}
 	}
-	return files, nil
+	return files, repos, nil
 }
 
 // stripPatternStrings extracts the raw ignore_patterns strings (not the
@@ -962,6 +1150,7 @@ func applyConfigDefaults(
 	minLines *int, eps *float64, minPts *int,
 	preview *bool, previewLines *int, sortMode *string, limit *int,
 	minConfLines *int, includeTests *bool, minBlockLines *int,
+	granularity *string,
 ) {
 	if d.Threshold != nil && !explicit["threshold"] {
 		*threshold = *d.Threshold
@@ -1005,36 +1194,24 @@ func applyConfigDefaults(
 	if d.MinBlockLines != nil && !explicit["min-block-lines"] {
 		*minBlockLines = *d.MinBlockLines
 	}
+	if d.Granularity != nil && !explicit["granularity"] {
+		*granularity = *d.Granularity
+	}
 }
 
-// compileIgnoreMatcher returns a (possibly nil-safe) matcher built from
-// cfg.IgnorePaths. A nil cfg yields a nil matcher whose Match method is a
-// no-op.
-func compileIgnoreMatcher(cfg *config.Config) (*config.IgnoreMatcher, error) {
-	if cfg == nil || len(cfg.IgnorePaths) == 0 {
-		return nil, nil
+// compileIfAny is the one compile-config-rules path (ignore_paths,
+// ignore_patterns, ignore_pairs — formerly three near-identical
+// wrappers): an empty rule list yields the zero (nil) result with no
+// error, so callers can plumb the result through without nil checks;
+// otherwise compile runs on the rules. For ignore_patterns the compile
+// error arrives alongside the patterns that DID compile, so the caller
+// can warn and continue rather than fail the run.
+func compileIfAny[R, T any](rules []R, compile func([]R) (T, error)) (T, error) {
+	if len(rules) == 0 {
+		var zero T
+		return zero, nil
 	}
-	return config.CompileIgnorePaths(cfg.IgnorePaths)
-}
-
-// compileStripPatterns compiles cfg.IgnorePatterns to regexes. Errors are
-// returned alongside the patterns that DID compile so the caller can warn
-// and continue rather than fail the run.
-func compileStripPatterns(cfg *config.Config) ([]*regexp.Regexp, error) {
-	if cfg == nil || len(cfg.IgnorePatterns) == 0 {
-		return nil, nil
-	}
-	return config.CompileIgnorePatterns(cfg.IgnorePatterns)
-}
-
-// compilePairIgnoreMatcher returns a matcher built from cfg.IgnorePairs.
-// nil-safe: a nil cfg or empty list yields a nil matcher whose Match is a
-// no-op, so callers can plumb the result through without nil checks.
-func compilePairIgnoreMatcher(cfg *config.Config) (*config.PairIgnoreMatcher, error) {
-	if cfg == nil || len(cfg.IgnorePairs) == 0 {
-		return nil, nil
-	}
-	return config.CompileIgnorePairs(cfg.IgnorePairs)
+	return compile(rules)
 }
 
 // requestedGitFlags returns a human-readable label and matching verb
@@ -1096,15 +1273,42 @@ func attachProvenance(pairs []report.Pair, provs map[string]*report.Provenance) 
 	}
 }
 
+// snippetMap builds a name-keyed lookup map over snippets, with
+// value(i, s) choosing what each name maps to — the scaffolding every
+// routine that resolves pair/cluster endpoints back to snippets by
+// name previously rebuilt inline. The three shapes in use follow.
+func snippetMap[V any](snippets []scan.Snippet, value func(i int, s scan.Snippet) V) map[string]V {
+	m := make(map[string]V, len(snippets))
+	for i, s := range snippets {
+		m[s.Name] = value(i, s)
+	}
+	return m
+}
+
+// snippetIndex maps each snippet's name to its position in snippets
+// (buildPreviews, the --since filters, applyPairIgnores).
+func snippetIndex(snippets []scan.Snippet) map[string]int {
+	return snippetMap(snippets, func(i int, _ scan.Snippet) int { return i })
+}
+
+// snippetsByName maps each snippet's name to the snippet itself, for
+// the suggestion and preview builders that need the full value.
+func snippetsByName(snippets []scan.Snippet) map[string]scan.Snippet {
+	return snippetMap(snippets, func(_ int, s scan.Snippet) scan.Snippet { return s })
+}
+
+// snippetTestFlags maps each snippet's name to its test-file
+// classification, shared by markTestPairs and markTestOnlyClusters.
+func snippetTestFlags(snippets []scan.Snippet) map[string]bool {
+	return snippetMap(snippets, func(_ int, s scan.Snippet) bool { return s.IsTest })
+}
+
 // markTestPairs sets each pair's IsTestA/IsTestB from the endpoint
 // snippets' test-file classification (scan.IsTestFile on the scanned
 // path). Presentation metadata only: report.Prepare uses the flags to
 // suppress test↔test pairs by default; scores are untouched.
 func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
-	isTest := make(map[string]bool, len(snippets))
-	for _, s := range snippets {
-		isTest[s.Name] = s.IsTest
-	}
+	isTest := snippetTestFlags(snippets)
 	for i := range pairs {
 		pairs[i].IsTestA = isTest[pairs[i].NameA]
 		pairs[i].IsTestB = isTest[pairs[i].NameB]
@@ -1116,10 +1320,7 @@ func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
 // reflects the final member lists (low-cohesion splitting may have
 // regrouped members). Same presentation-only contract as markTestPairs.
 func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
-	isTest := make(map[string]bool, len(snippets))
-	for _, s := range snippets {
-		isTest[s.Name] = s.IsTest
-	}
+	isTest := snippetTestFlags(snippets)
 	for i := range clusters {
 		allTest := len(clusters[i].Members) > 0
 		for _, m := range clusters[i].Members {
@@ -1132,38 +1333,44 @@ func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
 	}
 }
 
+// keepTouching is the shared --since filter loop: it keeps the items
+// for which touches reports diff overlap and returns the survivors plus
+// the dropped count. Backs filterPairsBySince, filterClustersBySince,
+// and filterBlocksBySince.
+func keepTouching[T any](items []T, touches func(T) bool) ([]T, int) {
+	kept := make([]T, 0, len(items))
+	dropped := 0
+	for _, it := range items {
+		if touches(it) {
+			kept = append(kept, it)
+			continue
+		}
+		dropped++
+	}
+	return kept, dropped
+}
+
 // filterPairsBySince keeps only pairs where at least one snippet's source
 // range overlaps a line range in the supplied DiffMap. Snippets whose
-// path resolves outside repoRoot can never overlap and are treated as
-// non-touching.
+// path resolves outside repoRoot can never overlap — as can pairs whose
+// endpoints can't be resolved by name — and are treated as non-touching.
 func filterPairsBySince(
 	pairs []report.Pair,
 	snippets []scan.Snippet,
 	repoRoot string,
 	diff git.DiffMap,
 ) ([]report.Pair, int) {
-	idx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		idx[s.Name] = i
-	}
-	kept := make([]report.Pair, 0, len(pairs))
-	dropped := 0
-	for _, p := range pairs {
+	idx := snippetIndex(snippets)
+	return keepTouching(pairs, func(p report.Pair) bool {
 		ai, okA := idx[p.NameA]
 		bi, okB := idx[p.NameB]
 		if !okA || !okB {
-			dropped++
-			continue
+			return false
 		}
 		a, b := snippets[ai], snippets[bi]
-		if diff.Touches(repoRoot, a.Path, a.StartLine, a.EndLine) ||
-			diff.Touches(repoRoot, b.Path, b.StartLine, b.EndLine) {
-			kept = append(kept, p)
-			continue
-		}
-		dropped++
-	}
-	return kept, dropped
+		return diff.Touches(repoRoot, a.Path, a.StartLine, a.EndLine) ||
+			diff.Touches(repoRoot, b.Path, b.StartLine, b.EndLine)
+	})
 }
 
 // filterClustersBySince keeps only clusters where at least one member
@@ -1175,12 +1382,8 @@ func filterClustersBySince(
 	repoRoot string,
 	diff git.DiffMap,
 ) []report.Cluster {
-	idx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		idx[s.Name] = i
-	}
-	kept := make([]report.Cluster, 0, len(clusters))
-	for _, c := range clusters {
+	idx := snippetIndex(snippets)
+	kept, _ := keepTouching(clusters, func(c report.Cluster) bool {
 		for _, m := range c.Members {
 			si, ok := idx[m]
 			if !ok {
@@ -1188,11 +1391,11 @@ func filterClustersBySince(
 			}
 			s := snippets[si]
 			if diff.Touches(repoRoot, s.Path, s.StartLine, s.EndLine) {
-				kept = append(kept, c)
-				break
+				return true
 			}
 		}
-	}
+		return false
+	})
 	return kept
 }
 
@@ -1201,6 +1404,11 @@ func filterClustersBySince(
 // maximally distant and won't co-cluster them. Returns the surviving pairs
 // (a fresh slice — input is not mutated beyond the matrix) and the count of
 // ignored pairs. A nil matcher or empty pair list short-circuits.
+//
+// Endpoints are matched against the UN-prefixed snippet name (the repo
+// label of a multi-root scan is stripped first), so ignore_pairs
+// entries stay portable between single-root and multi-root invocations.
+// Note the path part is the root-relative path in multi-root mode.
 func applyPairIgnores(
 	pairs []report.Pair,
 	matrix [][]float64,
@@ -1210,14 +1418,11 @@ func applyPairIgnores(
 	if matcher == nil || len(pairs) == 0 {
 		return pairs, 0
 	}
-	nameIdx := make(map[string]int, len(snippets))
-	for i, s := range snippets {
-		nameIdx[s.Name] = i
-	}
+	nameIdx := snippetIndex(snippets)
 	kept := make([]report.Pair, 0, len(pairs))
 	ignored := 0
 	for _, p := range pairs {
-		if matcher.Match(p.NameA, p.NameB) {
+		if matcher.Match(stripRepoPrefix(p.NameA, p.RepoA), stripRepoPrefix(p.NameB, p.RepoB)) {
 			ignored++
 			i, okA := nameIdx[p.NameA]
 			j, okB := nameIdx[p.NameB]
@@ -1242,12 +1447,20 @@ USAGE:
   Paths can be files or directories (scanned recursively).
   Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs
 
+  Two or more DIRECTORY roots switch on cross-repo mode: each root is a
+  "repo" (labelled by its base name; duplicates become name~2, name~3 …
+  by input order), snippet names gain a "repo:" prefix with paths shown
+  relative to their root, clusters spanning >=2 repos are tagged
+  cross-repo with members grouped per repo, and JSON gains
+  repo_a/repo_b/member_repos/cross_repo fields. Single-root and
+  file-argument runs are unchanged.
+
 FLAGS:
   --threshold float    minimum score to report (default 0.50)
   --plain              no ANSI colors, suitable for pipes and CI
   --json               output as JSON
   --verbose            show all pairs including weak similarities
-  --min-lines int      skip files with fewer than N non-blank lines (default 3)
+  --min-lines int      skip chunks with fewer than N non-blank lines (default 3)
   --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
                        the 'strong clone' band)
   --min-pts int        DBSCAN min cluster size (default 2)
@@ -1263,12 +1476,18 @@ FLAGS:
   --min-block-lines int  report sub-function PARTIAL CLONES: shared blocks of at
                        least N non-blank lines (both sides) hiding inside pairs
                        below the report threshold (default 8; 0 = off)
+  --granularity string chunking unit: function | file (default function).
+                       file mode skips the splitter — each source file is one
+                       whole-file snippet, for module-level consolidation and
+                       languages without a splitter
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
   --debug              print phase checkpoints with elapsed time to stderr
   --cross-lang-only    report only pairs whose two snippets are in different languages
                        (e.g. duplicate logic across Go service + TS dashboard)
+  --cross-repo-only    report only findings whose endpoints are in different repos
+                       (requires >=2 directory roots; composes with --cross-lang-only)
   --include-tests      include test↔test pairs and test-only clusters; by default
                        they are suppressed and replaced by a one-line summary
                        (test↔production pairs and mixed clusters always render)
@@ -1278,6 +1497,20 @@ FLAGS:
   --blame              annotate each finding with git provenance (when introduced,
                        by whom, last touched). Pairs --sort=age for "newest clones first".
                        Requires git on PATH and a git repository.
+  --update-baseline string  clone watchlist: after the scan, write a snapshot of the
+                       visible clusters to <file> and exit 0 (the report still prints)
+  --baseline string    compare this scan against the snapshot in <file>: drift events
+                       print to stderr ('drift: <kind> cluster <n>: <detail>'), any
+                       drift exits 1 (CI gate). Both runs must use the same threshold/
+                       eps/min-pts/granularity/include-tests. Mutually exclusive with
+                       --update-baseline.
+  --suggest string     print a unified diff that adds a starter helper extracted from
+                       the pair or partial-clone block with the given 8-char ID (look
+                       it up in --json output). Pairs: all six languages; blocks: Go
+                       and Python. Rejections print a 'note' on stderr and exit 1.
+  --suggest-all        with --json: populate suggested_patch on every visible pair and
+                       partial clone (off by default — synthesis cost scales with
+                       finding count)
   --skill              print the full skill guide and exit
   --guide              print the report interpretation guide and exit
   --version            print the codetwin version and exit
@@ -1288,6 +1521,8 @@ EXAMPLES:
   codetwin --plain ./src > report.txt
   codetwin --json ./src | jq '.pairs[] | select(.score > 0.8)'
   codetwin ./utils/a.go ./utils/b.go
+  codetwin ../svc-a ../svc-b ../svc-c              # cross-repo scan
+  codetwin --cross-repo-only ../svc-a ../svc-b     # only repo-spanning findings
 
 SCORING:
   > 95%%  Exact clone       — extract shared utility, delete one

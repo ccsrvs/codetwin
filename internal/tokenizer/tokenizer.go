@@ -10,6 +10,13 @@ import (
 	"unicode"
 )
 
+// SchemaVersion identifies the tokenizer's OUTPUT schema: bump it whenever
+// a change to normalization, token splitting, or language patterns alters
+// the token stream produced for unchanged source. It is folded into
+// cache.SchemaTag so any bump auto-invalidates cached tokenization —
+// no manual cache.Version bump required.
+const SchemaVersion = 1
+
 // Language represents a supported source language.
 type Language string
 

@@ -18,6 +18,32 @@ import (
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
+// Granularity selects the chunking unit ProcessFile emits Snippets at.
+type Granularity string
+
+const (
+	// GranularityFunction is today's default: splitter.Split emits
+	// per-definition chunks, with a whole-file fallback when no
+	// definitions are found.
+	GranularityFunction Granularity = "function"
+
+	// GranularityFile skips the splitter entirely: each source file
+	// becomes one whole-file Snippet (splitter.WholeFile — Symbol empty,
+	// StartLine 1, so the snippet name is just the path).
+	GranularityFile Granularity = "file"
+)
+
+// ParseGranularity validates a user-supplied granularity string (CLI flag
+// or config default) and returns the typed value. The error message lists
+// the valid values so it can be shown to the user verbatim.
+func ParseGranularity(s string) (Granularity, error) {
+	switch Granularity(s) {
+	case GranularityFunction, GranularityFile:
+		return Granularity(s), nil
+	}
+	return "", fmt.Errorf("invalid granularity %q (valid values: function, file)", s)
+}
+
 // Snippet is one analyzable unit (typically a function- or class-level
 // chunk produced by splitter.Split).
 type Snippet struct {
@@ -44,6 +70,19 @@ type Snippet struct {
 	// given by the caller (usually relative to the scan root) so
 	// unrelated directory names above the repo can't misclassify.
 	IsTest bool
+
+	// Kind mirrors splitter.Chunk.Kind: class-span chunks carry
+	// splitter.KindClass, everything else splitter.KindFunction.
+	// BuildMatrix only scores same-kind pairs against each other.
+	Kind splitter.ChunkKind
+
+	// Repo is the repo label the snippet belongs to in a multi-root
+	// ("cross-repo") scan: the base name of the directory root the file
+	// was collected under. Empty on single-root and file-argument
+	// invocations — the scan package never sets it; cmd/codetwin
+	// assigns it (and prefixes Name with "repo:") only when the CLI was
+	// given two or more directory roots.
+	Repo string
 }
 
 // ProcessFiles runs the per-file split → tokenize → fingerprint pipeline
@@ -64,6 +103,7 @@ func ProcessFiles(
 	stripPatterns []*regexp.Regexp,
 	cacheState *cache.Cache,
 	patternsHash string,
+	granularity Granularity,
 	onFileDone func(),
 ) ([]Snippet, []string) {
 	n := len(files)
@@ -96,7 +136,7 @@ func ProcessFiles(
 			defer wg.Done()
 			var local result
 			for path := range workCh {
-				snips, warn := ProcessFile(path, minLines, stripPatterns, cacheState, patternsHash)
+				snips, warn := ProcessFile(path, minLines, stripPatterns, cacheState, patternsHash, granularity)
 				local.snippets = append(local.snippets, snips...)
 				if warn != "" {
 					local.warnings = append(local.warnings, warn)
@@ -124,12 +164,18 @@ func ProcessFiles(
 // fingerprint), safe to call concurrently. Returns the snippets that
 // survive minLines plus an optional warning string for read errors.
 // Cache state is shared and thread-safe via its internal mutex.
+//
+// granularity selects the chunking unit: GranularityFunction runs
+// splitter.Split; GranularityFile emits a single whole-file chunk. The
+// granularity is part of the cache key, so the two modes never serve each
+// other's cached chunks and can coexist in one cache file.
 func ProcessFile(
 	path string,
 	minLines int,
 	stripPatterns []*regexp.Regexp,
 	cacheState *cache.Cache,
 	patternsHash string,
+	granularity Granularity,
 ) ([]Snippet, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -138,7 +184,7 @@ func ProcessFile(
 
 	absPath, _ := filepath.Abs(path)
 	contentHash := cache.HashContent(data)
-	key := cache.Key(absPath, contentHash, patternsHash)
+	key := cache.Key(absPath, contentHash, patternsHash, string(granularity))
 	isTest := IsTestFile(path)
 
 	if entry, ok := cacheState.Get(key); ok {
@@ -160,6 +206,7 @@ func ProcessFile(
 				Fps:        positionalFromCache(c),
 				LexTerms:   c.LexTerms,
 				IsTest:     isTest,
+				Kind:       kindFromCache(c.Kind),
 			})
 		}
 		return out, ""
@@ -167,9 +214,15 @@ func ProcessFile(
 
 	code := string(data)
 	lang := tokenizer.Detect(path, code)
+	var chunks []splitter.Chunk
+	if granularity == GranularityFile {
+		chunks = []splitter.Chunk{splitter.WholeFile(path, code)}
+	} else {
+		chunks = splitter.Split(path, code, lang)
+	}
 	var out []Snippet
 	var entryChunks []cache.Chunk
-	for _, ch := range splitter.Split(path, code, lang) {
+	for _, ch := range chunks {
 		tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang,
 			tokenizer.WithStripPatterns(stripPatterns))
 		if len(tokens) == 0 {
@@ -183,6 +236,7 @@ func ProcessFile(
 		entryChunks = append(entryChunks, cache.Chunk{
 			Name:       name,
 			Lang:       string(lang),
+			Kind:       string(ch.Kind),
 			StartLine:  ch.StartLine,
 			EndLine:    ch.EndLine,
 			Code:       ch.Code,
@@ -211,6 +265,7 @@ func ProcessFile(
 			Fps:        ps,
 			LexTerms:   lexTerms,
 			IsTest:     isTest,
+			Kind:       ch.Kind,
 		})
 	}
 
@@ -224,6 +279,15 @@ func ProcessFile(
 // positionalFromCache reconstructs a fingerprint.PositionalSet from a
 // cached chunk. The Set is rebuilt from the flat hash list; Positions
 // and K survive serialization unchanged.
+// kindFromCache maps a cached kind string back to a splitter.ChunkKind,
+// defaulting to KindFunction for entries that predate the field.
+func kindFromCache(k string) splitter.ChunkKind {
+	if k == string(splitter.KindClass) {
+		return splitter.KindClass
+	}
+	return splitter.KindFunction
+}
+
 func positionalFromCache(c cache.Chunk) fingerprint.PositionalSet {
 	set := make(fingerprint.Set, len(c.Hashes))
 	for _, h := range c.Hashes {

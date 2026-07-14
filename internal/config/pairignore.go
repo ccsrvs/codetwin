@@ -62,6 +62,15 @@ func parseSnippetName(name string) (path, symbol string) {
 	return path, symbol
 }
 
+// ParseSnippetName is the exported form of parseSnippetName. The baseline
+// package reuses it so clone-watchlist member identity and ignore_pairs
+// endpoints share exactly one normalization: the ":start-end" line range is
+// discarded (routine edits shift line numbers) and the optional splitter
+// symbol is returned separately.
+func ParseSnippetName(name string) (path, symbol string) {
+	return parseSnippetName(name)
+}
+
 // CompileIgnorePairs turns the `ignore_pairs` config slice into a matcher.
 // Both endpoints are validated; invalid globs and empty endpoints are
 // collected and reported together so the user fixes every problem in one
@@ -93,7 +102,8 @@ func CompileIgnorePairs(pairs []IgnorePair) (*PairIgnoreMatcher, error) {
 
 // compileEndpoint parses one side of an IgnorePair. The leading path is the
 // glob (or literal); a single space separates an optional symbol tail.
-// globToRegex (used by ignore_paths) is reused so syntax stays consistent.
+// compileAnchoredGlob (used by ignore_paths) is reused so syntax stays
+// consistent.
 func compileEndpoint(s string) (endpoint, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -109,14 +119,7 @@ func compileEndpoint(s string) (endpoint, error) {
 	}
 	e := endpoint{symbol: symPart}
 	if strings.ContainsAny(pathPart, "*?") {
-		glob := pathPart
-		switch {
-		case strings.HasPrefix(glob, "/"):
-			glob = strings.TrimPrefix(glob, "/")
-		case !strings.HasPrefix(glob, "**/"):
-			glob = "**/" + glob
-		}
-		re, err := globToRegex(glob)
+		re, err := compileAnchoredGlob(pathPart)
 		if err != nil {
 			return endpoint{}, err
 		}

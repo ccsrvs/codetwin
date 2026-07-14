@@ -9,7 +9,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 )
 
 // materializationFloorMin is the absolute minimum materialization
@@ -137,14 +137,32 @@ func BuildMatrix(
 						batchProgress++
 						continue
 					}
+					// Suppress mixed-kind comparisons: class-span chunks
+					// only score against other class chunks (see
+					// ComparableKinds). Leaving the matrix at 0 keeps
+					// DBSCAN and the block-candidate channel class-pure.
+					if !ComparableKinds(snippets[i], snippets[j]) {
+						batchProgress++
+						continue
+					}
 
 					var structural float64
 					if _, ok := cands[j]; ok {
 						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
 					}
 					semantic := CosineFromNormalized(vectors[i], vectors[j])
-					sameLang := snippets[i].Lang == snippets[j].Lang &&
-						snippets[i].Lang != tokenizer.Unknown
+					// Unknown↔Unknown counts as SAME language: two files
+					// the tokenizer couldn't classify are more likely the
+					// same (unrecognized) language than different ones, so
+					// they get the even blend and the R3 same-language
+					// corroboration cap. Excluding Unknown here would hand
+					// them the semantic-dominant 0.2/0.8 cross-language
+					// blend AND let them escape the cap — unreachable via
+					// the CLI today (scan gates on supported extensions),
+					// but a trap for future loosening. Note --cross-lang-only
+					// (report.Prepare) independently treats unknown-language
+					// pairs as NOT cross-language.
+					sameLang := snippets[i].Lang == snippets[j].Lang
 					combined := CombinedForLangs(structural, semantic, sameLang)
 					// Length-aware confidence: dampen short-snippet matches
 					// before they reach the matrix so DBSCAN sees the same
@@ -167,8 +185,18 @@ func BuildMatrix(
 					// itself won't render (below threshold), but a shared
 					// sub-function block might hide inside it. Collected
 					// here because the band reaches below the
-					// materialization floor.
+					// materialization floor. Class-kind pairs are excluded
+					// (checking one side suffices — the kind gate above
+					// guarantees both sides match): every method inside a
+					// container is emitted as its own function chunk and
+					// participates in the block channel independently, so
+					// container-level block detection only re-finds the
+					// same text — and for Go struct+methodset groups the
+					// joined non-contiguous Code would make the block
+					// detector's chunk-relative line arithmetic report
+					// ranges that don't exist in the source.
 					if sameLang && structural > 0 &&
+						snippets[i].Kind != splitter.KindClass &&
 						combined >= BlockCandidateFloor && combined < threshold {
 						localBlockCands = append(localBlockCands, [2]int{i, j})
 					}
@@ -207,6 +235,8 @@ func BuildMatrix(
 						LinesB:          snippets[j].NonBlankLn,
 						LangA:           string(snippets[i].Lang),
 						LangB:           string(snippets[j].Lang),
+						RepoA:           snippets[i].Repo,
+						RepoB:           snippets[j].Repo,
 						Lexical:         lexical,
 						LexicalComputed: lexicalComputed,
 					})
@@ -267,6 +297,19 @@ func buildHashIndex(snippets []scan.Snippet) map[uint32][]int {
 		}
 	}
 	return idx
+}
+
+// ComparableKinds reports whether two snippets sit at the same
+// granularity and may therefore be scored against each other. Class
+// chunks (splitter.KindClass) only compare against other class chunks:
+// a class span weakly resembling a small function or method across
+// files is container-vs-part dilution — the exact "washed out by
+// unrelated code" noise the splitter exists to avoid — not a clone.
+// Cross-file class↔class pairs are the §5.2 value-add and stay
+// comparable. The zero Kind (snippets built before the field existed,
+// or by tests) behaves as function-kind.
+func ComparableKinds(a, b scan.Snippet) bool {
+	return (a.Kind == splitter.KindClass) == (b.Kind == splitter.KindClass)
 }
 
 // chunksNestedSameFile reports whether two snippets come from the same

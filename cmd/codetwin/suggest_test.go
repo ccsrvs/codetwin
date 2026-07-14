@@ -110,7 +110,7 @@ func TestEmitSuggestion_FixtureGoSimple(t *testing.T) {
 
 	var buf strings.Builder
 	captured := captureStdout(t, &buf, func() {
-		if err := emitSuggestion(pair.ID, []report.Pair{pair}, snips); err != nil {
+		if err := emitSuggestion(pair.ID, []report.Pair{pair}, nil, snips); err != nil {
 			t.Fatalf("emitSuggestion error: %v", err)
 		}
 	})
@@ -130,12 +130,12 @@ func TestEmitSuggestion_FixtureGoSimple(t *testing.T) {
 }
 
 func TestEmitSuggestion_UnknownID_ReturnsHintError(t *testing.T) {
-	err := emitSuggestion("notfound", nil, nil)
+	err := emitSuggestion("notfound", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown id")
 	}
-	if !strings.Contains(err.Error(), "no pair matches id") {
-		t.Errorf("error %q lacks the 'no pair matches' hint", err)
+	if !strings.Contains(err.Error(), "no pair or partial clone matches id") {
+		t.Errorf("error %q lacks the 'no pair or partial clone matches' hint", err)
 	}
 }
 

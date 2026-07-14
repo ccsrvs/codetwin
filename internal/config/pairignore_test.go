@@ -81,6 +81,25 @@ func TestParseSnippetName_GivenEmptyString_WhenParsed_ThenReturnsEmptyPathAndSym
 	}
 }
 
+// TestParseSnippetName_Exported pins the exported wrapper to the internal
+// implementation: the baseline package's member identity must stay in
+// lockstep with ignore_pairs endpoint normalization.
+func TestParseSnippetName_Exported_MatchesInternalNormalization(t *testing.T) {
+	for _, name := range []string{
+		"internal/auth/handler.go:15-30 parseRequest",
+		"internal/foo/bar.go:15-30",
+		"internal/foo/bar.go",
+		"",
+	} {
+		wantPath, wantSym := parseSnippetName(name)
+		gotPath, gotSym := ParseSnippetName(name)
+		if gotPath != wantPath || gotSym != wantSym {
+			t.Errorf("ParseSnippetName(%q) = (%q, %q), want (%q, %q)",
+				name, gotPath, gotSym, wantPath, wantSym)
+		}
+	}
+}
+
 // ── CompileIgnorePairs / PairIgnoreMatcher ───────────────────────────────────
 //
 // Endpoint string format mirrors splitter.Chunk.Name() minus the line range:

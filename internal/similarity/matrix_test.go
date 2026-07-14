@@ -7,6 +7,7 @@ import (
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // makeSnippet constructs a Snippet with the minimum fields BuildMatrix
@@ -265,6 +266,70 @@ func TestBuildMatrix_CollectsGrayBandBlockCandidates(t *testing.T) {
 	if len(candsCross) != 0 {
 		t.Errorf("cross-language pair must not be a block candidate, got %v", candsCross)
 	}
+}
+
+// TestBuildMatrix_UnknownUnknownPairsUseSameLanguageBlendAndCap: two
+// snippets the tokenizer could not classify are MORE likely to be the
+// same (unrecognized) language than two different ones, so an
+// Unknown↔Unknown pair must take the even same-language blend and the
+// same-language corroboration cap — not the semantic-dominant 0.2/0.8
+// cross-language blend (which would also let it escape the R3 cap).
+// Unreachable through the CLI today (scan gates on supported
+// extensions), but a latent trap for any future loosening.
+func TestBuildMatrix_UnknownUnknownPairsUseSameLanguageBlendAndCap(t *testing.T) {
+	t.Run("even blend, not cross-language", func(t *testing.T) {
+		// Identical token streams → structural 1.0. Zero vectors →
+		// semantic 0. Same-language blend: 0.5·1.0 + 0.5·0 = 0.5
+		// (uncapped: structural ≥ 0.35). Cross-language blend would
+		// give 0.2·1.0 + 0.8·0 = 0.2.
+		tokens := []string{"VAR", "=", "VAR", ".", "len", "(", ")", "for", "VAR", "in", "VAR", "VAR", "+=", "VAR"}
+		a := makeSnippet("a/mystery.zig", "/a.zig", tokens)
+		a.Lang = tokenizer.Unknown
+		b := makeSnippet("b/mystery.zig", "/b.zig", tokens)
+		b.Lang = tokenizer.Unknown
+		snips := []scan.Snippet{a, b}
+
+		matrix, _, _ := BuildMatrix(snips, make([]NormalizedVector, 2), 0, 0.50, nil)
+
+		if got := matrix[0][1]; math.Abs(got-0.5) > 1e-9 {
+			t.Errorf("Unknown↔Unknown combined = %v, want 0.5 (same-language blend)", got)
+		}
+	})
+
+	t.Run("same-language corroboration cap applies", func(t *testing.T) {
+		// Disjoint token streams → structural 0. Identical hand-built
+		// vectors → semantic 1.0. Same-language R3 cap binds:
+		// min(0.5·0 + 0.5·1.0, 0.45) = 0.45. The cross-language blend
+		// would escape the cap entirely at 0.8.
+		ta := seqTokensSim(2*fingerprint.DefaultK, "x")
+		tb := seqTokensSim(2*fingerprint.DefaultK, "y")
+		a := makeSnippet("a/mystery.zig", "/a.zig", ta)
+		a.Lang = tokenizer.Unknown
+		b := makeSnippet("b/mystery.zig", "/b.zig", tb)
+		b.Lang = tokenizer.Unknown
+		snips := []scan.Snippet{a, b}
+		v := Normalize(Vector{"shared trigram here": 1})
+		vectors := []NormalizedVector{v, v}
+
+		matrix, _, _ := BuildMatrix(snips, vectors, 0, 0.50, nil)
+
+		if got := matrix[0][1]; got > 0.45+1e-9 {
+			t.Errorf("Unknown↔Unknown combined = %v, want ≤ 0.45 (same-language evidence cap)", got)
+		}
+		if got := matrix[0][1]; math.Abs(got-0.45) > 1e-9 {
+			t.Errorf("Unknown↔Unknown combined = %v, want exactly the 0.45 cap", got)
+		}
+	})
+}
+
+// seqTokensSim builds n distinct tokens with a prefix so two calls with
+// different prefixes share no k-grams (and therefore no fingerprints).
+func seqTokensSim(n int, prefix string) []string {
+	tokens := make([]string, n)
+	for i := range tokens {
+		tokens[i] = prefix + string(rune('0'+i/10)) + string(rune('0'+i%10))
+	}
+	return tokens
 }
 
 func TestBuildMatrix_IdenticalShortSnippetsGetStructuralCredit(t *testing.T) {

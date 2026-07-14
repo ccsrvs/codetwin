@@ -43,7 +43,21 @@ with the commands shown._
 > like pairs. The review's dilution demo (verbatim 15-line block in
 > ~45-line hosts, pair score 0.37) now surfaces as `100% contained`.
 > Self-scan: 12 genuine partial clones by default, byte-identical
-> across runs. §5.1/§5.2 granularity modes remain open.
+> across runs. §5.2 class-level granularity is implemented (see the
+> status note under §5.2).
+>
+> **Final batch (same date):** §5.1 file-level mode is implemented
+> (`--granularity file`, both modes cached side by side); block-pair
+> UX landed (`--suggest` extracts starter helpers from partial-clone
+> spans in Go/Python with `git apply`-verified diffs; `--preview`
+> renders matched block ranges); and the §3.6 hardening items shipped —
+> cache SchemaTag auto-invalidation on k/w/tokenizer retunes,
+> Unknown↔Unknown pairs treated as same-language (plus a real
+> `--cross-lang-only` filter bug found and fixed), and k-gram hashing
+> made allocation-free with bit-identical hashes (5.9–11.4× faster
+> fingerprinting). Every item in this review — R1–R6, §5.1, §5.2, §5.3,
+> and the §3.6 hardening list — is now implemented. Remaining product
+> bets (clone watchlist, cross-repo scanning) live in docs/roadmap.md.
 
 ## Executive summary
 
@@ -331,6 +345,41 @@ granularity work.
 
 ### 5.2 Class/type level — small (1–2 weeks)
 
+> **Implementation status (2026-07-14):** implemented test-first for
+> Python/Java/JS — class-span chunks (`splitter.KindClass`) are emitted
+> in addition to method chunks, and the dilution concern below is
+> addressed by a chunk-kind gate in `BuildMatrix` (class chunks only
+> score against other class chunks; mixed-kind pairs are skipped like
+> nested same-file pairs), pinned by the `bench/classes` category
+> (positive `python-class-clone` / `java-class-clone`, negative
+> `js-class-vs-loose-funcs`). Elixir `defmodule` spans landed as a
+> follow-up (`elixir-module-clone` bench case; modules with < 2 defs
+> are not span-chunked — one-callback modules would be pure noise —
+> and the change added a splitter schema component to cache.SchemaTag
+> so pre-module-span caches invalidate). Rust `impl` spans and Go
+> struct+methodset grouping landed next (`rust-impl-clone` /
+> `go-methodset-clone` bench cases; splitter.SchemaVersion bumped to
+> 3). Rust impl blocks are contiguous containers chunked like Java
+> classes, with the TYPE name as symbol (trait impls of one type share
+> it). Go has no contiguous container — methods live outside the type
+> block — so its "class" chunk is SYNTHETIC: the struct decl plus its
+> in-file methodset (>= 2 methods, decl-anchored, pointer/value
+> receivers unified) joined in file order under the COVERING line
+> range. The covering range over-approximates by design: --since
+> overlap and blame degrade gracefully (whole-stretch over-match),
+> previews render the joined text, and the same-file nesting filter
+> consequently suppresses group-vs-interleaved-unrelated-function pairs
+> too (acceptable — cross-file group↔group is the value). One
+> correctness consequence made class-kind chunks ineligible for the
+> §5.3 block-candidate channel across ALL languages: the block
+> detector's chunk-relative→absolute line arithmetic would lie on
+> joined non-contiguous Code, and container-level blocks only re-find
+> text the method chunks already cover. Remaining follow-ups: JS class
+> *expressions* (`const A = class {}`) are not span-chunked, Go
+> methods-only files (type declared in a sibling file) get no group,
+> and Go `type (...)` declaration blocks are not scanned for struct
+> decls.
+
 Java/JS splitters deliberately reject class headers so methods
 dominate; Python and Go have no class/struct chunks at all. Emitting a
 class-span chunk **in addition to** method chunks is a per-language
@@ -430,7 +479,14 @@ function-level-detectable territory.
 containment ≥ 0.85 + matched-line floor verification), wired through a
 gray-band candidate channel in `BuildMatrix` into the `PARTIAL CLONES`
 report section and `partial_clones` JSON array (`--min-block-lines`,
-default 8); the contract test above is un-skipped and green.
+default 8); the contract test above is un-skipped and green. The two
+deferred follow-ups landed too: `--suggest <block-id>` runs the
+block-mode refactor pipeline (slice block spans → align →
+`SynthesizeBlock` wraps the statement run in a fresh helper, Go +
+Python, inserted after the enclosing function; `--suggest-all` fills
+`suggested_patch` on partial clones), and `--preview` renders each
+side's exact block range with absolute line numbers (JSON previews
+keyed by the block's `file:start-end` range name).
 
 ### 5.4 Not recommended as "granularity": cross-repo
 

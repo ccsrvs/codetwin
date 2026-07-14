@@ -717,8 +717,10 @@ func TestExHelperHeader_DefForms(t *testing.T) {
 
 // Given the simple/medium/advanced Elixir fixtures, when Synthesize
 // runs, then it accepts and emits a HelperSrc with the helper
-// signature, the divergence block, the module-context NOTE, and both
-// sides' literals. Cycle 10.
+// signature, the divergence block, and both sides' literals. (No
+// placement NOTE: BuildPatch inserts the helper inside the enclosing
+// defmodule; the NOTE only appears on the file-scope fallback.)
+// Cycle 10.
 func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 	cases := []struct {
 		dir           string
@@ -730,8 +732,6 @@ func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 			expectInSrc: []string{
 				"def extracted_price_with_tax_",
 				"# Divergences (B vs A):",
-				"# NOTE:",
-				"defmodule",
 				"0.07",
 				"0.085",
 			},
@@ -745,7 +745,6 @@ func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 				`"admin:"`,
 				`"(active)"`,
 				`"(privileged)"`,
-				"# NOTE:",
 			},
 			minConfidence: 0.4,
 		},
@@ -755,7 +754,6 @@ func TestSynthesize_ElixirAcceptTiers(t *testing.T) {
 				"def extracted_fetch_a_",
 				`"/v1"`,
 				`"/v2"`,
-				"# NOTE:",
 			},
 			minConfidence: 0.4,
 		},
@@ -925,23 +923,28 @@ func TestSynthesizeElixir_ConfidenceWithBLongerThanA(t *testing.T) {
 	}
 }
 
-// Given any Elixir snippet, when Synthesize emits the helper, then a
-// `# NOTE:` block always surfaces — Elixir defs cannot live at file
-// scope, so the user must always move the helper into a module.
-// Cycle 9.
-func TestSynthesize_ElixirAlwaysCarriesModuleNote(t *testing.T) {
-	a := scan.Snippet{Name: "x.ex:1-3 a", Lang: tokenizer.Elixir, Code: "def a(x) do\n  x + 1\nend"}
-	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, Code: "def b(x) do\n  x + 2\nend"}
+// Given any Elixir snippet, when Synthesize emits the helper, then the
+// HelperSrc carries NO placement NOTE — placement moved to BuildPatch,
+// which inserts the helper inside the enclosing defmodule (and only
+// prepends the file-scope NOTE on the no-defmodule fallback, covered
+// in patch_test.go). The suggestion must carry the placement metadata
+// BuildPatch needs.
+func TestSynthesize_Elixir_NoPlacementNoteInHelperSrc(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:4-6 a", Lang: tokenizer.Elixir, StartLine: 4, Code: "def a(x) do\n  x + 1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, StartLine: 1, Code: "def b(x) do\n  x + 2\nend"}
 	al := Align(a, b)
 	s := Synthesize(a, b, "deadbeef", al)
 	if s.Note != "" {
 		t.Fatalf("expected accept, got Note=%q", s.Note)
 	}
-	if !strings.Contains(s.HelperSrc, "# NOTE:") {
-		t.Errorf("Elixir helper should always carry a module-context # NOTE: line. HelperSrc:\n%s", s.HelperSrc)
+	if strings.Contains(s.HelperSrc, "# NOTE:") {
+		t.Errorf("Elixir HelperSrc should no longer carry a placement # NOTE: line. HelperSrc:\n%s", s.HelperSrc)
 	}
-	if !strings.Contains(s.HelperSrc, "defmodule") {
-		t.Errorf("expected NOTE to mention `defmodule`. HelperSrc:\n%s", s.HelperSrc)
+	if s.Lang != tokenizer.Elixir {
+		t.Errorf("Suggestion.Lang = %q, want %q", s.Lang, tokenizer.Elixir)
+	}
+	if s.SourceStartLine != 4 {
+		t.Errorf("Suggestion.SourceStartLine = %d, want 4 (snippet A's start line)", s.SourceStartLine)
 	}
 }
 
@@ -1005,15 +1008,23 @@ func TestSynthesize_ElixirMultiClauseErrorClause(t *testing.T) {
 
 // Given the multi-clause fixture, when the splitter runs, then each
 // of the 4 def clauses (binary guard, integer guard, error pattern,
-// nil shorthand) becomes its own chunk. Pins the splitter's behaviour
-// on multi-clause idioms.
+// nil shorthand) becomes its own function-kind chunk. Pins the
+// splitter's behaviour on multi-clause idioms. (Since §5.2 the
+// wrapping defmodule is ALSO emitted, as a class-kind span — filtered
+// out here because extraction targets defs, mirroring the CLI's
+// class-pair rejection.)
 func TestSplit_ElixirRealworldMultiClause_AllClauses(t *testing.T) {
 	t.Helper()
 	data, err := os.ReadFile("../../testdata/refactor/elixir/realworld-multiclause/a.ex")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	chunks := splitter.Split("a.ex", string(data), tokenizer.Elixir)
+	var chunks []splitter.Chunk
+	for _, c := range splitter.Split("a.ex", string(data), tokenizer.Elixir) {
+		if c.Kind != splitter.KindClass {
+			chunks = append(chunks, c)
+		}
+	}
 	if len(chunks) != 4 {
 		t.Fatalf("expected 4 clauses, got %d (%v)", len(chunks), summariseChunks(chunks))
 	}
@@ -1608,12 +1619,10 @@ func TestSynthesize_PythonAcceptTiers(t *testing.T) {
 }
 
 // TestSynthesize_JavaAcceptTiers covers the simple/medium/advanced Java
-// fixtures. The helper is appended at file scope (after the wrapping
-// class's closing `}`) — this won't compile until a human moves it
-// into the appropriate class, which is the documented v1 contract for
-// Java. We assert the helper signature, the `// NOTE: appended at file
-// scope` placement comment, the `//`-style divergence block, and that
-// both differing literals show up.
+// fixtures. We assert the helper signature, the `//`-style divergence
+// block, and that both differing literals show up. (No placement NOTE:
+// BuildPatch inserts the helper inside the enclosing class; the NOTE
+// only appears on the file-scope fallback.)
 func TestSynthesize_JavaAcceptTiers(t *testing.T) {
 	cases := []struct {
 		dir           string
@@ -1625,7 +1634,6 @@ func TestSynthesize_JavaAcceptTiers(t *testing.T) {
 			expectInSrc: []string{
 				"public double extracted_priceWithTaxA_",
 				"// Divergences (B vs A):",
-				"// NOTE: appended at file scope",
 				"0.07",
 				"0.085",
 			},
@@ -2472,4 +2480,554 @@ func validGoIdent(s string) bool {
 		}
 	}
 	return true
+}
+
+// TestSynthesize_ClassPairRejectedWithNote: class-span pairs (§5.2) are
+// rejected up front — extracting a whole class into a helper function
+// is meaningless; the note points at the method pairs inside.
+func TestSynthesize_ClassPairRejectedWithNote(t *testing.T) {
+	a := scan.Snippet{Lang: tokenizer.Python, Kind: splitter.KindClass, Code: "class A:\n    pass"}
+	b := scan.Snippet{Lang: tokenizer.Python, Kind: splitter.KindClass, Code: "class B:\n    pass"}
+	s := Synthesize(a, b, "deadbeef", Alignment{})
+	if s.HelperSrc != "" {
+		t.Errorf("expected no helper for a class pair, got:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(s.Note, "class-level pair") {
+		t.Errorf("Note = %q, want a class-level rejection", s.Note)
+	}
+}
+
+// ── Bet #4 deferred follow-ups: Python multi-line signatures + TS syntax ─────
+
+// Given a single-line Python def, when pythonHelperHeader rewrites it,
+// then the output is byte-identical to the pre-multi-line-support
+// behaviour: the trimmed def line with only the name replaced. Pins the
+// single-line path against regressions from the multi-line work.
+func TestPythonHelperHeader_SingleLine_ByteIdentical(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain def with default arg",
+			"def price(amount, rate=0.07):\n    return amount\n",
+			"def extracted_h(amount, rate=0.07):",
+		},
+		{
+			"async def",
+			"async def fetch(client):\n    return client\n",
+			"async def extracted_h(client):",
+		},
+		{
+			"annotated single-line def",
+			"def price(amount: float) -> float:\n    return amount\n",
+			"def extracted_h(amount: float) -> float:",
+		},
+		{
+			"indented method def",
+			"    def fetch(self, key):\n        return key\n",
+			"def extracted_h(self, key):",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pythonHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("pythonHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a Black-formatted multi-line def signature, when
+// pythonHelperHeader rewrites it, then the function name is replaced on
+// the first line and the remaining signature lines (params with
+// trailing commas, default args, type annotations, and the closing
+// `) -> Ret:` line) are carried verbatim, dedented by the def line's
+// indent. Bet #4 deferred follow-up.
+func TestPythonHelperHeader_MultilineSignatureForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"black-formatted multi-line def",
+			"def compute(\n    orders,\n    cutoff=10,\n) -> dict:\n    return {}\n",
+			"def extracted_h(\n    orders,\n    cutoff=10,\n) -> dict:",
+		},
+		{
+			"async multi-line def",
+			"async def fetch(\n    client,\n    user_id: int,\n) -> dict:\n    return await client.get(user_id)\n",
+			"async def extracted_h(\n    client,\n    user_id: int,\n) -> dict:",
+		},
+		{
+			"indented method multi-line def dedents by def indent",
+			"    def fetch(\n        self,\n        key: str,\n    ) -> str:\n        return key\n",
+			"def extracted_h(\n    self,\n    key: str,\n) -> str:",
+		},
+		{
+			"decorator above multi-line def",
+			"@retry\ndef load(\n    path,\n):\n    return path\n",
+			"def extracted_h(\n    path,\n):",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pythonHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("pythonHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a multi-line def signature, when pythonRebodyAsHelper extracts
+// the body, then the body starts AFTER the signature's closing `):`
+// line — the continuation params must not leak into the body.
+func TestPythonRebodyAsHelper_MultilineSignatureSkipped(t *testing.T) {
+	code := "def compute(\n    orders,\n    cutoff=10,\n) -> dict:\n    total = 0\n    return {\"total\": total}\n"
+	body := pythonRebodyAsHelper(code)
+	if strings.Contains(body, "orders,") || strings.Contains(body, "cutoff=10,") {
+		t.Errorf("signature lines leaked into body:\n%q", body)
+	}
+	if !strings.HasPrefix(body, "    total = 0\n") {
+		t.Errorf("body should start at the first post-signature line, got:\n%q", body)
+	}
+}
+
+// Given the realworld-multiline-sig fixture (Black-formatted def with
+// trailing-comma params, a default arg, type annotations, and a
+// `) -> dict:` return annotation on the closing line), when Synthesize
+// runs, then the helper carries the whole multi-line signature verbatim
+// with only the name rewritten, and the body starts after the closing
+// line. Bet #4 deferred follow-up.
+func TestSynthesize_PythonRealworld_MultilineSig(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-multiline-sig")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	wantHeader := "def extracted_compute_totals_deadbeef(\n" +
+		"    orders: list[dict],\n" +
+		"    cutoff: int = 10,\n" +
+		") -> dict:\n" +
+		"    total = 0\n"
+	if !strings.Contains(s.HelperSrc, wantHeader) {
+		t.Errorf("helper missing verbatim multi-line signature + body start.\nWant substring:\n%s\nGot:\n%s", wantHeader, s.HelperSrc)
+	}
+	// Divergences must surface both labels.
+	for _, want := range []string{`"totals:v1"`, `"sums:v2"`} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	if s.Confidence < 0.5 {
+		t.Errorf("Confidence = %.2f, want >= 0.5", s.Confidence)
+	}
+}
+
+// Given TypeScript-specific header shapes, when jsHelperHeader rewrites
+// them, then parameter and return-type annotations plus generics are
+// carried verbatim, and access modifiers (public/private/protected/
+// readonly — invalid on a free function) are dropped while async/static
+// are preserved. Bet #4 deferred follow-up.
+func TestJsHelperHeader_TypeScriptForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"function with return annotation",
+			"function makeWidget(spec: string): Widget {\n  return spec;\n}",
+			"function extracted_h(spec: string): Widget {",
+		},
+		{
+			"generic function",
+			"function pickFirst<T extends Base>(items: T[]): T {\n  return items[0];\n}",
+			"function extracted_h<T extends Base>(items: T[]): T {",
+		},
+		{
+			"arrow with return annotation",
+			"const buildLabel = (name: string): string => {\n  return name;\n};",
+			"function extracted_h(name: string): string {",
+		},
+		{
+			"async arrow with return annotation",
+			"const fetchItem = async (id: string): Promise<Item> => {\n  return id;\n};",
+			"async function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"method with return annotation",
+			"  load(id: string): Promise<Item> {\n    return id;\n  }",
+			"function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"private method drops access modifier",
+			"  private load(id: string): Promise<Item> {\n    return id;\n  }",
+			"function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"private async method keeps async",
+			"  private async load(id: string): Promise<Item> {\n    return this.get(id);\n  }",
+			"async function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"protected static method keeps static",
+			"  protected static count(): number {\n    return 1;\n  }",
+			"static function extracted_h(): number {",
+		},
+		{
+			"public method drops modifier",
+			"  public format(name: string): string {\n    return name;\n  }",
+			"function extracted_h(name: string): string {",
+		},
+		{
+			"readonly dropped",
+			"  readonly compute(x: number): number {\n    return x;\n  }",
+			"function extracted_h(x: number): number {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := jsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("jsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given the realworld-typescript fixture, when the splitter runs on the
+// .ts file, then Detect maps .ts to JavaScript and exactly the four
+// function-shaped definitions are chunked. The `interface` declaration
+// and `type` alias are NOT chunked — they're type-level declarations,
+// not functions, and stay out of the emitter's scope by construction.
+func TestSplit_TypeScriptRealworld_ChunksFunctionsNotTypes(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/refactor/js/realworld-typescript/a.ts")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	lang := tokenizer.Detect("a.ts", string(data))
+	if lang != tokenizer.JavaScript {
+		t.Fatalf("Detect(a.ts) = %v, want JavaScript", lang)
+	}
+	chunks := splitter.Split("a.ts", string(data), lang)
+	// Functions and methods chunk as KindFunction; the TS class ALSO
+	// emits a KindClass span (§5.2 class-level granularity). Interfaces
+	// and type aliases must never chunk — the fixture contains both, so
+	// any extra chunk beyond these five is a regression.
+	type wantChunk struct {
+		symbol string
+		kind   splitter.ChunkKind
+	}
+	want := []wantChunk{
+		{"makeWidgetA", splitter.KindFunction},
+		{"buildLabelA", splitter.KindFunction},
+		{"pickFirstA", splitter.KindFunction},
+		{"ItemStoreA", splitter.KindClass},
+		{"loadA", splitter.KindFunction},
+	}
+	if len(chunks) != len(want) {
+		t.Fatalf("expected %d chunks %v, got %d:\n%s", len(want), want, len(chunks), summariseChunks(chunks))
+	}
+	for i, w := range want {
+		if chunks[i].Symbol != w.symbol || chunks[i].Kind != w.kind {
+			t.Errorf("chunk[%d] = %q/%s, want %q/%s", i, chunks[i].Symbol, chunks[i].Kind, w.symbol, w.kind)
+		}
+	}
+}
+
+// Given the realworld-typescript fixture pairs (annotated function,
+// annotated arrow, generic function, class method with access
+// modifier), when Synthesize runs on each, then the helper header
+// carries the TS annotations verbatim. Only the class-method pair
+// (whose body touches `this.`) carries the this-binding NOTE.
+// Bet #4 deferred follow-up.
+func TestSynthesize_TypeScriptRealworld_Shapes(t *testing.T) {
+	dir := "../../testdata/refactor/js/realworld-typescript"
+	cases := []struct {
+		name         string
+		symbolPrefix string
+		expectHeader string
+		expectNote   bool
+		expectInSrc  []string
+	}{
+		{
+			"function with param and return annotations",
+			"makeWidget",
+			"function extracted_makeWidgetA_deadbeef(spec: string, size: number = 1): Widget {",
+			false,
+			[]string{`"/v1"`, `"/v2"`},
+		},
+		{
+			"arrow with return annotation",
+			"buildLabel",
+			"function extracted_buildLabelA_deadbeef(name: string): string {",
+			false,
+			[]string{`"user:"`, `"admin:"`},
+		},
+		{
+			"generic function",
+			"pickFirst",
+			"function extracted_pickFirstA_deadbeef<T extends Widget>(items: T[], fallback: T): T {",
+			false,
+			[]string{"items[0]", "items[items.length - 1]"},
+		},
+		{
+			"class method with access modifier",
+			"load",
+			"async function extracted_loadA_deadbeef(id: string): Promise<Widget> {",
+			true,
+			[]string{`"store:v1:"`, `"store:v2:"`},
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			a, b := loadSnippetsByPredicate(t, dir, func(ch splitter.Chunk) bool {
+				return strings.HasPrefix(ch.Symbol, c.symbolPrefix)
+			})
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if !strings.Contains(s.HelperSrc, c.expectHeader) {
+				t.Errorf("HelperSrc missing header %q. Source:\n%s", c.expectHeader, s.HelperSrc)
+			}
+			hasNote := strings.Contains(s.HelperSrc, "// NOTE:")
+			if hasNote != c.expectNote {
+				t.Errorf("NOTE presence = %v, want %v. Source:\n%s", hasNote, c.expectNote, s.HelperSrc)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+		})
+	}
+}
+
+// Given the realworld-spec fixture's single-clause cache_key pair,
+// whose defs carry a @doc string and a @spec, when Synthesize runs,
+// then the attribute block is propagated into the helper with the
+// @spec's function name rewritten to the helper's name (arity
+// unchanged) and the @doc carried verbatim. The two @specs agree
+// modulo function name, so no spec-divergence NOTE is emitted.
+func TestSynthesize_ElixirSpecDocPropagation_SingleClause(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "cache_key" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	for _, want := range []string{
+		"@doc \"Builds a cache key for the rendered value.\"",
+		"@spec extracted_cache_key_deadbeef(String.t(), integer()) :: String.t()",
+		"def extracted_cache_key_deadbeef(ns, id) do",
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	if strings.Contains(s.HelperSrc, "@spec cache_key") {
+		t.Errorf("original @spec name must be rewritten to the helper's name. Source:\n%s", s.HelperSrc)
+	}
+	if strings.Contains(s.HelperSrc, "@spec diverges") {
+		t.Errorf("matching @specs must not produce a divergence NOTE. Source:\n%s", s.HelperSrc)
+	}
+}
+
+// Given the realworld-spec fixture's render pair, whose @doc is a
+// heredoc and whose @specs conflict (String.t() vs binary() return),
+// when Synthesize runs, then the heredoc survives verbatim, A's @spec
+// is carried (renamed), and a one-line # NOTE: flags B's diverging
+// @spec.
+func TestSynthesize_ElixirSpecConflict_CarriesAAndNotesDivergence(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "render" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	// Heredoc @doc carried verbatim (opening fence, body lines, fence).
+	for _, want := range []string{
+		"@doc \"\"\"\n",
+		"Renders a value for display.\n",
+		"Binaries pass through trimmed; anything else is inspected.\n",
+		"\"\"\"\n",
+		"@spec extracted_render_deadbeef(binary() | term()) :: String.t()",
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	// One-line divergence NOTE mentioning B's spec.
+	specNote := ""
+	for _, l := range strings.Split(s.HelperSrc, "\n") {
+		if strings.HasPrefix(l, "# NOTE:") && strings.Contains(l, "@spec") {
+			specNote = l
+			break
+		}
+	}
+	if specNote == "" {
+		t.Fatalf("expected a one-line # NOTE: about the conflicting @spec. Source:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(specNote, ":: binary()") {
+		t.Errorf("spec NOTE should surface B's spec; got %q", specNote)
+	}
+}
+
+// Given the realworld-multiclause parse/decode pair (4 adjacent
+// clauses per symbol), when Synthesize runs, then the helper is a
+// single multi-clause def carrying every clause of A's symbol renamed
+// consistently, with guards and pattern-matched args verbatim, and no
+// clause-count NOTE (both sides have 4 clauses).
+func TestSynthesize_ElixirMultiClauseGrouping_AllClauses(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-multiclause",
+		func(c splitter.Chunk) bool { return c.StartLine >= 9 && c.StartLine <= 13 })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if got := strings.Count(s.HelperSrc, "def extracted_parse_deadbeef"); got != 4 {
+		t.Errorf("expected 4 renamed clauses, got %d. Source:\n%s", got, s.HelperSrc)
+	}
+	for _, want := range []string{
+		"def extracted_parse_deadbeef({:ok, value}, default) when is_binary(value) do",
+		"def extracted_parse_deadbeef({:ok, value}, _default) when is_integer(value) do",
+		"def extracted_parse_deadbeef({:error, reason}, default) do",
+		"def extracted_parse_deadbeef(:nil, default), do: default",
+		`"parse failed:`,
+		`"decode failed:`,
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	if strings.Contains(s.HelperSrc, "clauses, B has") {
+		t.Errorf("equal clause counts must not produce a clause-count NOTE. Source:\n%s", s.HelperSrc)
+	}
+	// No CODE line may keep the original name (the divergence comment
+	// legitimately quotes the original headers).
+	for _, l := range strings.Split(s.HelperSrc, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			continue
+		}
+		if strings.Contains(l, "def parse") {
+			t.Errorf("clause kept the original name: %q. Source:\n%s", l, s.HelperSrc)
+		}
+	}
+}
+
+// Given the realworld-spec render pair where A has 2 clauses and B has
+// 3, when Synthesize runs, then the helper carries A's 2 clauses and a
+// `# NOTE: A has 2 clauses, B has 3` line records the mismatch (a
+// divergence, not a rejection).
+func TestSynthesize_ElixirClauseCountMismatch_Noted(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "render" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "# NOTE: A has 2 clauses, B has 3") {
+		t.Errorf("expected clause-count NOTE. Source:\n%s", s.HelperSrc)
+	}
+	if got := strings.Count(s.HelperSrc, "def extracted_render_deadbeef"); got != 2 {
+		t.Errorf("expected A's 2 clauses in the helper, got %d. Source:\n%s", got, s.HelperSrc)
+	}
+	for _, want := range []string{
+		"def extracted_render_deadbeef(value) when is_binary(value) do",
+		"def extracted_render_deadbeef(value) do",
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	// B's extra is_atom clause is a divergence: it must surface in the
+	// divergence comment, not as a helper clause.
+	if !strings.Contains(s.HelperSrc, "is_atom(value)") {
+		t.Errorf("expected B's extra clause to surface in the divergence block. Source:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a NON-first clause of a multi-clause def as the pair endpoint,
+// when Synthesize runs, then attribute propagation is symbol-scoped:
+// the @doc/@spec above the FIRST clause is found and carried, and the
+// grouped helper is identical to synthesizing from the first clause.
+func TestSynthesize_ElixirSpecPropagation_SymbolScopedFromLaterClause(t *testing.T) {
+	first := func(c splitter.Chunk) bool { return c.Symbol == "render" }
+	second := func(c splitter.Chunk) bool { return c.Symbol == "render" && c.StartLine >= 12 }
+
+	a1, b1 := loadSnippetsByPredicate(t, "../../testdata/refactor/elixir/realworld-spec", first)
+	a2, b2 := loadSnippetsByPredicate(t, "../../testdata/refactor/elixir/realworld-spec", second)
+	if a1.StartLine == a2.StartLine {
+		t.Fatalf("fixture setup: expected distinct clauses, both start at %d", a1.StartLine)
+	}
+	s1 := Synthesize(a1, b1, "deadbeef", Align(a1, b1))
+	s2 := Synthesize(a2, b2, "deadbeef", Align(a2, b2))
+	if s1.Note != "" || s2.Note != "" {
+		t.Fatalf("expected accepts, got Notes %q / %q", s1.Note, s2.Note)
+	}
+	if !strings.Contains(s2.HelperSrc, "@spec extracted_render_deadbeef(") {
+		t.Errorf("later-clause endpoint must still find the symbol's @spec. Source:\n%s", s2.HelperSrc)
+	}
+	if s1.HelperSrc != s2.HelperSrc {
+		t.Errorf("grouping must be symbol-scoped: first-clause and later-clause endpoints should emit identical helpers.\nfirst:\n%s\nsecond:\n%s", s1.HelperSrc, s2.HelperSrc)
+	}
+}
+
+// Given an Elixir def with NO module attributes above it, when
+// Synthesize runs, then the output is byte-identical to the historical
+// v1 emitter output — pins the no-attribute path so @spec/@doc
+// propagation and multi-clause grouping cannot disturb it.
+func TestSynthesize_ElixirNoAttributes_ByteIdenticalPin(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:1-3 a", Lang: tokenizer.Elixir, Code: "def a(x) do\n  x + 1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, Code: "def b(x) do\n  x + 2\nend"}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	// The file-scope placement NOTE is no longer part of HelperSrc — the
+	// patch layer prepends it only on the file-scope fallback (see
+	// buildPlacedPatch); everything else is pinned byte-identical.
+	want := `# codetwin: starter helper extracted from a + b (pair deadbeef).
+# This is a literal copy of the first snippet's body. Review the
+# divergences below and parameterize as needed before relying on it.
+# Divergences (B vs A):
+#   #1  A[L1-2]: def a(x) do |   x + 1
+#        B[L1-2]: def b(x) do |   x + 2
+def extracted_a_deadbeef(x) do
+  x + 1
+end
+`
+	if s.HelperSrc != want {
+		t.Errorf("no-attribute Elixir output changed.\ngot:\n%s\nwant:\n%s", s.HelperSrc, want)
+	}
 }

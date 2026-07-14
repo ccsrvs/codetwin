@@ -47,6 +47,8 @@ type Pair struct {
 	LangB      string  // detected language of snippet B; empty when unknown
 	IsTestA    bool    // snippet A's file path follows its language's test convention
 	IsTestB    bool    // snippet B's file path follows its language's test convention
+	RepoA      string  // repo label of snippet A in a multi-root scan; empty otherwise
+	RepoB      string  // repo label of snippet B in a multi-root scan; empty otherwise
 
 	// Lexical is the Jaccard similarity of the two snippets' raw-code
 	// vocabulary (identifier + string-literal words; see
@@ -96,7 +98,39 @@ type Cluster struct {
 	// Such clusters are suppressed by default (Options.IncludeTests
 	// restores them); mixed test/production clusters always render.
 	TestOnly bool
+
+	// MemberRepos carries the repo label of each member, parallel to
+	// Members, in a multi-root scan. Nil on single-root scans, so all
+	// repo-aware rendering and JSON fields switch off and the output
+	// stays byte-identical to the pre-multi-repo format.
+	MemberRepos []string
 }
+
+// RepoSpan returns the distinct non-empty repo labels among the
+// cluster's members, in first-appearance order. Empty when MemberRepos
+// was never populated (single-root scan) or doesn't parallel Members.
+// A span of two or more repos marks the cluster as cross-repo — the
+// "promote to a shared library" candidates a multi-root scan exists to
+// surface.
+func (c Cluster) RepoSpan() []string {
+	if len(c.MemberRepos) != len(c.Members) {
+		return nil
+	}
+	var span []string
+	seen := make(map[string]bool, len(c.MemberRepos))
+	for _, r := range c.MemberRepos {
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		span = append(span, r)
+	}
+	return span
+}
+
+// CrossRepo reports whether the cluster's members span at least two
+// distinct repos.
+func (c Cluster) CrossRepo() bool { return len(c.RepoSpan()) >= 2 }
 
 // Suppressed counts findings dropped by the default test-code
 // segregation: test↔test pairs, clusters whose members are all test
@@ -134,9 +168,20 @@ type BlockClone struct {
 
 	IsTestA, IsTestB bool
 
+	// RepoA / RepoB are the endpoints' repo labels in a multi-root
+	// scan; empty otherwise.
+	RepoA, RepoB string
+
 	// PathA / PathB are the absolute paths of the two files, carried
 	// for --since diff filtering. Never rendered.
 	PathA, PathB string
+
+	// ChunkA / ChunkB are the enclosing snippets' names (the
+	// splitter's "path:start-end Symbol" form), carried so downstream
+	// consumers (--suggest, --preview) can resolve each side back to
+	// its host snippet and slice the block's code out of it. Never
+	// rendered or serialized.
+	ChunkA, ChunkB string
 }
 
 // RangeNameA returns side A's "file:start-end" range name, the unit
@@ -224,6 +269,37 @@ func BuildMatchPreview(code string, tokenLines []int, chunkStartLine, firstTok, 
 	}
 }
 
+// BuildBlockPreview returns a Preview of a block clone's exact line
+// range, sliced out of the enclosing chunk's code. Unlike
+// BuildMatchPreview there is no whole-chunk fallback: block matches
+// know their precise bounds, so the preview is always the block
+// itself, truncated to maxLines when positive (maxLines <= 0 shows
+// the whole block). blockStart/blockEnd are 1-based absolute source
+// lines (the BlockClone convention); chunkStartLine anchors them into
+// code.
+func BuildBlockPreview(code string, chunkStartLine, blockStart, blockEnd, maxLines int) Preview {
+	chunkLines := strings.Split(strings.TrimSuffix(code, "\n"), "\n")
+	first := blockStart - chunkStartLine
+	last := blockEnd - chunkStartLine
+	if first < 0 {
+		first = 0
+	}
+	if last > len(chunkLines)-1 {
+		last = len(chunkLines) - 1
+	}
+	if last < first {
+		last = first
+	}
+	selected := chunkLines[first : last+1]
+	if maxLines > 0 && len(selected) > maxLines {
+		selected = selected[:maxLines]
+	}
+	return Preview{
+		StartLine: chunkStartLine + first,
+		Text:      strings.Join(selected, "\n"),
+	}
+}
+
 // SortMode controls the ordering of pairs and clusters in the rendered
 // report. The same mode applies to both sections, with each section using
 // the natural interpretation: pair size = max(LinesA, LinesB), cluster size
@@ -248,6 +324,14 @@ type Options struct {
 	Sort          SortMode // ordering for pairs and clusters; "" = SortScore
 	Limit         int      // cap pairs and clusters at N items each (0 = no limit)
 	CrossLangOnly bool     // keep only pairs whose two snippets have different, known languages
+
+	// CrossRepoOnly keeps only findings whose endpoints live in
+	// different repos of a multi-root scan: pairs and partial clones
+	// with two distinct non-empty repo labels, clusters spanning at
+	// least two repos. Composes with CrossLangOnly (both filters
+	// apply). Meaningless on single-root scans, where no snippet has a
+	// repo label — everything would be filtered out.
+	CrossRepoOnly bool
 
 	// IncludeTests keeps test↔test pairs and test-only clusters in the
 	// report. By default (false) they are suppressed and replaced by a
@@ -295,6 +379,21 @@ const (
 	white  = "\033[97m"
 )
 
+// isCrossLang reports whether a pair of language labels is a confirmed
+// cross-language match. Pairs involving an unclassified snippet — Lang
+// "" or the tokenizer's Unknown sentinel string — are NOT cross-language:
+// we can't confirm the languages differ, and two unclassifiable files are
+// more likely the SAME language (BuildMatrix blends Unknown↔Unknown as
+// same-language for the same reason). The string literal mirrors
+// tokenizer.Unknown; report stays free of internal imports.
+func isCrossLang(langA, langB string) bool {
+	const unknown = "unknown" // == string(tokenizer.Unknown)
+	if langA == "" || langB == "" || langA == unknown || langB == unknown {
+		return false
+	}
+	return langA != langB
+}
+
 // Prepare applies the report pipeline to raw pairs+clusters: filter by
 // Options.Threshold (unless Verbose), suppress test↔test pairs and
 // test-only clusters (unless Options.IncludeTests), then sort by
@@ -315,13 +414,16 @@ const (
 func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster, Suppressed) {
 	var sup Suppressed
 	visiblePairs := pairs
-	if !opts.Verbose || opts.CrossLangOnly || !opts.IncludeTests {
+	if !opts.Verbose || opts.CrossLangOnly || opts.CrossRepoOnly || !opts.IncludeTests {
 		visiblePairs = make([]Pair, 0, len(pairs))
 		for _, p := range pairs {
 			if !opts.Verbose && p.Score < opts.Threshold {
 				continue
 			}
-			if opts.CrossLangOnly && (p.LangA == "" || p.LangB == "" || p.LangA == p.LangB) {
+			if opts.CrossLangOnly && !isCrossLang(p.LangA, p.LangB) {
+				continue
+			}
+			if opts.CrossRepoOnly && (p.RepoA == "" || p.RepoB == "" || p.RepoA == p.RepoB) {
 				continue
 			}
 			if !opts.IncludeTests && p.IsTestA && p.IsTestB {
@@ -333,10 +435,16 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster,
 	}
 
 	visibleClusters := clusters
-	if !opts.IncludeTests {
+	if !opts.IncludeTests || opts.CrossRepoOnly {
 		visibleClusters = make([]Cluster, 0, len(clusters))
 		for _, c := range clusters {
-			if c.TestOnly {
+			// Cross-repo check runs before the test check (mirroring the
+			// pair loop) so the suppressed counts describe only findings
+			// that would otherwise have rendered.
+			if opts.CrossRepoOnly && !c.CrossRepo() {
+				continue
+			}
+			if !opts.IncludeTests && c.TestOnly {
 				sup.TestOnlyClusters++
 				continue
 			}
@@ -350,6 +458,7 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster,
 }
 
 // PrepareBlocks applies the report pipeline to block-clone findings:
+// keep only cross-repo blocks when Options.CrossRepoOnly is set,
 // suppress test↔test blocks (unless Options.IncludeTests), order by
 // containment (descending; ties by size then range names so output is
 // deterministic), then cap at Options.Limit. Options.Threshold is
@@ -360,19 +469,24 @@ func PrepareBlocks(blocks []BlockClone, opts Options) ([]BlockClone, int) {
 	suppressed := 0
 	visible := make([]BlockClone, 0, len(blocks))
 	for _, b := range blocks {
+		if opts.CrossRepoOnly && (b.RepoA == "" || b.RepoB == "" || b.RepoA == b.RepoB) {
+			continue
+		}
 		if !opts.IncludeTests && b.IsTestA && b.IsTestB {
 			suppressed++
 			continue
 		}
 		visible = append(visible, b)
 	}
-	visible = sortAndLimit(visible, blockLess, opts.Limit)
+	visible = sortAndLimit(visible, BlockLess, opts.Limit)
 	return visible, suppressed
 }
 
-// blockLess orders block clones best-first: higher containment, then
-// bigger block (min-side non-blank lines), then range names.
-func blockLess(a, b BlockClone) bool {
+// BlockLess orders block clones best-first: higher containment, then
+// bigger block (min-side non-blank lines), then range names. Exported
+// so the CLI's pre-dedup ordering (sortBlockClones) and PrepareBlocks
+// share one definition of "best".
+func BlockLess(a, b BlockClone) bool {
 	if a.Containment != b.Containment {
 		return a.Containment > b.Containment
 	}
@@ -573,13 +687,20 @@ func SplitPairsByCluster(pairs []Pair, clusters []Cluster) (outside []Pair, coll
 	return outside, collapsed, relations
 }
 
+// printSectionTitle emits the bold-white banner line every findings
+// section shares (SIMILARITY PAIRS, RELATED CLUSTERS, PARTIAL CLONES,
+// REFACTORING CLUSTERS).
+func printSectionTitle(w io.Writer, title string, opts Options) {
+	fmt.Fprintf(w, "%s%s %s%s\n\n",
+		color(bold, opts), color(white, opts), title, color(reset, opts))
+}
+
 // printRelations renders one line per pair of related clusters.
 func printRelations(w io.Writer, relations []ClusterRelation, opts Options) {
 	if len(relations) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%s%s RELATED CLUSTERS%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "RELATED CLUSTERS", opts)
 	for _, r := range relations {
 		_, clr := classify(r.Max)
 		fmt.Fprintf(w, "  %sCluster %d ↔ Cluster %d%s — %d pairs, %sup to %3.0f%%%s\n",
@@ -706,8 +827,7 @@ func printHeader(w io.Writer, opts Options) {
 }
 
 func printPairs(w io.Writer, pairs []Pair, opts Options) {
-	fmt.Fprintf(w, "%s%s SIMILARITY PAIRS%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "SIMILARITY PAIRS", opts)
 
 	for _, p := range pairs {
 		label, clr := classifyPair(p)
@@ -799,20 +919,25 @@ func printPreview(w io.Writer, name string, opts Options) {
 
 // printPartialClones renders the block-level findings section. Each
 // finding shows the containment score, the block's line ranges in both
-// files, and (when known) the enclosing function of each side.
+// files, and (when known) the enclosing function of each side. With
+// --preview on, each side also gets a line-numbered excerpt of its
+// matched block range — Options.Previews is keyed by the side's
+// "file:start-end" range name (range-qualified so a block preview
+// never collides with the whole-chunk preview of the same snippet).
 func printPartialClones(w io.Writer, blocks []BlockClone, opts Options) {
 	if len(blocks) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%s%s PARTIAL CLONES%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "PARTIAL CLONES", opts)
 	for _, b := range blocks {
 		fmt.Fprintf(w, "  %s%s[PARTIAL CLONE   ]%s  %s%3.0f%% contained%s · %d lines\n",
 			color(orange, opts), color(bold, opts), color(reset, opts),
 			color(orange, opts), b.Containment*100, color(reset, opts),
 			minInt(b.LinesA, b.LinesB))
 		printBlockSide(w, b.RangeNameA(), b.SymbolA, opts)
+		printPreview(w, b.RangeNameA(), opts)
 		printBlockSide(w, b.RangeNameB(), b.SymbolB, opts)
+		printPreview(w, b.RangeNameB(), opts)
 		fmt.Fprintln(w)
 	}
 }
@@ -834,10 +959,17 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 		return
 	}
 
-	fmt.Fprintf(w, "%s%s REFACTORING CLUSTERS%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "REFACTORING CLUSTERS", opts)
 
 	for _, c := range clusters {
+		// A cluster spanning two or more repos of a multi-root scan is a
+		// "promote to a shared library" candidate — tag it in the header
+		// and group its members per repo below.
+		crossRepo := c.CrossRepo()
+		tag := ""
+		if crossRepo {
+			tag = fmt.Sprintf(" · %scross-repo%s", color(purple, opts), color(reset, opts))
+		}
 		if c.Score > 0 {
 			_, clr := classify(c.Score)
 			// Cohesion (the weakest internal pair) renders alongside the
@@ -849,18 +981,55 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 				cohesion = fmt.Sprintf(" · %scohesion %3.0f%%%s",
 					color(minClr, opts), c.MinScore*100, color(reset, opts))
 			}
-			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s%s\n",
+			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s%s%s\n",
 				color(green, opts), c.ID+1, color(reset, opts), len(c.Members),
-				color(clr, opts), c.Score*100, color(reset, opts), cohesion)
+				color(clr, opts), c.Score*100, color(reset, opts), cohesion, tag)
 		} else {
-			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets\n",
-				color(green, opts), c.ID+1, color(reset, opts), len(c.Members))
+			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets%s\n",
+				color(green, opts), c.ID+1, color(reset, opts), len(c.Members), tag)
 		}
-		for _, m := range c.Members {
-			fmt.Fprintf(w, "    %s·%s %s\n", color(grey, opts), color(reset, opts), m)
-			printPreview(w, m, opts)
+		if crossRepo {
+			printClusterMembersByRepo(w, c, opts)
+		} else {
+			for _, m := range c.Members {
+				fmt.Fprintf(w, "    %s·%s %s\n", color(grey, opts), color(reset, opts), m)
+				printPreview(w, m, opts)
+			}
 		}
 		fmt.Fprintln(w)
+	}
+}
+
+// printClusterMembersByRepo renders a cross-repo cluster's members
+// grouped under one "repo — N snippets" line per repo, in
+// first-appearance order, so "this family spans svc-a and svc-b" reads
+// at a glance. Only called for clusters whose RepoSpan has two or more
+// repos; members with an empty repo label (direct file arguments in a
+// mixed invocation) group under the last position with an empty label.
+func printClusterMembersByRepo(w io.Writer, c Cluster, opts Options) {
+	order := make([]string, 0, 4)
+	byRepo := make(map[string][]string, 4)
+	for i, m := range c.Members {
+		r := c.MemberRepos[i]
+		if _, ok := byRepo[r]; !ok {
+			order = append(order, r)
+		}
+		byRepo[r] = append(byRepo[r], m)
+	}
+	for _, r := range order {
+		members := byRepo[r]
+		label := r
+		if label == "" {
+			label = "(no repo)"
+		}
+		fmt.Fprintf(w, "    %s%s%s %s— %d %s%s\n",
+			color(purple, opts), label, color(reset, opts),
+			color(grey, opts), len(members), plural(len(members), "snippet", "snippets"),
+			color(reset, opts))
+		for _, m := range members {
+			fmt.Fprintf(w, "      %s·%s %s\n", color(grey, opts), color(reset, opts), m)
+			printPreview(w, m, opts)
+		}
 	}
 }
 
