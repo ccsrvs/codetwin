@@ -43,7 +43,7 @@ Reading the combinations:
 |---|---|
 | structural ≈ semantic, both high | Real clone. Same tokens, same order. |
 | structural high, semantic low | Rare. Short snippets where order matters but the token bag differs. |
-| structural low, semantic high | "Functionally similar but written differently" — same problem, different shape. Often the most interesting refactor target, less interesting as a literal clone. |
+| structural low, semantic high | Depends on language. **Cross-language:** the designed match shape — "same logic, different keyword surface"; this is what the 0.2/0.8 blend exists for. **Same-language:** shared idiom, not clone — the structural layer had every chance to fire and didn't, so the combined score is capped at 45% when structural < 0.20 (ramping out by 0.35) and the pair stays out of the default report. |
 | both moderate | Usually noise from shared idioms — test scaffolding, lifecycle methods. The default `--min-confidence-lines 10` dampener demotes the short ones; raise it to demote more. |
 
 ## Clusters, relations, and pairs

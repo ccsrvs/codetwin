@@ -157,6 +157,18 @@ For a longer walk-through of what the score means, what the
 `structural`/`semantic` sub-scores below each pair tell you, and how
 pairs differ from clusters, run `codetwin --guide`.
 
+**Same-language pairs additionally require structural corroboration.**
+Trigram cosine saturates on shared language idioms — two unrelated
+map-building loops, two comprehension-plus-guard functions, two
+async/try-catch wrappers — because normalization erases the
+identifiers that distinguish them. For a same-language pair the
+winnowing layer had every chance to fire, so near-zero structural
+evidence means idiom, not clone: when structural is below 0.20 the
+combined score is capped at 0.45 (just under the report band), with
+the cap ramping out linearly by structural 0.35, where it can no
+longer bind. Cross-language pairs are exempt — structural absence is
+expected there, which is the whole point of the 0.2/0.8 blend.
+
 ### Short-snippet confidence
 
 Two 5-line snippets that share their entire token shape and two 25-line

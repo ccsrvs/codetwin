@@ -161,6 +161,80 @@ func TestCombined_WeightedAverage(t *testing.T) {
 		t.Errorf("Combined(0.8, 0.4, 0.0) = %v; want 0.4 (all semantic)", got)
 	}
 }
+func TestSameLangEvidenceCap(t *testing.T) {
+	cases := []struct {
+		name       string
+		structural float64
+		want       float64
+	}{
+		{"zero structural: hard cap", 0.0, 0.45},
+		{"low structural: hard cap", 0.10, 0.45},
+		{"gate boundary (0.20): hard cap", 0.20, 0.45},
+		{"ramp midpoint (0.275): halfway to 0.675", 0.275, 0.5625},
+		{"ramp end (0.35): natural ceiling 0.675", 0.35, 1.0},
+		{"high structural: uncapped", 0.50, 1.0},
+		{"full structural: uncapped", 1.0, 1.0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SameLangEvidenceCap(tc.structural)
+			if math.Abs(got-tc.want) > 1e-9 {
+				t.Errorf("SameLangEvidenceCap(%v) = %v; want %v",
+					tc.structural, got, tc.want)
+			}
+		})
+	}
+
+	// Just below the ramp end the cap must exceed the largest blend a
+	// same-language pair can reach there — i.e. the cap fades out with
+	// no discontinuity for real scores (which is why the ramp end
+	// returning 1.0 while cap(0.35-ε) ≈ 0.675 is not a cliff: no
+	// combined score at structural 0.35-ε can exceed 0.675-ε/2).
+	eps := 1e-6
+	if got, ceil := SameLangEvidenceCap(0.35-eps), Combined(0.35-eps, 1.0, 0.5); got > ceil {
+		t.Errorf("cap(0.35-eps) = %v; must stay <= natural ceiling %v", got, ceil)
+	}
+}
+
+func TestCombinedForLangs_CorroborationGate(t *testing.T) {
+	cases := []struct {
+		name                 string
+		structural, semantic float64
+		sameLang             bool
+		want                 float64
+	}{
+		// Same-language, semantic saturated, no structural evidence:
+		// blend would be 0.50, gate caps at 0.45.
+		{"same-lang semantic-only capped", 0.0, 1.0, true, 0.45},
+		// The empirical idiom-noise shape (bench negative-idiom).
+		{"same-lang idiom noise capped", 0.05, 1.00, true, 0.45},
+		{"same-lang low structural capped", 0.14, 0.88, true, 0.45},
+		// Cross-language with zero structural is the designed
+		// cross-language path — never capped.
+		{"cross-lang semantic-only untouched", 0.0, 1.0, false, 0.8},
+		{"cross-lang idiom shape untouched", 0.05, 0.90, false, 0.73},
+		// Strong structural corroboration: gate is inert.
+		{"same-lang high structural untouched", 0.9, 0.9, true, 0.9},
+		{"same-lang exact clone untouched", 1.0, 1.0, true, 1.0},
+		{"same-lang at ramp end untouched", 0.35, 1.0, true, 0.675},
+		// Under the gate but already below the cap: unchanged.
+		{"same-lang weak pair unchanged", 0.10, 0.30, true, 0.20},
+		// Boundary: at the gate the blend of semantic 1.0 caps to
+		// 0.45; inside the ramp it tracks the interpolated ceiling.
+		{"same-lang at gate capped", 0.20, 1.0, true, 0.45},
+		{"same-lang mid-ramp capped to ramp", 0.275, 1.0, true, 0.5625},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CombinedForLangs(tc.structural, tc.semantic, tc.sameLang)
+			if math.Abs(got-tc.want) > 1e-9 {
+				t.Errorf("CombinedForLangs(%v, %v, %v) = %v; want %v",
+					tc.structural, tc.semantic, tc.sameLang, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLengthDampen(t *testing.T) {
 	cases := []struct {
 		name                   string

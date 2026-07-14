@@ -129,7 +129,13 @@ func BuildMatrix(
 					// view of the world the report does. structural and
 					// semantic stay raw — only the combined score is
 					// adjusted, since that's what feeds clustering and
-					// thresholding.
+					// thresholding. Ordering: the same-language evidence cap
+					// (inside CombinedForLangs) applies to the RAW blend,
+					// then LengthDampen discounts the capped value — the two
+					// encode independent evidence deficits (no structural
+					// corroboration; too little length), so a short idiom
+					// pair compounds both. Dampening first would let the cap
+					// mask the dampener (min(x·d, cap) ≥ min(x, cap)·d).
 					combined = LengthDampen(
 						combined, snippets[i].NonBlankLn, snippets[j].NonBlankLn, minConfLines)
 					matrix[i][j] = combined

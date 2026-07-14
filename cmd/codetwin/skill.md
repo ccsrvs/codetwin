@@ -17,7 +17,11 @@ codetwin operates in five internal stages — all handled automatically:
 4. **TF-IDF vectors** — semantic (cosine) similarity across the full corpus
 5. **DBSCAN clustering** — groups related findings into one refactoring opportunity each
 
-Final score = `0.5 × structural + 0.5 × semantic`
+Final score = `0.5 × structural + 0.5 × semantic` (same language;
+cross-language pairs use 0.2/0.8). Same-language pairs with structural
+< 0.20 are capped at 0.45 — high semantic alone is shared idiom, not
+clone — so semantic-only findings you see at default settings are
+always cross-language.
 
 ## Step 1 — Locate or build the binary
 
