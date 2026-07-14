@@ -68,6 +68,12 @@ type Defaults struct {
 	// the report (they are suppressed by default). Mirrors the
 	// --include-tests CLI flag.
 	IncludeTests *bool `json:"include_tests,omitempty"`
+
+	// Granularity selects the chunking unit ("function" | "file").
+	// Mirrors the --granularity CLI flag; validated in main after
+	// defaults are applied, so a bad config value fails the run with
+	// the same message as a bad flag value.
+	Granularity *string `json:"granularity,omitempty"`
 }
 
 // Load reads .codetwin.json from dir and returns a parsed Config. When the
