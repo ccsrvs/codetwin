@@ -1,6 +1,7 @@
 package similarity
 
 import (
+	"math"
 	"sync/atomic"
 	"testing"
 
@@ -42,7 +43,7 @@ func TestBuildMatrix_GivenIdenticalSnippets_When_Build_Then_PairScoreIsHigh(t *t
 	}
 	vectors := vectorsFor(snips)
 
-	matrix, pairs := BuildMatrix(snips, vectors, 0, nil)
+	matrix, pairs := BuildMatrix(snips, vectors, 0, 0.50, nil)
 
 	if matrix[0][1] < 0.9 {
 		t.Errorf("matrix[0][1] = %v, want >= 0.9 for identical snippets", matrix[0][1])
@@ -66,7 +67,7 @@ func TestBuildMatrix_GivenNestedSnippetsInSameFile_When_Build_Then_PairIsSuppres
 	snips := []scan.Snippet{a, b}
 	vectors := vectorsFor(snips)
 
-	matrix, pairs := BuildMatrix(snips, vectors, 0, nil)
+	matrix, pairs := BuildMatrix(snips, vectors, 0, 0.50, nil)
 
 	if matrix[0][1] != 0 {
 		t.Errorf("matrix[0][1] = %v, want 0 for nested same-file snippets", matrix[0][1])
@@ -77,7 +78,7 @@ func TestBuildMatrix_GivenNestedSnippetsInSameFile_When_Build_Then_PairIsSuppres
 }
 
 func TestBuildMatrix_GivenLessThanTwoSnippets_When_Build_Then_ReturnsEmptyPairs(t *testing.T) {
-	matrix, pairs := BuildMatrix(nil, nil, 0, nil)
+	matrix, pairs := BuildMatrix(nil, nil, 0, 0.50, nil)
 	if len(matrix) != 0 {
 		t.Errorf("expected empty matrix for empty input, got len %d", len(matrix))
 	}
@@ -86,7 +87,7 @@ func TestBuildMatrix_GivenLessThanTwoSnippets_When_Build_Then_ReturnsEmptyPairs(
 	}
 
 	one := []scan.Snippet{makeSnippet("a", "/a", []string{"VAR"})}
-	matrix, pairs = BuildMatrix(one, vectorsFor(one), 0, nil)
+	matrix, pairs = BuildMatrix(one, vectorsFor(one), 0, 0.50, nil)
 	if len(matrix) != 1 || matrix[0][0] != 1.0 {
 		t.Errorf("matrix diagonal not initialized for single snippet: %v", matrix)
 	}
@@ -104,7 +105,7 @@ func TestBuildMatrix_PopulatesLanguageOnPairs(t *testing.T) {
 	snips := []scan.Snippet{a, b}
 	vectors := vectorsFor(snips)
 
-	_, pairs := BuildMatrix(snips, vectors, 0, nil)
+	_, pairs := BuildMatrix(snips, vectors, 0, 0.50, nil)
 
 	if len(pairs) != 1 {
 		t.Fatalf("expected 1 pair, got %d", len(pairs))
@@ -122,7 +123,7 @@ func TestBuildMatrix_PopulatesPairID(t *testing.T) {
 	}
 	vectors := vectorsFor(snips)
 
-	_, pairs := BuildMatrix(snips, vectors, 0, nil)
+	_, pairs := BuildMatrix(snips, vectors, 0, 0.50, nil)
 
 	if len(pairs) != 1 {
 		t.Fatalf("expected 1 pair, got %d", len(pairs))
@@ -144,8 +145,8 @@ func TestBuildMatrix_PairIDIsOrderInvariantAndStable(t *testing.T) {
 	b := makeSnippet("b/sum.go", "/b.go", tokens)
 	vectors := vectorsFor([]scan.Snippet{a, b})
 
-	_, pairsAB := BuildMatrix([]scan.Snippet{a, b}, vectors, 0, nil)
-	_, pairsBA := BuildMatrix([]scan.Snippet{b, a}, vectors, 0, nil)
+	_, pairsAB := BuildMatrix([]scan.Snippet{a, b}, vectors, 0, 0.50, nil)
+	_, pairsBA := BuildMatrix([]scan.Snippet{b, a}, vectors, 0, 0.50, nil)
 
 	if len(pairsAB) != 1 || len(pairsBA) != 1 {
 		t.Fatalf("expected 1 pair from each ordering, got %d / %d", len(pairsAB), len(pairsBA))
@@ -154,7 +155,7 @@ func TestBuildMatrix_PairIDIsOrderInvariantAndStable(t *testing.T) {
 		t.Errorf("pair ID not order-invariant: %q vs %q", pairsAB[0].ID, pairsBA[0].ID)
 	}
 	// Re-run with the original ordering — same input, same output.
-	_, pairsAB2 := BuildMatrix([]scan.Snippet{a, b}, vectors, 0, nil)
+	_, pairsAB2 := BuildMatrix([]scan.Snippet{a, b}, vectors, 0, 0.50, nil)
 	if pairsAB[0].ID != pairsAB2[0].ID {
 		t.Errorf("pair ID not deterministic across runs: %q vs %q", pairsAB[0].ID, pairsAB2[0].ID)
 	}
@@ -173,13 +174,61 @@ func TestBuildMatrix_GivenOnPairDoneCallback_When_Build_Then_TotalArgIsPairCount
 	// The callback fires from worker goroutines, so it must be
 	// concurrent-safe — mirror production's atomic store.
 	var lastTotal atomic.Int64
-	BuildMatrix(snips, vectors, 0, func(_, total int64) {
+	BuildMatrix(snips, vectors, 0, 0.50, func(_, total int64) {
 		lastTotal.Store(total)
 	})
 
 	// 4 snippets → C(4,2) = 6 pairs
 	if got := lastTotal.Load(); got != 6 {
 		t.Errorf("onPairDone total = %d, want 6", got)
+	}
+}
+
+func TestMaterializationFloor_IsThresholdAware(t *testing.T) {
+	cases := []struct {
+		threshold, want float64
+	}{
+		{0.0, 0.30},  // degenerate threshold: absolute minimum applies
+		{0.30, 0.30}, // threshold−0.20 = 0.10 < 0.30: clamp
+		{0.50, 0.30}, // CLI default: floor sits exactly at the minimum
+		{0.60, 0.40},
+		{0.85, 0.65},
+		{1.0, 0.80},
+	}
+	for _, c := range cases {
+		if got := MaterializationFloor(c.threshold); math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("MaterializationFloor(%.2f) = %v; want %v", c.threshold, got, c.want)
+		}
+	}
+}
+
+func TestBuildMatrix_FloorDropsPairsBelowThresholdBandButKeepsMatrix(t *testing.T) {
+	// Two identical 4-line snippets score a raw 1.0; with
+	// minConfLines=20 the dampener scales that to 1.0 × (0.5 + 0.5·4/20)
+	// = 0.6. At threshold 0.50 the floor is 0.30 → the pair
+	// materializes. At threshold 0.85 the floor is 0.65 → the pair is
+	// dropped from the slice, but the matrix must still record the true
+	// value so DBSCAN's view is unchanged.
+	tokens := []string{"VAR", "=", "VAR", ".", "len", "(", ")", "for", "VAR", "in", "VAR", "VAR", "+=", "VAR"}
+	a := makeSnippet("a/sum.go", "/a.go", tokens)
+	a.NonBlankLn = 4
+	b := makeSnippet("b/sum.go", "/b.go", tokens)
+	b.NonBlankLn = 4
+	snips := []scan.Snippet{a, b}
+	vectors := vectorsFor(snips)
+
+	matrixLo, pairsLo := BuildMatrix(snips, vectors, 20, 0.50, nil)
+	matrixHi, pairsHi := BuildMatrix(snips, vectors, 20, 0.85, nil)
+
+	if len(pairsLo) != 1 {
+		t.Fatalf("threshold 0.50 (floor 0.30): expected 1 materialized pair, got %d", len(pairsLo))
+	}
+	if len(pairsHi) != 0 {
+		t.Fatalf("threshold 0.85 (floor 0.65): expected 0 materialized pairs, got %d", len(pairsHi))
+	}
+	if matrixHi[0][1] == 0 || matrixHi[0][1] != matrixLo[0][1] {
+		t.Errorf("matrix must be unaffected by the floor: got %v (hi) vs %v (lo)",
+			matrixHi[0][1], matrixLo[0][1])
 	}
 }
 
@@ -201,7 +250,7 @@ func TestBuildMatrix_IdenticalShortSnippetsGetStructuralCredit(t *testing.T) {
 	}
 	vectors := vectorsFor(snips)
 
-	matrix, pairs := BuildMatrix(snips, vectors, 0, nil)
+	matrix, pairs := BuildMatrix(snips, vectors, 0, 0.50, nil)
 
 	if len(pairs) != 1 {
 		t.Fatalf("expected 1 pair, got %d", len(pairs))

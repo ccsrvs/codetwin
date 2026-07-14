@@ -11,15 +11,39 @@ import (
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
-// PairNoiseFloor is the minimum combined score below which a pair is
-// dropped from the materialized list. The matrix still records the true
-// value so DBSCAN clustering is unaffected; this only bounds the memory
-// footprint of the returned slice on big repos. 0.05 is well below any
-// user-visible threshold.
-const PairNoiseFloor = 0.05
+// materializationFloorMin is the absolute minimum materialization
+// floor, and materializationBand is how far below the user's
+// --threshold the floor may reach. See MaterializationFloor.
+const (
+	materializationFloorMin = 0.30
+	materializationBand     = 0.20
+)
+
+// MaterializationFloor returns the minimum combined score below which a
+// pair is dropped from the materialized list: max(0.30, threshold−0.20).
+// The matrix still records the true value for every pair, so DBSCAN
+// clustering is unaffected; the floor only bounds the memory footprint
+// of the returned slice — on an O(n²) scan of a big repo, materializing
+// every pair above a tiny constant floor is pure heap waste, since
+// nothing below --threshold ever renders.
+//
+// The floor is threshold-aware rather than constant because --suggest
+// deliberately looks up pairs across ALL materialized pairs (not just
+// visible ones) so users can target a sub-threshold pair without
+// re-tuning --threshold. Keeping a 0.20 band below threshold preserves
+// that workflow for the near-misses it exists for, while dropping the
+// long tail of unrelated pairs that nothing reads.
+func MaterializationFloor(threshold float64) float64 {
+	floor := threshold - materializationBand
+	if floor < materializationFloorMin {
+		floor = materializationFloorMin
+	}
+	return floor
+}
 
 // BuildMatrix computes the all-pairs similarity matrix and the
-// materialized pair list above PairNoiseFloor in a single pass. Work is
+// materialized pair list above MaterializationFloor(threshold) in a
+// single pass. threshold is the user's --threshold value. Work is
 // sharded across runtime.NumCPU() goroutines using a stripe partition
 // (worker w handles rows where i % numWorkers == w), which balances
 // small-row and big-row work. Each worker writes to its own pair buffer
@@ -33,8 +57,10 @@ func BuildMatrix(
 	snippets []scan.Snippet,
 	vectors []NormalizedVector,
 	minConfLines int,
+	threshold float64,
 	onPairDone func(done, total int64),
 ) ([][]float64, []report.Pair) {
+	floor := MaterializationFloor(threshold)
 	n := len(snippets)
 	matrix := make([][]float64, n)
 	for i := range matrix {
@@ -110,7 +136,7 @@ func BuildMatrix(
 					matrix[j][i] = combined
 
 					batchProgress++
-					if combined < PairNoiseFloor {
+					if combined < floor {
 						continue
 					}
 					local = append(local, report.Pair{

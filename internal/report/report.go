@@ -534,7 +534,7 @@ func printPairs(w io.Writer, pairs []Pair, opts Options) {
 		color(bold, opts), color(white, opts), color(reset, opts))
 
 	for _, p := range pairs {
-		label, clr := classify(p.Score)
+		label, clr := classifyPair(p)
 
 		fmt.Fprintf(w, "  %s%s%s  %s%3.0f%%%s\n",
 			color(clr, opts), color(bold, opts), label,
@@ -649,14 +649,17 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, opts Options) {
 	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
 	for _, p := range allVisible {
-		switch {
-		case p.Score > 0.95:
+		// Bucket by the same gated classification the pair labels use,
+		// so "Exact clones N" never counts a pair that rendered as a
+		// near clone under the short-snippet evidence gate.
+		switch tierForPair(p).json {
+		case "exact_clone":
 			exact++
-		case p.Score > 0.85:
+		case "near_clone":
 			near++
-		case p.Score > 0.65:
+		case "strong_clone":
 			strong++
-		case p.Score > 0.45:
+		case "refactor_candidate":
 			candidates++
 		default:
 			weak++
@@ -713,6 +716,16 @@ var tiers = []tier{
 	{-1, "[WEAK SIMILARITY ]", grey, "weak_similarity"},
 }
 
+// ExactCloneMinLines is the evidence floor for the top report band: a
+// pair whose smaller snippet has fewer than this many non-blank lines
+// never renders as an exact clone, regardless of score. Short snippets
+// can hit a perfect score by sharing nothing but API-forced shape
+// (test scaffolding, tiny wrappers), so a "100% exact clone" label on a
+// 4-line pair overstates the evidence. Such pairs demote one band and
+// render as near clones — only the label moves; the numeric score is
+// untouched.
+const ExactCloneMinLines = 10
+
 func tierFor(score float64) tier {
 	for _, t := range tiers {
 		if score > t.above {
@@ -722,13 +735,41 @@ func tierFor(score float64) tier {
 	return tiers[len(tiers)-1]
 }
 
+// tierForPair classifies a pair by score, then evidence-gates the top
+// band per ExactCloneMinLines. Pairs with unknown line counts (0) fail
+// the gate too — no evidence, no top band.
+func tierForPair(p Pair) tier {
+	t := tierFor(p.Score)
+	if t.json == tiers[0].json && minPairLines(p) < ExactCloneMinLines {
+		return tiers[1]
+	}
+	return t
+}
+
+func minPairLines(p Pair) int {
+	if p.LinesA < p.LinesB {
+		return p.LinesA
+	}
+	return p.LinesB
+}
+
+// classify is the score-only band lookup, used where no per-pair line
+// evidence exists (cluster scores, cluster relations). Pair labels go
+// through classifyPair so the exact-clone gate applies.
 func classify(score float64) (string, string) {
 	t := tierFor(score)
 	return t.label, t.color
 }
 
-// JSONLabel returns the snake-case classification name used in JSON output.
-func JSONLabel(score float64) string { return tierFor(score).json }
+func classifyPair(p Pair) (string, string) {
+	t := tierForPair(p)
+	return t.label, t.color
+}
+
+// JSONLabel returns the snake-case classification name used in JSON
+// output for a pair. It applies the same exact-clone evidence gate as
+// the terminal label, so the two surfaces always agree.
+func JSONLabel(p Pair) string { return tierForPair(p).json }
 
 func color(code string, opts Options) string {
 	if opts.Plain {

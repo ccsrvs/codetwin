@@ -1,7 +1,9 @@
 defmodule ProcessorB do
   def process(input) do
     Logger.info("processing: #{input}")
-    Cache.put(input, true)
+    normalized = String.trim(input)
+    Cache.put(normalized, true)
+    Metrics.increment("processor.calls", 1)
     raise "bad state"
   end
 end

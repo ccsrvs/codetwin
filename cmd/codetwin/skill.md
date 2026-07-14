@@ -51,7 +51,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Machine-readable | `codetwin --json --threshold 0.40 <path>` |
 | Show everything | `codetwin --verbose --threshold 0.20 <path>` |
 | Inline code previews | `codetwin --preview --threshold 0.40 <path>` |
-| Filter noisy short-snippet matches | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
+| Filter MORE short-snippet noise than the default (N=10) | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
+| Raw scores, short-snippet dampening off | `codetwin --min-confidence-lines 0 <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
 | Suggest a refactor (Go) | `codetwin --suggest <pair-id> <path>` |
@@ -74,8 +75,9 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --limit int             show only the top N pairs and N clusters (0 = no limit)
 --flat                  list every pair individually; default report is cluster-first
                         (intra-cluster pairs collapse into the cluster)
---min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off);
-                            multiplier ramps from 0.5× at 0 lines to 1.0× at N
+--min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N
+                            (default 10; 0 = off); multiplier ramps from 0.5×
+                            at 0 lines to 1.0× at N
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
 --since string          PR-delta mode: keep only findings where ≥1 endpoint overlaps
@@ -311,7 +313,7 @@ the matrix is computing. It's auto-suppressed when stderr isn't a TTY
 
 | Score | Label | What to do |
 |---|---|---|
-| > 95% | Exact clone | Extract shared utility, delete one immediately |
+| > 95% | Exact clone | Extract shared utility, delete one immediately. Label additionally requires both snippets ≥ 10 non-blank lines; shorter pairs render as near clones at the same score |
 | > 85% | Near clone | Virtually identical with one or two token edits; treat as a clone unless the difference is intentional |
 | > 65% | Strong clone | Parameterize the differing parts |
 | > 45% | Refactor target | Evaluate whether a shared abstraction reduces duplication |
@@ -323,15 +325,18 @@ and how pairs differ from clusters, run `codetwin --guide`.
 ### Short-snippet confidence
 
 Two 5-line snippets with identical token shape and two 25-line snippets
-with identical token shape both score 100%, but the first is much weaker
-evidence — short snippets are forced into shared shapes by their API
-surface (test scaffolding, trivial wrappers). `--min-confidence-lines N`
-opts into a length-aware dampener: the combined score is scaled by
-`0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0). The dampener is
-applied once at the scoring layer, so it also affects DBSCAN cluster
-boundaries — setting it dissolves clusters built on tiny-snippet noise,
-not just demoting individual pairs. Off by default. A typical starting
-value is `--min-confidence-lines 20`.
+with identical token shape score the same raw score, but the first is
+much weaker evidence — short snippets are forced into shared shapes by
+their API surface (test scaffolding, trivial wrappers).
+`--min-confidence-lines N` is a length-aware dampener, **on by default
+at N = 10**: the combined score is scaled by
+`0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0). A 10-line exact
+clone keeps its full score; a 4-line shape-coincidence at 60% raw drops
+to 42% and out of the default report. The dampener is applied once at
+the scoring layer, so it also affects DBSCAN cluster boundaries — it
+dissolves clusters built on tiny-snippet noise, not just demoting
+individual pairs. Raise it (`--min-confidence-lines 20`) for noisier
+codebases; pass `--min-confidence-lines 0` for raw scores.
 
 ### Clusters vs pairs
 
@@ -386,10 +391,12 @@ go test ./...
 ```bash
 codetwin --preview --threshold 0.40 ./testdata
 
-# Expected output (chunk-level — note "path:start-end Symbol" naming):
-#  SIMILARITY PAIRS
-#
-#   [EXACT CLONE     ]  100%
+# Expected output (chunk-level — note "path:start-end Symbol" naming).
+# The two sum functions are 7-line token-identical clones: the default
+# short-snippet dampener scales their raw 100% to 85% (min lines 7 of
+# the default N=10), so they render as a strong-clone cluster:
+#  REFACTORING CLUSTERS
+#   Cluster 1 — 2 snippets · avg similarity  85%
 #     testdata/sum_a.js:1-7 sumArray
 #          1 │ function sumArray(arr) {
 #          2 │   let total = 0;
@@ -402,10 +409,9 @@ codetwin --preview --threshold 0.40 ./testdata
 #          1 │ function addNumbers(nums) {
 #          ...
 #
-#  REFACTORING CLUSTERS
-#   Cluster 1 — 2 snippets:
-#     testdata/sum_a.js:1-7 sumArray
-#     testdata/sum_b.js:1-7 addNumbers
+# With --min-confidence-lines 0 the raw score returns: the pair shows
+# 100%, labeled NEAR CLONE (not EXACT CLONE — the top label needs both
+# snippets to span ≥ 10 non-blank lines).
 ```
 
 ## Troubleshooting
@@ -419,7 +425,8 @@ codetwin --preview --threshold 0.40 ./testdata
 | Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
 | Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
 | One specific pair is a confirmed false positive | Add `ignore_pairs` (keeps both files scannable against everything else) |
-| 100% scores on tiny snippets that aren't real duplicates | Add `--min-confidence-lines 20` — short matches lose proportional score |
+| Tiny snippets still scoring too high despite the default dampener | Raise `--min-confidence-lines` (e.g. 20) — short matches lose proportional score |
+| A known-real short clone is missing from the report | Lower or disable the dampener: `--min-confidence-lines 0` shows raw scores |
 | `--since/--blame requires the git binary on PATH` | Install git, or drop the flag |
 | `--since/--blame requires running inside a git repository` | `cd` into the repo, or run `git init` if the directory should be one |
 | `--since <ref>` returns nothing | Confirm the ref exists (`git rev-parse <ref>`) and that the diff is non-empty (`git diff --stat <ref>`) |

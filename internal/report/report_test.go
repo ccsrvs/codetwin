@@ -182,8 +182,8 @@ func TestRender_SummaryReflectsThreshold(t *testing.T) {
 	// threshold filters it out — otherwise "Refactor targets" claims
 	// findings the user can't see.
 	pairs := []Pair{
-		{NameA: "high_a", NameB: "high_b", Score: 0.97, Structural: 0.97, Semantic: 0.97},
-		{NameA: "mid_a", NameB: "mid_b", Score: 0.50, Structural: 0.5, Semantic: 0.5},
+		{NameA: "high_a", NameB: "high_b", Score: 0.97, Structural: 0.97, Semantic: 0.97, LinesA: 30, LinesB: 30},
+		{NameA: "mid_a", NameB: "mid_b", Score: 0.50, Structural: 0.5, Semantic: 0.5, LinesA: 30, LinesB: 30},
 	}
 	var buf strings.Builder
 	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.60})
@@ -544,9 +544,35 @@ func TestJSONLabel_BoundariesAreStrict(t *testing.T) {
 		{0.30, "weak_similarity"},
 	}
 	for _, c := range cases {
-		if got := JSONLabel(c.score); got != c.want {
-			t.Errorf("JSONLabel(%.2f) = %q; want %q", c.score, got, c.want)
+		// Lines well above ExactCloneMinLines so the evidence gate
+		// doesn't interfere with the pure score-boundary contract.
+		p := Pair{Score: c.score, LinesA: 30, LinesB: 30}
+		if got := JSONLabel(p); got != c.want {
+			t.Errorf("JSONLabel(score=%.2f) = %q; want %q", c.score, got, c.want)
 		}
+	}
+}
+
+func TestJSONLabel_ShortPairNeverExactClone(t *testing.T) {
+	cases := []struct {
+		name           string
+		linesA, linesB int
+		want           string
+	}{
+		{"both short", 4, 4, "near_clone"},
+		{"smaller side short", 4, 40, "near_clone"},
+		{"unknown lines fail the gate", 0, 0, "near_clone"},
+		{"exactly at the floor keeps the top band", ExactCloneMinLines, 30, "exact_clone"},
+		{"both long keep the top band", 30, 30, "exact_clone"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := Pair{Score: 1.0, LinesA: c.linesA, LinesB: c.linesB}
+			if got := JSONLabel(p); got != c.want {
+				t.Errorf("JSONLabel(score=1.0, lines=%d/%d) = %q; want %q",
+					c.linesA, c.linesB, got, c.want)
+			}
+		})
 	}
 }
 
@@ -562,11 +588,47 @@ func TestRender_LabelsByScore(t *testing.T) {
 	}
 	for _, c := range cases {
 		var buf strings.Builder
-		pairs := []Pair{{NameA: "a", NameB: "b", Score: c.score, Structural: c.score, Semantic: c.score}}
+		pairs := []Pair{{NameA: "a", NameB: "b", Score: c.score, Structural: c.score, Semantic: c.score,
+			LinesA: 30, LinesB: 30}}
 		Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30})
 		if !strings.Contains(buf.String(), c.want) {
 			t.Errorf("score %.2f: expected label containing %q, got: %s", c.score, c.want, buf.String())
 		}
+	}
+}
+
+func TestRender_ShortExactScorePairDemotedToNearClone(t *testing.T) {
+	// Evidence gate: a perfect score on a pair whose smaller snippet is
+	// under ExactCloneMinLines non-blank lines must not render as an
+	// exact clone. The score itself stays 100% — only the label demotes
+	// one band. The summary buckets must agree with the label.
+	var buf strings.Builder
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 1.0, Structural: 1.0, Semantic: 1.0,
+		LinesA: 4, LinesB: 4}}
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30})
+	out := buf.String()
+	if strings.Contains(out, "EXACT CLONE") {
+		t.Errorf("4-line pair must not render as EXACT CLONE:\n%s", out)
+	}
+	if !strings.Contains(out, "NEAR CLONE") {
+		t.Errorf("4-line perfect-score pair should demote to NEAR CLONE:\n%s", out)
+	}
+	if !strings.Contains(out, "100%") {
+		t.Errorf("demotion must not change the numeric score:\n%s", out)
+	}
+	if !strings.Contains(out, "Exact clones      0") {
+		t.Errorf("summary should count the demoted pair outside the exact bucket:\n%s", out)
+	}
+}
+
+func TestRender_LongExactScorePairKeepsExactClone(t *testing.T) {
+	var buf strings.Builder
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 1.0, Structural: 1.0, Semantic: 1.0,
+		LinesA: ExactCloneMinLines, LinesB: 25}}
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30})
+	if !strings.Contains(buf.String(), "EXACT CLONE") {
+		t.Errorf("pair at the %d-line evidence floor should keep EXACT CLONE:\n%s",
+			ExactCloneMinLines, buf.String())
 	}
 }
 
@@ -1007,9 +1069,9 @@ func TestRender_SummaryTiersIncludeCollapsedPairs(t *testing.T) {
 	// must still classify them even though the pairs section collapses
 	// them into the cluster.
 	pairs := []Pair{
-		{NameA: "a.go", NameB: "b.go", Score: 0.99},
-		{NameA: "a.go", NameB: "c.go", Score: 0.98},
-		{NameA: "b.go", NameB: "c.go", Score: 0.97},
+		{NameA: "a.go", NameB: "b.go", Score: 0.99, LinesA: 30, LinesB: 30},
+		{NameA: "a.go", NameB: "c.go", Score: 0.98, LinesA: 30, LinesB: 30},
+		{NameA: "b.go", NameB: "c.go", Score: 0.97, LinesA: 30, LinesB: 30},
 	}
 	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go", "c.go"}, Score: 0.98}}
 	var buf strings.Builder

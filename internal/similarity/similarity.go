@@ -253,6 +253,16 @@ func CombinedForLangs(structural, semantic float64, sameLang bool) float64 {
 	return Combined(structural, semantic, CrossLangStructuralWeight)
 }
 
+// DefaultMinConfidenceLines is the default --min-confidence-lines
+// value: length-aware confidence dampening is ON by default below this
+// many non-blank lines. 10 is chosen so that (a) a 10-line exact clone
+// keeps its full 1.0 score (the ramp reaches 1.0× exactly at N lines),
+// and (b) the worst benchmark noise — 4-line snippets scoring 0.60 raw
+// — dampens to 0.60 × 0.7 = 0.42, below the default 0.50 report
+// threshold. Users can pass --min-confidence-lines 0 to turn the
+// dampener off.
+const DefaultMinConfidenceLines = 10
+
 // LengthDampen scales a similarity score down when the smaller snippet
 // has fewer than `threshold` non-blank lines. The multiplier ramps
 // linearly from 0.5 at 0 lines to 1.0 at `threshold` lines, then stays
