@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ccsrvs/codetwin/internal/baseline"
 	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
@@ -90,6 +91,8 @@ func main() {
 	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
+	updateBaselinePath := flag.String("update-baseline", "", "after the scan, write a clone-watchlist snapshot of the visible clusters to <file> and exit 0 (the normal report still prints). Compare later runs against it with --baseline.")
+	baselinePath := flag.String("baseline", "", "compare this scan's clusters against the snapshot in <file>: drift events print to stderr (one line each) and any drift exits 1 — a CI gate. Create the snapshot with --update-baseline; both runs must use the same threshold/eps/min-pts/granularity/include-tests.")
 	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair or partial-clone block (look up the 8-char ID in --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir; blocks: Go and Python. Other languages print a 'note' explaining why.")
 	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair and partial clone. Off by default — synthesis adds work proportional to finding count.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
@@ -150,6 +153,24 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Clone watchlist (bet #5): validate the flag combination and load
+	// the comparison snapshot BEFORE any file processing, so schema or
+	// scan-params mismatches fail fast. baselineParams must be built
+	// after config defaults so .codetwin.json overrides are captured.
+	if *updateBaselinePath != "" && *baselinePath != "" {
+		fmt.Fprintln(os.Stderr, "error: --baseline and --update-baseline are mutually exclusive (snapshot with --update-baseline, gate with --baseline)")
+		os.Exit(1)
+	}
+	baselineParams := baseline.Params{
+		Threshold: *threshold, Eps: *eps, MinPts: *minPts,
+		Granularity: string(granularity), IncludeTests: *includeTests,
+	}
+	var baseSnap *baseline.Snapshot
+	if *baselinePath != "" {
+		snap := loadBaselineForCompare(*baselinePath, baselineParams)
+		baseSnap = &snap
 	}
 
 	ignoreMatcher, err := compileIgnoreMatcher(cfg)
@@ -415,6 +436,21 @@ func main() {
 		len(visiblePairs), len(visibleClusters), len(visibleBlocks),
 		suppressed.TestTestPairs, suppressed.TestOnlyClusters, suppressed.TestTestBlocks)
 
+	// Clone watchlist: snapshot exactly what the report shows — the
+	// prepared, post-suppression clusters — so test segregation and
+	// --include-tests compose naturally with baselines. Drift is
+	// computed here (before output) so --json can embed it; the stderr
+	// lines and exit code land in finishBaseline after the report.
+	var curSnap baseline.Snapshot
+	var driftEvents []baseline.Event
+	if *updateBaselinePath != "" || *baselinePath != "" {
+		curSnap = buildBaselineSnapshot(visibleClusters, snippets, paths, baselineParams)
+		if baseSnap != nil {
+			driftEvents = baseline.Diff(*baseSnap, curSnap)
+			debugf("--baseline: %d drift events against %d baseline clusters", len(driftEvents), len(baseSnap.Clusters))
+		}
+	}
+
 	// --suggest <pair-id> short-circuits the rest of the report. We
 	// look up across all materialized pairs (not just visiblePairs) so
 	// the user can target a sub-threshold pair without having to
@@ -456,8 +492,9 @@ func main() {
 			debugf("--suggest-all: built %d pair + %d block suggestions",
 				len(suggestions), len(blockSuggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, blockSuggestions, suppressed)
+		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, blockSuggestions, suppressed, driftEvents)
 		debugf("done (json)")
+		finishBaseline(*updateBaselinePath, *baselinePath, curSnap, driftEvents)
 		return
 	}
 
@@ -465,6 +502,7 @@ func main() {
 	// idempotent on sorted+filtered+limited data.
 	report.Render(os.Stdout, visiblePairs, visibleClusters, opts)
 	debugf("done (rendered)")
+	finishBaseline(*updateBaselinePath, *baselinePath, curSnap, driftEvents)
 }
 
 // buildPreviews computes a Preview map for every snippet that appears in
@@ -767,6 +805,21 @@ type jsonOutput struct {
 	// particular with --include-tests, so that flag preserves the exact
 	// pre-segregation JSON schema for CI consumers.
 	Suppressed *jsonSuppressed `json:"suppressed,omitempty"`
+
+	// Drift lists clone-watchlist events from --baseline mode. Omitted
+	// when there is no drift (and in runs without --baseline), so the
+	// schema stays byte-stable for consumers that don't use baselines.
+	Drift []jsonDriftEvent `json:"drift,omitempty"`
+}
+
+// jsonDriftEvent mirrors baseline.Event in the JSON schema. Cluster is
+// an index into the current run's cluster list — except for
+// cluster-dissolved, where it indexes the baseline's list (the cluster
+// no longer exists in this run); Detail always carries member keys.
+type jsonDriftEvent struct {
+	Kind    string `json:"kind"`
+	Cluster int    `json:"cluster"`
+	Detail  string `json:"detail"`
 }
 
 // jsonSuppressed mirrors report.Suppressed in the JSON schema.
@@ -854,8 +907,11 @@ type jsonPreview struct {
 // terminal renderer. When suggestions is non-nil, each pair's
 // suggested_patch field is populated by ID lookup. Non-zero suppressed
 // counts add a top-level `suppressed` summary object.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed) {
+func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed, drift []baseline.Event) {
 	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones, blockSuggestions)}
+	for _, e := range drift {
+		out.Drift = append(out.Drift, jsonDriftEvent{Kind: string(e.Kind), Cluster: e.Cluster, Detail: e.Detail})
+	}
 	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 || suppressed.TestTestBlocks > 0 {
 		out.Suppressed = &jsonSuppressed{
 			TestTestPairs:    suppressed.TestTestPairs,
