@@ -85,6 +85,7 @@ func main() {
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
+	crossRepoOnly := flag.Bool("cross-repo-only", false, "only report findings whose endpoints are in different repos; requires two or more directory roots (each root is a repo)")
 	includeTests := flag.Bool("include-tests", false, "include test↔test pairs and test-only clusters in the report; by default they are suppressed and replaced by a one-line summary")
 	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
@@ -167,12 +168,21 @@ func main() {
 
 	debugf("starting; loaded config=%v patternsHash=%q", cfg != nil, "")
 
-	files, err := collectFiles(paths, ignoreMatcher)
+	files, repos, err := collectFiles(paths, ignoreMatcher)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error collecting files: %v\n", err)
 		os.Exit(1)
 	}
-	debugf("collectFiles: %d files", len(files))
+	debugf("collectFiles: %d files (%d directory roots)", len(files), len(repos.dirs))
+
+	// Cross-repo mode (roadmap bet #6) switches on automatically when
+	// two or more directory roots are given: each root is a repo.
+	// --cross-repo-only without that is a contradiction — no snippet
+	// would carry a repo label and every finding would be filtered out.
+	if *crossRepoOnly && !repos.MultiRepo() {
+		fmt.Fprintln(os.Stderr, "error: --cross-repo-only requires at least two directory roots (e.g. codetwin ../svc-a ../svc-b)")
+		os.Exit(1)
+	}
 
 	if len(files) < 2 {
 		fmt.Fprintln(os.Stderr, "error: need at least 2 source files to compare")
@@ -199,6 +209,17 @@ func main() {
 				fmt.Fprintf(os.Stderr, "error: git: %v\n", err)
 			}
 			os.Exit(1)
+		}
+		// Multi-root scans must not mix git repositories: --since and
+		// --blame resolve exactly one repo, so roots spread across
+		// different working trees would produce silently wrong output.
+		// Fail fast instead (documented limitation).
+		if repos.MultiRepo() {
+			label, _ := requestedGitFlags(*since, *blame)
+			if err := repos.ensureSingleGitRepo(label); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	}
 	if *since != "" {
@@ -247,6 +268,15 @@ func main() {
 	}
 	debugf("scan.ProcessFiles: %d snippets from %d files (%d warnings)",
 		len(snippets), len(files), len(fileWarnings))
+	// Cross-repo namespacing: with two or more directory roots, each
+	// snippet gets its root's repo label and a "label:" name prefix.
+	// Runs before the sort so every downstream surface (pair IDs,
+	// clusters, previews) sees one consistent set of names. Single-root
+	// and file-argument invocations skip this entirely.
+	if repos.MultiRepo() {
+		namespaceSnippets(snippets, repos)
+		debugf("multi-repo: %d roots, labels %v", len(repos.dirs), repos.labels)
+	}
 	// Workers complete in nondeterministic order; sort by name so snippet
 	// indices (and therefore pair construction order, cluster IDs, and any
 	// equal-score tie ordering) are stable across runs.
@@ -369,7 +399,17 @@ func main() {
 	for i, s := range snippets {
 		snippetNames[i] = s.Name
 	}
-	clusters := buildReportClusters(groups, matrix, snippetNames, *threshold)
+	// Per-member repo labels feed cluster grouping and the cross-repo
+	// tag. nil on single-root scans so Cluster.MemberRepos stays nil and
+	// rendering / JSON are untouched.
+	var snippetRepos []string
+	if repos.MultiRepo() {
+		snippetRepos = make([]string, len(snippets))
+		for i, s := range snippets {
+			snippetRepos[i] = s.Repo
+		}
+	}
+	clusters := buildReportClusters(groups, matrix, snippetNames, snippetRepos, *threshold)
 	markTestOnlyClusters(clusters, snippets)
 	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
@@ -386,6 +426,7 @@ func main() {
 		Sort:          report.SortMode(*sortMode),
 		Limit:         *limit,
 		CrossLangOnly: *crossLangOnly,
+		CrossRepoOnly: *crossRepoOnly,
 		IncludeTests:  *includeTests,
 		Flat:          *flat,
 	}
@@ -570,10 +611,15 @@ func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
 //
 // IDs are assigned deterministically by first member name, so cluster
 // numbering is stable across runs regardless of map iteration order.
+// repos, when non-nil, is parallel to names and carries each snippet's
+// repo label from a multi-root scan; each cluster then gets a
+// MemberRepos slice parallel to its Members. nil (single-root) leaves
+// MemberRepos nil so repo-aware rendering and JSON stay switched off.
 func buildReportClusters(
 	groups map[int][]int,
 	matrix [][]float64,
 	names []string,
+	repos []string,
 	threshold float64,
 ) []report.Cluster {
 	memberLists := make([][]int, 0, len(groups))
@@ -596,11 +642,19 @@ func buildReportClusters(
 	for _, members := range memberLists {
 		avg, min := clusterStats(members, matrix)
 		memberNames := make([]string, len(members))
+		var memberRepos []string
+		if repos != nil {
+			memberRepos = make([]string, len(members))
+		}
 		for k, idx := range members {
 			memberNames[k] = names[idx]
+			if memberRepos != nil {
+				memberRepos[k] = repos[idx]
+			}
 		}
 		clusters = append(clusters, report.Cluster{
-			Members: memberNames, Score: avg, MinScore: min,
+			Members: memberNames, MemberRepos: memberRepos,
+			Score: avg, MinScore: min,
 		})
 	}
 	// Deterministic renumbering: order by first member name. Clusters are
@@ -746,6 +800,8 @@ type jsonPair struct {
 	Label          string          `json:"label"`
 	LangA          string          `json:"lang_a,omitempty"`
 	LangB          string          `json:"lang_b,omitempty"`
+	RepoA          string          `json:"repo_a,omitempty"`
+	RepoB          string          `json:"repo_b,omitempty"`
 	ProvenanceA    *jsonProvenance `json:"provenance_a,omitempty"`
 	ProvenanceB    *jsonProvenance `json:"provenance_b,omitempty"`
 	SuggestedPatch *jsonPatch      `json:"suggested_patch,omitempty"`
@@ -795,6 +851,11 @@ type jsonCluster struct {
 	// score over all distinct member pairs. A MinScore far below Score
 	// flags a transitively chained family.
 	MinScore float64 `json:"min_score"`
+	// MemberRepos (parallel to Members) and CrossRepo appear only on
+	// multi-root scans; single-root JSON is schema-identical to the
+	// pre-multi-repo output.
+	MemberRepos []string `json:"member_repos,omitempty"`
+	CrossRepo   bool     `json:"cross_repo,omitempty"`
 }
 
 type jsonPreview struct {
@@ -830,6 +891,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
 			Label: report.JSONLabel(p),
 			LangA: p.LangA, LangB: p.LangB,
+			RepoA: p.RepoA, RepoB: p.RepoB,
 			ProvenanceA: toJSONProvenance(p.ProvenanceA),
 			ProvenanceB: toJSONProvenance(p.ProvenanceB),
 		}
@@ -845,7 +907,10 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 		out.Pairs = append(out.Pairs, jp)
 	}
 	for _, c := range clusters {
-		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score, MinScore: c.MinScore})
+		out.Clusters = append(out.Clusters, jsonCluster{
+			ID: c.ID, Members: c.Members, Score: c.Score, MinScore: c.MinScore,
+			MemberRepos: c.MemberRepos, CrossRepo: c.CrossRepo(),
+		})
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -857,18 +922,25 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 
 // ── File collection ───────────────────────────────────────────────────────────
 
-func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error) {
+// collectFiles walks the given paths and returns the supported source
+// files plus a repoMap recording which directory root each file came
+// from. The repoMap only takes effect downstream when two or more
+// directory roots were given (repoMap.MultiRepo) — that's the automatic
+// cross-repo mode; direct file arguments never carry a repo label.
+func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, *repoMap, error) {
 	deduped, err := pathutil.Dedupe(paths)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	repos := newRepoMap()
 	var files []string
 	for _, p := range deduped {
 		info, err := os.Stat(p)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if info.IsDir() {
+			label := repos.addRoot(p)
 			err = filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
@@ -887,17 +959,18 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, error
 				}
 				if !d.IsDir() && supportedExts[filepath.Ext(path)] {
 					files = append(files, path)
+					repos.addFile(path, p, label)
 				}
 				return nil
 			})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		} else if supportedExts[filepath.Ext(p)] && !ignore.Match(p, false) {
 			files = append(files, p)
 		}
 	}
-	return files, nil
+	return files, repos, nil
 }
 
 // stripPatternStrings extracts the raw ignore_patterns strings (not the
@@ -1201,6 +1274,11 @@ func filterClustersBySince(
 // maximally distant and won't co-cluster them. Returns the surviving pairs
 // (a fresh slice — input is not mutated beyond the matrix) and the count of
 // ignored pairs. A nil matcher or empty pair list short-circuits.
+//
+// Endpoints are matched against the UN-prefixed snippet name (the repo
+// label of a multi-root scan is stripped first), so ignore_pairs
+// entries stay portable between single-root and multi-root invocations.
+// Note the path part is the root-relative path in multi-root mode.
 func applyPairIgnores(
 	pairs []report.Pair,
 	matrix [][]float64,
@@ -1217,7 +1295,7 @@ func applyPairIgnores(
 	kept := make([]report.Pair, 0, len(pairs))
 	ignored := 0
 	for _, p := range pairs {
-		if matcher.Match(p.NameA, p.NameB) {
+		if matcher.Match(stripRepoPrefix(p.NameA, p.RepoA), stripRepoPrefix(p.NameB, p.RepoB)) {
 			ignored++
 			i, okA := nameIdx[p.NameA]
 			j, okB := nameIdx[p.NameB]

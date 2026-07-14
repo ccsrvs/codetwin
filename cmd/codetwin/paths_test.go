@@ -29,7 +29,7 @@ func TestCollectFiles_DotPathDoesNotSkipEverything(t *testing.T) {
 	if err := os.Chdir(root); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
-	files, err := collectFiles([]string{"."}, nil)
+	files, _, err := collectFiles([]string{"."}, nil)
 	if err != nil {
 		t.Fatalf("collectFiles: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestCollectFiles_NoIgnoreMatcher(t *testing.T) {
 		"sub/b.py":  "def foo(): pass\n",
 		"sub/c.txt": "not a source file",
 	})
-	files, err := collectFiles([]string{root}, nil)
+	files, _, err := collectFiles([]string{root}, nil)
 	if err != nil {
 		t.Fatalf("collectFiles: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestCollectFiles_IgnoreFileGlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	files, err := collectFiles([]string{root}, matcher)
+	files, _, err := collectFiles([]string{root}, matcher)
 	if err != nil {
 		t.Fatalf("collectFiles: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestCollectFiles_IgnoreDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	files, err := collectFiles([]string{root}, matcher)
+	files, _, err := collectFiles([]string{root}, matcher)
 	if err != nil {
 		t.Fatalf("collectFiles: %v", err)
 	}

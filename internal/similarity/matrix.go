@@ -207,6 +207,8 @@ func BuildMatrix(
 						LinesB:          snippets[j].NonBlankLn,
 						LangA:           string(snippets[i].Lang),
 						LangB:           string(snippets[j].Lang),
+						RepoA:           snippets[i].Repo,
+						RepoB:           snippets[j].Repo,
 						Lexical:         lexical,
 						LexicalComputed: lexicalComputed,
 					})

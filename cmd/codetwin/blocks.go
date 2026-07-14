@@ -45,7 +45,10 @@ func detectBlockClones(
 	var out []report.BlockClone
 	for _, c := range cands {
 		a, b := snippets[c[0]], snippets[c[1]]
-		if ignore != nil && ignore.Match(a.Name, b.Name) {
+		// ignore_pairs endpoints match the un-prefixed name, same as
+		// applyPairIgnores — the repo label of a multi-root scan is
+		// display namespacing, not part of the user's pattern surface.
+		if ignore != nil && ignore.Match(stripRepoPrefix(a.Name, a.Repo), stripRepoPrefix(b.Name, b.Repo)) {
 			continue
 		}
 		fileA, symA := splitChunkName(a.Name)
@@ -59,6 +62,7 @@ func detectBlockClones(
 				Containment: m.Containment,
 				LinesA:      m.ALines, LinesB: m.BLines,
 				IsTestA: a.IsTest, IsTestB: b.IsTest,
+				RepoA: a.Repo, RepoB: b.Repo,
 			}
 			bc.ID = report.PairID(bc.RangeNameA(), bc.RangeNameB())
 			out = append(out, bc)
@@ -157,6 +161,10 @@ type jsonBlockClone struct {
 	Containment float64 `json:"containment"`
 	LinesA      int     `json:"lines_a"`
 	LinesB      int     `json:"lines_b"`
+	// RepoA / RepoB appear only on multi-root scans (omitempty keeps
+	// the single-root schema untouched).
+	RepoA string `json:"repo_a,omitempty"`
+	RepoB string `json:"repo_b,omitempty"`
 }
 
 func toJSONBlockClones(bcs []report.BlockClone) []jsonBlockClone {
@@ -171,6 +179,7 @@ func toJSONBlockClones(bcs []report.BlockClone) []jsonBlockClone {
 			FileB: b.FileB, StartLineB: b.BStartLine, EndLineB: b.BEndLine, SymbolB: b.SymbolB,
 			Containment: b.Containment,
 			LinesA:      b.LinesA, LinesB: b.LinesB,
+			RepoA: b.RepoA, RepoB: b.RepoB,
 		}
 	}
 	return out
