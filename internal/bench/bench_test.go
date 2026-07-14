@@ -505,11 +505,18 @@ func classNames(snips []scan.Snippet) map[string]bool {
 // method-level granularity underreports — a renamed class with slightly
 // reordered methods), while class↔function pairs across files are
 // mixed-kind noise and must never materialize. The elixir-module-clone
-// case extends the contract to Elixir `defmodule` spans, which carry
-// splitter.KindClass exactly like Python/Java/JS class spans.
+// case extends the contract to Elixir `defmodule` spans, the
+// rust-impl-clone case to Rust `impl` blocks, and the
+// go-methodset-clone case to Go struct+methodset groups (synthetic
+// chunks joining a type decl with its NON-CONTIGUOUS in-file methods)
+// — all of which carry splitter.KindClass exactly like Python/Java/JS
+// class spans.
 func TestBench_ClassGranularity(t *testing.T) {
 	// Positive: same class renamed, methods slightly reordered.
-	for _, name := range []string{"python-class-clone", "java-class-clone", "elixir-module-clone"} {
+	for _, name := range []string{
+		"python-class-clone", "java-class-clone", "elixir-module-clone",
+		"rust-impl-clone", "go-methodset-clone",
+	} {
 		snips, pairs := classCasePairs(t, name)
 		classes := classNames(snips)
 		if len(classes) != 2 {
@@ -534,23 +541,26 @@ func TestBench_ClassGranularity(t *testing.T) {
 		}
 	}
 
-	// Elixir-specific §5.2 kind-purity verification, through the real
-	// matrix pipeline: every materialized pair that touches a module
-	// chunk must be module↔module. Mixed-kind pairs (module vs a def —
-	// its own via the same-file nesting filter, a cross-file one via
-	// the kind gate) must never materialize.
-	{
-		snips, pairs := classCasePairs(t, "elixir-module-clone")
-		modules := classNames(snips)
+	// Kind-purity verification for the container languages, through the
+	// real matrix pipeline: every materialized pair that touches a
+	// class-kind chunk must be class↔class. Mixed-kind pairs (container
+	// vs a def/fn/method — its own via the same-file nesting filter, a
+	// cross-file one via the kind gate) must never materialize. For Go,
+	// this pins the Option-A covering-range consequence too: the group
+	// chunk's range contains its methods AND the interleaved unrelated
+	// function, so no group-vs-part pair may surface either way.
+	for _, name := range []string{"elixir-module-clone", "rust-impl-clone", "go-methodset-clone"} {
+		snips, pairs := classCasePairs(t, name)
+		containers := classNames(snips)
 		for _, p := range pairs {
-			if modules[p.NameA] != modules[p.NameB] {
-				t.Errorf("elixir-module-clone: mixed-kind pair materialized: %s <-> %s (%s)",
-					p.NameA, p.NameB, fmtF(p.Score))
+			if containers[p.NameA] != containers[p.NameB] {
+				t.Errorf("%s: mixed-kind pair materialized: %s <-> %s (%s)",
+					name, p.NameA, p.NameB, fmtF(p.Score))
 			}
-			if (modules[p.NameA] || modules[p.NameB]) &&
+			if (containers[p.NameA] || containers[p.NameB]) &&
 				strings.Split(p.NameA, ":")[0] == strings.Split(p.NameB, ":")[0] {
-				t.Errorf("elixir-module-clone: module paired within its own file: %s <-> %s (%s)",
-					p.NameA, p.NameB, fmtF(p.Score))
+				t.Errorf("%s: container paired within its own file: %s <-> %s (%s)",
+					name, p.NameA, p.NameB, fmtF(p.Score))
 			}
 		}
 	}

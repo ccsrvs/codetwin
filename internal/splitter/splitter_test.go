@@ -579,10 +579,14 @@ impl Foo {
 	for _, c := range chunks {
 		got = append(got, c.Symbol)
 	}
-	// We expect "top" and "method"; the impl block itself isn't a fn so it
-	// is not emitted as its own chunk.
-	if len(got) != 2 || got[0] != "top" || got[1] != "method" {
-		t.Errorf("expected [top method], got %v", got)
+	// fn-level chunks "top" and "method" emit as before; since §5.2 the
+	// impl block ALSO emits, as a separate class-kind span (covered in
+	// splitter_class_test.go) that never mixes with fn-level scoring.
+	if len(got) != 3 || got[0] != "top" || got[1] != "Foo" || got[2] != "method" {
+		t.Errorf("expected [top Foo method], got %v", got)
+	}
+	if chunks[1].Kind != KindClass || chunks[0].Kind != KindFunction || chunks[2].Kind != KindFunction {
+		t.Errorf("kinds = %v %v %v, want function/class/function", chunks[0].Kind, chunks[1].Kind, chunks[2].Kind)
 	}
 }
 

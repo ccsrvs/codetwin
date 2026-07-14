@@ -63,6 +63,64 @@ func TestClasses_ClassPairRendersWithClassSymbols(t *testing.T) {
 	}
 }
 
+// TestClasses_GoMethodsetPairRendersWithPreviews: the
+// go-methodset-clone fixture is a renamed struct whose methods are
+// reordered AND interleaved with an unrelated function — the group
+// chunk's Code is a JOINED non-contiguous span, so this test also
+// guards the preview path (BuildMatchPreview + MatchRange over joined
+// token/line data must degrade gracefully, never crash).
+func TestClasses_GoMethodsetPairRendersWithPreviews(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/bench/classes/go-methodset-clone"
+
+	jsonOut, err := exec.Command(bin,
+		"--json", "--preview", "--no-cache", "--no-progress", fixtureDir).Output()
+	if err != nil {
+		t.Fatalf("json run: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			FileA string  `json:"file_a"`
+			FileB string  `json:"file_b"`
+			Score float64 `json:"score"`
+		} `json:"pairs"`
+		Previews map[string]struct {
+			StartLine int    `json:"start_line"`
+			Text      string `json:"text"`
+		} `json:"previews"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	groupPair := false
+	for _, p := range doc.Pairs {
+		names := p.FileA + " | " + p.FileB
+		if strings.Contains(names, "StockLedger") && strings.Contains(names, "BinRegister") {
+			groupPair = true
+			if p.Score < 0.65 {
+				t.Errorf("group pair score = %v, want >= 0.65", p.Score)
+			}
+		}
+	}
+	if !groupPair {
+		t.Errorf("expected a StockLedger <-> BinRegister group pair in JSON output:\n%s", jsonOut)
+	}
+	// A preview must exist for the group chunks and must never leak the
+	// interleaved unrelated function (the joined Code excludes it).
+	groupPreview := false
+	for name, pv := range doc.Previews {
+		if strings.Contains(name, "StockLedger") {
+			groupPreview = true
+			if strings.Contains(pv.Text, "formatBanner") {
+				t.Errorf("group preview leaked interleaved source:\n%s", pv.Text)
+			}
+		}
+	}
+	if !groupPreview {
+		t.Errorf("expected a preview keyed by the StockLedger group chunk:\n%s", jsonOut)
+	}
+}
+
 // TestClasses_MixedKindProducesNoClassFinding: a class in a.js vs the
 // same methods as loose functions in b.js. The class chunk must appear
 // in NO pair (mixed-kind suppression), while the methods still match

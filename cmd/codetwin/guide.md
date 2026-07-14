@@ -241,17 +241,22 @@ file mode answers "which files should be merged."
 
 ## Class-level findings
 
-For Python, Java, JS/TS, and Elixir, containers are chunked twice: once
-per method/def and once as a whole class span (named
+For Python, Java, JS/TS, Elixir, Rust, and Go, containers are chunked
+twice: once per method/def/fn and once as a whole class span (named
 `path:start-end ClassName` — for Elixir, the span is the
 `defmodule Foo do ... end` block and the symbol is the dotted module
-name). A class↔class finding means the *container* matches — a copied
-class or module, renamed, possibly with its methods reordered — which
-method-level pairs alone underreport (each method pair looks small and
-independent). Elixir modules wrapping fewer than two defs get no span:
-a single-def module's span would only duplicate the def finding, and
-one-callback modules (`use GenServer` + one `handle_*`) are pervasive
-enough to become noise.
+name; for Rust it is each `impl` block and the symbol is the TYPE name
+even for trait impls; for Go it is a synthetic struct+methodset group —
+the type decl plus its in-file methods joined under the covering line
+range, since Go methods live outside the type block). A class↔class
+finding means the *container* matches — a copied class or module,
+renamed, possibly with its methods reordered — which method-level pairs
+alone underreport (each method pair looks small and independent).
+Elixir modules wrapping fewer than two defs get no span, and Go types
+need two or more in-file methods to group: a single-def container's
+span would only duplicate the def finding, and one-callback modules
+(`use GenServer` + one `handle_*`) are pervasive enough to become
+noise.
 Class chunks are only ever compared against other class chunks: a class
 never pairs with a loose function or a single method across files
 (container-vs-part comparisons are dilution noise, not clones), and a

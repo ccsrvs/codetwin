@@ -12,6 +12,7 @@ package splitter
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
@@ -28,7 +29,12 @@ import (
 // v2: Elixir `defmodule` blocks are emitted as KindClass spans; entries
 // cached under v1 lack the module chunks and would drop module↔module
 // findings.
-const SchemaVersion = 2
+//
+// v3: Rust `impl` blocks are emitted as KindClass spans and Go
+// struct+methodset groups are emitted as synthetic KindClass chunks;
+// entries cached under v2 lack both and would drop container↔container
+// findings for those languages.
+const SchemaVersion = 3
 
 // ChunkKind classifies the granularity of a chunk. Downstream scoring
 // only compares chunks of the same kind: a class span weakly resembling
@@ -43,7 +49,9 @@ const (
 	KindFunction ChunkKind = "function"
 	// KindClass covers class-span chunks: Python `class` blocks, Java
 	// class/interface/enum/record bodies, JS/TS `class` declarations,
-	// and Elixir `defmodule` blocks.
+	// Elixir `defmodule` blocks, Rust `impl` blocks, and Go
+	// struct+methodset groups (synthetic, non-contiguous — see
+	// goMethodsetGroups).
 	KindClass ChunkKind = "class"
 )
 
@@ -127,7 +135,7 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 	case tokenizer.JavaScript:
 		chunks = splitJavaScript(code)
 	case tokenizer.Rust:
-		chunks = splitBraceLang(code, rustFnRe)
+		chunks = splitRust(code)
 	case tokenizer.Java:
 		chunks = splitJava(code)
 	case tokenizer.Elixir:
@@ -420,6 +428,15 @@ var (
 	goFuncRe = regexp.MustCompile(`^func\s+(?:\([^)]*\)\s+)?(\w+)`)
 	rustFnRe = regexp.MustCompile(`^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)`)
 
+	// rustImplRe matches an `impl` block header and captures the TYPE
+	// name: `impl Foo`, `impl<T> Foo<T>`, and `impl Trait for Foo` all
+	// yield `Foo`. The type name (rather than "Trait for Foo") is the
+	// symbol so multiple impl blocks for one type — the idiomatic
+	// inherent-impl + trait-impls layout — share a symbol; their chunk
+	// Names stay distinct via the line ranges. Module paths on the trait
+	// or type (`fmt::Display`, `crate::Foo`) resolve to the last segment.
+	rustImplRe = regexp.MustCompile(`^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b(?:<[^>]*>)?\s+(?:[\w:]+(?:<[^>]*>)?\s+for\s+)?(?:&\s*(?:mut\s+)?)?(?:\w+::)*(\w+)`)
+
 	// Anonymous-func forms in Go. Together with goFuncRe these let splitGo
 	// emit closures, goroutines, and defers as their own chunks; the
 	// downstream nested-pair filter (chunksNestedSameFile) suppresses
@@ -429,12 +446,29 @@ var (
 	goGoroutineRe  = regexp.MustCompile(`^[ \t]*go\s+func\s*\(`)
 	goDeferFuncRe  = regexp.MustCompile(`^[ \t]*defer\s+func\s*\(`)
 	goBareFuncRe   = regexp.MustCompile(`^[ \t]*func\s*\(`)
+
+	// goTypeStructRe matches a top-level struct type declaration
+	// (column 0, so types declared inside function bodies — which can't
+	// have methods anyway — are skipped) and captures the type name.
+	// Generic parameter lists (`type Pair[K comparable, V any] struct`)
+	// are allowed. Interface declarations deliberately do NOT match:
+	// methods can't be declared on an interface receiver, so no
+	// methodset exists to group.
+	goTypeStructRe = regexp.MustCompile(`^type\s+([A-Za-z_]\w*)(?:\[[^\]]*\])?\s+struct\b`)
+
+	// goMethodRe matches a top-level method header and captures the
+	// receiver's TYPE name: `func (c *Counter) Add`, `func (Counter)
+	// Add`, and `func (p Pair[K, V]) Get` all yield the bare type name,
+	// so pointer and value receivers unify into one methodset.
+	goMethodRe = regexp.MustCompile(`^func\s*\((?:\s*\w+)?\s*\*?\s*([A-Za-z_]\w*)(?:\[[^\]]*\])?\s*\)\s*\w+`)
 )
 
 // splitGo extracts top-level named funcs/methods plus anonymous closures
 // (assignment, var, goroutine, defer, bare/IIFE). The loop advances by one
 // line per iteration — not past the matched body — so anonymous funcs
 // nested inside an outer function body are also visited and emitted.
+// Struct+methodset groups (the Go equivalent of a class chunk — §5.2)
+// are appended after the per-definition chunks; see goMethodsetGroups.
 func splitGo(code string) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
@@ -462,6 +496,91 @@ func splitGo(code string) []Chunk {
 			continue
 		}
 		chunks = append(chunks, chunkSpan(lines, i, end, symbol, ""))
+	}
+	return append(chunks, goMethodsetGroups(lines)...)
+}
+
+// lineSpan is a 0-based inclusive line range within a file.
+type lineSpan struct{ start, end int }
+
+// goMethodsetGroups builds one SYNTHETIC KindClass chunk per struct
+// type declared in the file with at least two in-file methods: Go
+// methods live OUTSIDE the type block, so the "class" is a
+// NON-CONTIGUOUS set of spans — the decl plus every `func (r Foo)` /
+// `func (r *Foo)` — that no single source range covers.
+//
+// Chunk shape (and its documented consequences):
+//   - Code is the decl's and the methods' source joined in file order.
+//     Source interleaved between them (unrelated functions, other
+//     types) is EXCLUDED — a copied-then-renamed type scores on its own
+//     text no matter what grew between its methods.
+//   - StartLine/EndLine are the COVERING range (first span's start to
+//     last span's end), which over-approximates: tools keyed on the
+//     range (--since overlap, blame) degrade gracefully by treating the
+//     whole stretch as the chunk, and previews render the joined text.
+//     The same-file nesting filter therefore suppresses group-vs-
+//     anything within the range — the group's own methods and the
+//     interleaved unrelated functions alike — which is fine: cross-file
+//     group↔group findings are the point. Class-kind chunks are also
+//     excluded from the §5.3 block-candidate channel, where the joined
+//     Code's chunk-relative line arithmetic would misreport ranges.
+//
+// Gates, mirroring Elixir's defmodule rules: a type needs >= 2 in-file
+// methods (a single-method group would just duplicate the method
+// finding plus decl boilerplate), the decl must be in the file
+// (grouping is decl-anchored — a methods-only file, common when a
+// type's methods span several files, gets no group), and interfaces
+// never group (no methodset can exist).
+func goMethodsetGroups(lines []string) []Chunk {
+	type declInfo struct {
+		name string
+		span lineSpan
+	}
+	var decls []declInfo
+	seen := map[string]bool{}
+	methods := map[string][]lineSpan{}
+	for i := 0; i < len(lines); i++ {
+		if m := goTypeStructRe.FindStringSubmatch(lines[i]); m != nil {
+			end, ok := findBraceEnd(lines, i)
+			if !ok {
+				continue
+			}
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				decls = append(decls, declInfo{name: m[1], span: lineSpan{i, end}})
+			}
+			i = end
+			continue
+		}
+		if m := goMethodRe.FindStringSubmatch(lines[i]); m != nil {
+			end, ok := findBraceEnd(lines, i)
+			if !ok {
+				continue
+			}
+			methods[m[1]] = append(methods[m[1]], lineSpan{i, end})
+			i = end
+		}
+	}
+
+	var chunks []Chunk
+	for _, d := range decls {
+		ms := methods[d.name]
+		if len(ms) < 2 {
+			continue
+		}
+		spans := append([]lineSpan{d.span}, ms...)
+		sort.Slice(spans, func(a, b int) bool { return spans[a].start < spans[b].start })
+		parts := make([]string, len(spans))
+		for k, sp := range spans {
+			parts[k] = strings.Join(lines[sp.start:sp.end+1], "\n")
+		}
+		chunks = append(chunks, Chunk{
+			StartLine: spans[0].start + 1,
+			EndLine:   spans[len(spans)-1].end + 1,
+			Symbol:    d.name,
+			Kind:      KindClass,
+			Code:      strings.Join(parts, "\n"),
+		})
 	}
 	return chunks
 }
@@ -517,11 +636,19 @@ func splitBraceBased(code string, match braceMatcher, emitBodyless bool, contain
 	return chunks
 }
 
-// splitBraceLang chunks code using a "find a definition header, then
-// brace-balance to its closer" strategy. Works for Go and Rust.
-func splitBraceLang(code string, headerRe *regexp.Regexp) []Chunk {
-	return splitBraceBased(code, matchHeaderRe(headerRe), false, nil)
+// splitRust chunks Rust into fn-level chunks PLUS one class-span chunk
+// per `impl` block (§5.2). The container matcher emits the impl's whole
+// `{...}` body as a KindClass chunk and then descends into it, so the
+// fns inside are still extracted as their own chunks. fn chunks jump
+// past their bodies, so an impl declared inside a function body is not
+// emitted — the same rule as a JS class inside a function body.
+func splitRust(code string) []Chunk {
+	return splitBraceBased(code, matchHeaderRe(rustFnRe), false, rustImplMatch)
 }
+
+// rustImplMatch reports whether a line opens an impl block, returning
+// the implemented TYPE's name for the class-span chunk.
+var rustImplMatch = matchHeaderRe(rustImplRe)
 
 // matchHeaderRe adapts a header regexp whose first capture group is the
 // symbol name into a braceMatcher. Shared by splitBraceLang and the
