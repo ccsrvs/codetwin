@@ -707,3 +707,71 @@ func TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
 		t.Errorf("expected empty stdout on rejection, got:\n%s", stdout.String())
 	}
 }
+
+// TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec:
+// end-to-end regression for the Bet #4 Elixir follow-ups. On the
+// realworld-spec fixture's multi-clause render pair, --suggest must
+// exit 0 and print a diff containing every clause of the endpoint
+// symbol (renamed consistently, guards verbatim) plus the @doc/@spec
+// block with the @spec rewritten to the helper's name.
+func TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/elixir/realworld-spec"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+			FileB string `json:"file_b"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if strings.Contains(p.FileA, "render") && strings.Contains(p.FileB, "render") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("expected a render/render pair; got:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "@@") {
+		t.Errorf("stdout missing hunk header. Got:\n%s", diff)
+	}
+	if got := strings.Count(diff, "def extracted_render_"); got < 2 {
+		t.Errorf("expected all clauses of the endpoint symbol (>= 2 renamed defs), got %d. Diff:\n%s", got, diff)
+	}
+	for _, want := range []string{
+		"@spec extracted_render_",
+		"when is_binary(value)",
+		"# NOTE: A has ",
+	} {
+		if !strings.Contains(diff, want) {
+			t.Errorf("stdout missing %q. Got:\n%s", want, diff)
+		}
+	}
+}

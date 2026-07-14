@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ccsrvs/codetwin/internal/splitter"
 )
 
 // TestBuildPatch_GoSimple_AppliesClean is the round-trip integration
@@ -604,6 +606,68 @@ func gitInit(t *testing.T, dir string) {
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\noutput: %s", args, err, out)
+		}
+	}
+}
+
+// TestBuildPatch_ElixirRealworldSpec_AppliesClean is the Elixir
+// round-trip for the Bet #4 follow-ups: synthesize a multi-clause
+// helper with a propagated @doc/@spec block from the realworld-spec
+// render pair, build the unified diff, and confirm `git apply --check`
+// plus a real apply accept it, leaving all clauses and the renamed
+// @spec in the patched file.
+func TestBuildPatch_ElixirRealworldSpec_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "render" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/elixir/realworld-spec/a.ex")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.ex")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.ex: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.ex", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s", err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	for _, want := range []string{
+		"@spec extracted_render_deadbeef(binary() | term()) :: String.t()",
+		"def extracted_render_deadbeef(value) when is_binary(value) do",
+		"def extracted_render_deadbeef(value) do",
+		"# NOTE: A has 2 clauses, B has 3",
+	} {
+		if !strings.Contains(string(patched), want) {
+			t.Errorf("patched file missing %q. Content:\n%s", want, patched)
 		}
 	}
 }
