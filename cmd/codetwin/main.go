@@ -80,6 +80,7 @@ func main() {
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
 	minConfLines := flag.Int("min-confidence-lines", similarity.DefaultMinConfidenceLines, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
 	minBlockLines := flag.Int("min-block-lines", blocks.DefaultMinBlockLines, "report sub-function partial clones (shared blocks inside below-threshold pairs) spanning at least N non-blank lines on both sides; 0 disables block detection")
+	granularityFlag := flag.String("granularity", string(scan.GranularityFunction), "chunking unit: function (per-definition chunks, the default) | file (each source file is one whole-file snippet)")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
@@ -140,7 +141,15 @@ func main() {
 		applyConfigDefaults(cfg.Defaults, applied,
 			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
 			preview, previewLines, sortMode, limit, minConfLines, includeTests,
-			minBlockLines)
+			minBlockLines, granularityFlag)
+	}
+
+	// Validate after config defaults are applied so a bad value fails
+	// identically whether it came from --granularity or .codetwin.json.
+	granularity, err := scan.ParseGranularity(*granularityFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	ignoreMatcher, err := compileIgnoreMatcher(cfg)
@@ -239,6 +248,7 @@ func main() {
 	}
 	snippets, fileWarnings := scan.ProcessFiles(
 		files, *minLines, stripPatterns, cacheState, patternsHash,
+		granularity,
 		func() { done.Add(1) },
 	)
 	if progStop != nil {
@@ -962,6 +972,7 @@ func applyConfigDefaults(
 	minLines *int, eps *float64, minPts *int,
 	preview *bool, previewLines *int, sortMode *string, limit *int,
 	minConfLines *int, includeTests *bool, minBlockLines *int,
+	granularity *string,
 ) {
 	if d.Threshold != nil && !explicit["threshold"] {
 		*threshold = *d.Threshold
@@ -1004,6 +1015,9 @@ func applyConfigDefaults(
 	}
 	if d.MinBlockLines != nil && !explicit["min-block-lines"] {
 		*minBlockLines = *d.MinBlockLines
+	}
+	if d.Granularity != nil && !explicit["granularity"] {
+		*granularity = *d.Granularity
 	}
 }
 
@@ -1263,6 +1277,10 @@ FLAGS:
   --min-block-lines int  report sub-function PARTIAL CLONES: shared blocks of at
                        least N non-blank lines (both sides) hiding inside pairs
                        below the report threshold (default 8; 0 = off)
+  --granularity string chunking unit: function | file (default function).
+                       file mode skips the splitter — each source file is one
+                       whole-file snippet, for module-level consolidation and
+                       languages without a splitter
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch

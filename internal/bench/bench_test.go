@@ -216,7 +216,7 @@ func caseSnippets(t *testing.T, dir string) (a, b []scan.Snippet) {
 	c := cache.New()
 	for _, m := range matches {
 		base := strings.ToLower(filepath.Base(m)) // Java fixtures are A.java/B.java
-		snips, warn := scan.ProcessFile(m, minLines, nil, c, "")
+		snips, warn := scan.ProcessFile(m, minLines, nil, c, "", scan.GranularityFunction)
 		if warn != "" {
 			t.Fatalf("scan %s: %s", m, warn)
 		}

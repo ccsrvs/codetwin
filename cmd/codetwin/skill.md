@@ -59,6 +59,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Raw scores, short-snippet dampening off | `codetwin --min-confidence-lines 0 <path>` |
 | Only bigger sub-function partial clones (default N=8) | `codetwin --min-block-lines 15 <path>` |
 | Function-level findings only, block channel off | `codetwin --min-block-lines 0 <path>` |
+| Whole-file comparison ("which files should be merged?") | `codetwin --granularity file <path>` |
 | Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
@@ -92,6 +93,11 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         Findings carry a containment %, not a combined score;
                         --threshold never filters them, --limit does. JSON:
                         top-level partial_clones array.
+--granularity string    chunking unit: function | file (default function). file mode
+                        skips the splitter — each source file is one whole-file
+                        snippet named by its bare path. Use for module-level
+                        consolidation ("these two files should be one module")
+                        and for languages without a splitter.
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
 --include-tests         include test↔test pairs and test-only clusters; by default they
@@ -254,7 +260,8 @@ CLI flags always win over the `defaults` block.
     "limit": 20,
     "min_confidence_lines": 20,
     "min_block_lines": 8,
-    "include_tests": false
+    "include_tests": false,
+    "granularity": "function"
   },
   "ignore_paths": [
     "vendor/**",

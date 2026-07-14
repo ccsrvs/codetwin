@@ -124,6 +124,7 @@ codetwin --suggest <pair-id> ./src
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
 | `--min-confidence-lines` | `10` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). On by default. See [Scoring](#scoring). |
 | `--min-block-lines` | `8` | Report sub-function partial clones spanning at least N matched lines on both sides (0 = off). See [Partial clones](#partial-clones-block-level). |
+| `--granularity` | `function` | Chunking unit: `function` (per-definition chunks) or `file` (each source file is one whole-file snippet). See [Granularity](#granularity). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
@@ -259,6 +260,41 @@ bigger extractions, or pass `--min-block-lines 0` to disable the
 channel entirely. Test↔test partial clones follow the same
 [test code segregation](#test-code-segregation) as pairs.
 
+## Granularity
+
+By default codetwin compares per-definition chunks (functions, methods),
+so a duplicated helper inside a big module scores on the helper, not the
+module. `--granularity file` inverts that: the splitter is skipped and
+each source file becomes one whole-file snippet, so the report answers
+"which *files* are near-duplicates of each other" instead of "which
+functions are".
+
+Use file mode when:
+
+- **Module-level consolidation** — two files carry the same functions
+  (perhaps reordered, lightly edited) plus the same surrounding
+  declarations. Function mode shows that as several mid-band pairs;
+  file mode shows one strong whole-file pair, which is the actual
+  refactoring unit ("these two files should be one module").
+- **Unsupported languages** — files in languages without a splitter
+  already fall back to whole-file chunks; file mode puts *every*
+  language on that footing so mixed-language scans compare like with
+  like.
+
+Everything downstream is granularity-agnostic: scoring, clustering,
+labels, partial-clone detection, test segregation, `--since`/`--blame`
+all work unchanged on file-sized chunks. Expect fewer, bigger findings —
+pair counts shrink because there are fewer chunks. The per-file cache
+keys entries by granularity, so both modes stay cached side by side and
+switching back and forth never rebuilds. Note `--min-confidence-lines`
+rarely binds in file mode (whole files usually exceed 10 lines) — that
+is expected, not a gap.
+
+```bash
+codetwin --granularity file ./src           # which files are near-duplicates?
+codetwin --granularity file --preview ./lib # with whole-file previews
+```
+
 ## Test code segregation
 
 Test scaffolding dominates clone reports: test functions are short,
@@ -340,7 +376,8 @@ individual false-positive pairs. CLI flags always win over config defaults.
     "sort": "size",
     "limit": 20,
     "min_confidence_lines": 20,
-    "include_tests": false
+    "include_tests": false,
+    "granularity": "function"
   },
   "ignore_paths": [
     "vendor/**",

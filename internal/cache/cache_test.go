@@ -228,8 +228,8 @@ func TestPatternsHash_EmptyIsStable(t *testing.T) {
 }
 
 func TestKey_DeterministicForSameInputs(t *testing.T) {
-	k1 := Key("/a/b/c.go", "abc", "xyz")
-	k2 := Key("/a/b/c.go", "abc", "xyz")
+	k1 := Key("/a/b/c.go", "abc", "xyz", "function")
+	k2 := Key("/a/b/c.go", "abc", "xyz", "function")
 	if k1 != k2 {
 		t.Errorf("Key should be deterministic: %q vs %q", k1, k2)
 	}
@@ -241,14 +241,28 @@ func TestKey_DistinctForDifferentInputs(t *testing.T) {
 		a, b      string
 		different bool
 	}{
-		{"different path", Key("/a.go", "h1", "p"), Key("/b.go", "h1", "p"), true},
-		{"different content", Key("/a.go", "h1", "p"), Key("/a.go", "h2", "p"), true},
-		{"different patterns", Key("/a.go", "h1", "p1"), Key("/a.go", "h1", "p2"), true},
+		{"different path", Key("/a.go", "h1", "p", "function"), Key("/b.go", "h1", "p", "function"), true},
+		{"different content", Key("/a.go", "h1", "p", "function"), Key("/a.go", "h2", "p", "function"), true},
+		{"different patterns", Key("/a.go", "h1", "p1", "function"), Key("/a.go", "h1", "p2", "function"), true},
+		{"different granularity", Key("/a.go", "h1", "p", "function"), Key("/a.go", "h1", "p", "file"), true},
 	}
 	for _, c := range cases {
 		if c.different && c.a == c.b {
 			t.Errorf("%s: keys should differ but match: %q", c.name, c.a)
 		}
+	}
+}
+
+// TestKey_FunctionGranularityKeepsLegacyKeys pins the compatibility
+// contract: function-level keys (and the empty-string legacy spelling)
+// hash identically to keys derived before the granularity dimension
+// existed, so upgrading codetwin does not cold-start existing caches.
+func TestKey_FunctionGranularityKeepsLegacyKeys(t *testing.T) {
+	if Key("/a.go", "h1", "p", "function") != Key("/a.go", "h1", "p", "") {
+		t.Error(`Key(..., "function") must equal Key(..., "") — the legacy key shape`)
+	}
+	if Key("/a.go", "h1", "p", "file") == Key("/a.go", "h1", "p", "") {
+		t.Error(`Key(..., "file") must NOT collide with the legacy key shape`)
 	}
 }
 

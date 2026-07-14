@@ -18,6 +18,32 @@ import (
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
+// Granularity selects the chunking unit ProcessFile emits Snippets at.
+type Granularity string
+
+const (
+	// GranularityFunction is today's default: splitter.Split emits
+	// per-definition chunks, with a whole-file fallback when no
+	// definitions are found.
+	GranularityFunction Granularity = "function"
+
+	// GranularityFile skips the splitter entirely: each source file
+	// becomes one whole-file Snippet (splitter.WholeFile — Symbol empty,
+	// StartLine 1, so the snippet name is just the path).
+	GranularityFile Granularity = "file"
+)
+
+// ParseGranularity validates a user-supplied granularity string (CLI flag
+// or config default) and returns the typed value. The error message lists
+// the valid values so it can be shown to the user verbatim.
+func ParseGranularity(s string) (Granularity, error) {
+	switch Granularity(s) {
+	case GranularityFunction, GranularityFile:
+		return Granularity(s), nil
+	}
+	return "", fmt.Errorf("invalid granularity %q (valid values: function, file)", s)
+}
+
 // Snippet is one analyzable unit (typically a function- or class-level
 // chunk produced by splitter.Split).
 type Snippet struct {
@@ -64,6 +90,7 @@ func ProcessFiles(
 	stripPatterns []*regexp.Regexp,
 	cacheState *cache.Cache,
 	patternsHash string,
+	granularity Granularity,
 	onFileDone func(),
 ) ([]Snippet, []string) {
 	n := len(files)
@@ -96,7 +123,7 @@ func ProcessFiles(
 			defer wg.Done()
 			var local result
 			for path := range workCh {
-				snips, warn := ProcessFile(path, minLines, stripPatterns, cacheState, patternsHash)
+				snips, warn := ProcessFile(path, minLines, stripPatterns, cacheState, patternsHash, granularity)
 				local.snippets = append(local.snippets, snips...)
 				if warn != "" {
 					local.warnings = append(local.warnings, warn)
@@ -124,12 +151,18 @@ func ProcessFiles(
 // fingerprint), safe to call concurrently. Returns the snippets that
 // survive minLines plus an optional warning string for read errors.
 // Cache state is shared and thread-safe via its internal mutex.
+//
+// granularity selects the chunking unit: GranularityFunction runs
+// splitter.Split; GranularityFile emits a single whole-file chunk. The
+// granularity is part of the cache key, so the two modes never serve each
+// other's cached chunks and can coexist in one cache file.
 func ProcessFile(
 	path string,
 	minLines int,
 	stripPatterns []*regexp.Regexp,
 	cacheState *cache.Cache,
 	patternsHash string,
+	granularity Granularity,
 ) ([]Snippet, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -138,7 +171,7 @@ func ProcessFile(
 
 	absPath, _ := filepath.Abs(path)
 	contentHash := cache.HashContent(data)
-	key := cache.Key(absPath, contentHash, patternsHash)
+	key := cache.Key(absPath, contentHash, patternsHash, string(granularity))
 	isTest := IsTestFile(path)
 
 	if entry, ok := cacheState.Get(key); ok {
@@ -167,9 +200,15 @@ func ProcessFile(
 
 	code := string(data)
 	lang := tokenizer.Detect(path, code)
+	var chunks []splitter.Chunk
+	if granularity == GranularityFile {
+		chunks = []splitter.Chunk{splitter.WholeFile(path, code)}
+	} else {
+		chunks = splitter.Split(path, code, lang)
+	}
 	var out []Snippet
 	var entryChunks []cache.Chunk
-	for _, ch := range splitter.Split(path, code, lang) {
+	for _, ch := range chunks {
 		tokens, lines := tokenizer.TokenizeWithLines(ch.Code, lang,
 			tokenizer.WithStripPatterns(stripPatterns))
 		if len(tokens) == 0 {

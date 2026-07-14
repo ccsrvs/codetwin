@@ -28,7 +28,8 @@ func TestLoad_ParsesFullConfig(t *testing.T) {
 			"preview_lines": 15,
 			"sort": "size",
 			"include_tests": true,
-			"min_block_lines": 12
+			"min_block_lines": 12,
+			"granularity": "file"
 		},
 		"ignore_paths": ["vendor/**", "*_test.go"],
 		"ignore_patterns": ["^\\s*log\\.info\\("]
@@ -60,6 +61,9 @@ func TestLoad_ParsesFullConfig(t *testing.T) {
 	}
 	if c.Defaults.MinBlockLines == nil || *c.Defaults.MinBlockLines != 12 {
 		t.Errorf("defaults.min_block_lines not parsed correctly")
+	}
+	if c.Defaults.Granularity == nil || *c.Defaults.Granularity != "file" {
+		t.Errorf("defaults.granularity not parsed correctly")
 	}
 	if got := c.IgnorePaths; len(got) != 2 || got[0] != "vendor/**" || got[1] != "*_test.go" {
 		t.Errorf("ignore_paths not parsed correctly: %v", got)
