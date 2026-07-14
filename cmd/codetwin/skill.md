@@ -57,6 +57,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Inline code previews | `codetwin --preview --threshold 0.40 <path>` |
 | Filter MORE short-snippet noise than the default (N=10) | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
 | Raw scores, short-snippet dampening off | `codetwin --min-confidence-lines 0 <path>` |
+| Only bigger sub-function partial clones (default N=8) | `codetwin --min-block-lines 15 <path>` |
+| Function-level findings only, block channel off | `codetwin --min-block-lines 0 <path>` |
 | Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
@@ -84,6 +86,12 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N
                             (default 10; 0 = off); multiplier ramps from 0.5×
                             at 0 lines to 1.0× at N
+--min-block-lines int   report sub-function PARTIAL CLONES — shared blocks of
+                        at least N matched lines (both sides) hiding inside
+                        pairs below the report threshold (default 8; 0 = off).
+                        Findings carry a containment %, not a combined score;
+                        --threshold never filters them, --limit does. JSON:
+                        top-level partial_clones array.
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
 --include-tests         include test↔test pairs and test-only clusters; by default they
@@ -120,6 +128,7 @@ works the same in a non-git directory as it does in one.
 | Show the freshest clones (newest endpoint first) | `codetwin --blame --sort age --limit 10 <path>` |
 | Annotate every match with origin metadata | `codetwin --blame --preview <path>` |
 | Triage who introduced this clone | `codetwin --blame --json <path> \| jq '.pairs[] \| {a:.file_a,b:.file_b,intro_a:.provenance_a.first_date,intro_b:.provenance_b.first_date}'` |
+| List sub-function partial clones with line ranges | `codetwin --json <path> \| jq '.partial_clones[]? \| {a:"\(.file_a):\(.start_line_a)-\(.end_line_a)", b:"\(.file_b):\(.start_line_b)-\(.end_line_b)", containment}'` |
 
 `codetwin --help` prints the same flag list with one-line descriptions.
 `codetwin --guide` walks through the score bands, structural/semantic
@@ -244,6 +253,7 @@ CLI flags always win over the `defaults` block.
     "sort": "size",
     "limit": 20,
     "min_confidence_lines": 20,
+    "min_block_lines": 8,
     "include_tests": false
   },
   "ignore_paths": [

@@ -20,6 +20,12 @@ What sets codetwin apart from other clone detectors:
   pair, with a comment block listing every divergence. Go and Python in v1;
   pairs in other languages report a structured `note` so a follow-up emitter
   has a clear contract.
+- **Sub-function partial clones** — a copied block hiding inside two
+  otherwise-unrelated functions is invisible to whole-function scoring
+  (dilution grows quadratically with host size); the block channel finds it
+  anyway and reports it with exact line ranges in a dedicated
+  `PARTIAL CLONES` section. See
+  [Partial clones (block level)](#partial-clones-block-level).
 
 The git-aware features (`--since`, `--blame`, `--sort age`) require git on
 `PATH` and a git repository in the working directory; without them codetwin
@@ -117,6 +123,7 @@ codetwin --suggest <pair-id> ./src
 | `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
 | `--min-confidence-lines` | `10` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). On by default. See [Scoring](#scoring). |
+| `--min-block-lines` | `8` | Report sub-function partial clones spanning at least N matched lines on both sides (0 = off). See [Partial clones](#partial-clones-block-level). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
@@ -211,6 +218,46 @@ that drop below the eps threshold don't cluster. Raise it (e.g.
 `--min-confidence-lines 20`) to push more test boilerplate out of the
 report, or pass `--min-confidence-lines 0` to turn it off and restore
 raw scores.
+
+## Partial clones (block level)
+
+Whole-function scoring has a structural blind spot: a verbatim 15-line
+block pasted into two ~45-line functions with unrelated surrounding
+code scores ~0.37 combined — Jaccard is union-normalized, so shared
+content is diluted quadratically as the host functions grow. The block
+channel closes that hole. For every same-language pair that shares
+fingerprints but lands *below* the report threshold (the "gray band"),
+codetwin walks the shared fingerprint positions, extends them to
+maximal exactly-matching token runs, chains runs across small gaps
+(so one edited line inside a copied block doesn't split the finding),
+and verifies each candidate with exact token comparison.
+
+Verified blocks render in their own section with real line ranges and
+the enclosing function of each side:
+
+```
+ PARTIAL CLONES
+
+  [PARTIAL CLONE   ]  92% contained · 15 lines
+    orders.go:120-134 ⊂ ProcessOrders
+    invoices.go:88-102 ⊂ SummarizeInvoices
+```
+
+"92% contained" means 92% of the smaller side's block tokens are
+exactly matched (after normalization, so systematic renames still
+count) on the other side. Partial clones have no combined score and
+`--threshold` never filters them — containment plus the line floor is
+their quality bar. `--limit` applies, and in JSON they appear as a
+top-level `partial_clones` array.
+
+Two floors keep boilerplate out: containment must reach 0.85 (err-check
+chains and logging runs interleaved with divergent code fall below),
+and at least `--min-block-lines` (default 8) source lines must carry
+matched tokens on *both* sides — lines merely spanned (e.g. by a
+multi-line string literal) don't count. Raise the floor to focus on
+bigger extractions, or pass `--min-block-lines 0` to disable the
+channel entirely. Test↔test partial clones follow the same
+[test code segregation](#test-code-segregation) as pairs.
 
 ## Test code segregation
 

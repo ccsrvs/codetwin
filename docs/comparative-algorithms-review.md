@@ -419,6 +419,13 @@ pair scores 0.36–0.43, below the 0.50 default threshold) is enforced
 by a live companion test so the fixtures can't drift into
 function-level-detectable territory.
 
+**Status: implemented.** The block-level detector landed as
+`internal/blocks` (seed–extend–chain over shared fingerprint positions,
+containment ≥ 0.85 + matched-line floor verification), wired through a
+gray-band candidate channel in `BuildMatrix` into the `PARTIAL CLONES`
+report section and `partial_clones` JSON array (`--min-block-lines`,
+default 8); the contract test above is un-skipped and green.
+
 ### 5.4 Not recommended as "granularity": cross-repo
 
 Cross-repo scanning (roadmap bet #6) is sometimes framed as a

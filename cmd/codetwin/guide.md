@@ -126,6 +126,43 @@ is an isolated duplicate that doesn't generalize beyond two callers.
 individually, pairs before clusters). `--json` output is always flat —
 machine consumers see every pair regardless.
 
+## Partial clones (PARTIAL CLONES section)
+
+Everything above scores *whole functions* against each other, and that
+has a known blind spot: a copied 15-line block inside two large,
+otherwise-unrelated functions dilutes below any sane threshold — the
+more unrelated code around the block, the lower the pair scores. The
+`PARTIAL CLONES` section is a second detection channel for exactly
+that case. Findings look like:
+
+```
+  [PARTIAL CLONE   ]  92% contained · 15 lines
+    orders.go:120-134 ⊂ ProcessOrders
+    invoices.go:88-102 ⊂ SummarizeInvoices
+```
+
+Read it as: lines 120–134 of `orders.go` (inside `ProcessOrders`) and
+lines 88–102 of `invoices.go` (inside `SummarizeInvoices`) are the same
+block of code. **Containment** is the fraction of the smaller side's
+block tokens exactly matched on the other side, after the same
+normalization the rest of the tool uses — so a systematic rename still
+counts as matched, while an edited line inside the block lowers the
+percentage. 100% contained = the block is verbatim (modulo renames).
+
+Partial clones deliberately have **no combined score**: the enclosing
+pair scored *below* your threshold (that's why the block channel looked
+at it at all), so a pair-style percentage would be misleading. Their
+quality bar is containment (≥ 0.85, enforced by the detector) plus the
+`--min-block-lines` floor (default 8): at least that many source lines
+must carry matched tokens on both sides. `--threshold` never filters
+them; `--limit` caps them; `--min-block-lines 0` turns the channel off.
+Test↔test partial clones are suppressed by default like test↔test
+pairs (see below).
+
+Acting on one is usually the easiest refactor in the report: the block
+is contiguous on both sides, so extract it into a helper and call it
+from both hosts.
+
 ## Test code segregation (default)
 
 Files matching each language's test convention (`*_test.go`,
