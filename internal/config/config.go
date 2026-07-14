@@ -132,17 +132,7 @@ func CompileIgnorePaths(patterns []string) (*IgnoreMatcher, error) {
 			continue
 		}
 		if strings.ContainsAny(p, "*?") {
-			// Auto-prepend "**/" so non-anchored globs match anywhere in
-			// the tree, mirroring gitignore behaviour for patterns that
-			// contain "/" but don't start with one.
-			glob := p
-			switch {
-			case strings.HasPrefix(glob, "/"):
-				glob = strings.TrimPrefix(glob, "/")
-			case !strings.HasPrefix(glob, "**/"):
-				glob = "**/" + glob
-			}
-			re, err := globToRegex(glob)
+			re, err := compileAnchoredGlob(p)
 			if err != nil {
 				return nil, fmt.Errorf("ignore_paths %q: %w", raw, err)
 			}
@@ -152,6 +142,21 @@ func CompileIgnorePaths(patterns []string) (*IgnoreMatcher, error) {
 		}
 	}
 	return &IgnoreMatcher{rules: rules}, nil
+}
+
+// compileAnchoredGlob normalizes a wildcard pattern the way gitignore
+// does — a leading "/" anchors it to the scan root (and is stripped);
+// otherwise "**/" is auto-prepended so non-anchored globs match
+// anywhere in the tree — then compiles it. Shared by ignore_paths and
+// ignore_pairs endpoint compilation.
+func compileAnchoredGlob(pattern string) (*regexp.Regexp, error) {
+	switch {
+	case strings.HasPrefix(pattern, "/"):
+		pattern = strings.TrimPrefix(pattern, "/")
+	case !strings.HasPrefix(pattern, "**/"):
+		pattern = "**/" + pattern
+	}
+	return globToRegex(pattern)
 }
 
 // Match reports whether path should be ignored. isDir lets dir-only patterns

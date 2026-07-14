@@ -137,97 +137,88 @@ func clampTrim(n int) int {
 	return n
 }
 
+// blockEmitter bundles the language-specific pieces of block-mode
+// synthesis so synthesizeBlockPair can drive the flow shared by
+// synthesizeGoBlock and synthesizePythonBlock: rejection checks,
+// helper naming, banner/TODO/divergence emission, body reindenting,
+// and the confidence formula.
+type blockEmitter struct {
+	commentPrefix string   // line-comment leader: "//" or "#"
+	cfKeywords    []string // control-flow keywords for hole-asymmetry rejection
+	namePrefix    string   // helper name is namePrefix + blockID
+	bodyIndent    string   // indent applied to each body line
+	// openHelper returns the helper's definition line; closeHelper is
+	// emitted after the body ("}\n" for Go, "" for Python).
+	openHelper  func(helperName string) string
+	closeHelper string
+}
+
+// synthesizeBlockPair is the shared engine behind the per-language
+// block emitters, mirroring synthesizePair's role for the v1 pair
+// emitters.
+func synthesizeBlockPair(a, b scan.Snippet, blockID string, al Alignment, em blockEmitter) Suggestion {
+	if len(al.Common) == 0 {
+		return Suggestion{Note: "rejected: no common lines between blocks"}
+	}
+	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes, em.cfKeywords); !ok {
+		return Suggestion{Note: reason}
+	}
+
+	helperName := em.namePrefix + blockID
+	body := reindentBlock(a.Code, em.bodyIndent)
+	divergence := formatDivergenceComment(al.Holes, em.commentPrefix)
+
+	p := em.commentPrefix
+	src := strings.Builder{}
+	src.WriteString(p + " codetwin: starter helper extracted from the shared block\n")
+	src.WriteString(p + " " + nonEmpty(a.Name, "<block A>") +
+		" + " + nonEmpty(b.Name, "<block B>") +
+		" (block " + blockID + ").\n")
+	src.WriteString(p + " This is a literal copy of the first side's block — a statement\n")
+	src.WriteString(p + " run, not a whole function. Adapt control flow (returns, error\n")
+	src.WriteString(p + " paths) and replace the call sites by hand.\n")
+	src.WriteString(freeIdentComment(a.Code, a.Lang, p))
+	if divergence != "" {
+		src.WriteString(divergence)
+	}
+	src.WriteString(em.openHelper(helperName))
+	src.WriteString(body)
+	src.WriteString(em.closeHelper)
+
+	return Suggestion{
+		HelperName: helperName,
+		HelperSrc:  src.String(),
+		Confidence: alignmentConfidence(a, b, al),
+	}
+}
+
 // synthesizeGoBlock wraps side A's block span in a fresh Go helper.
 // Rejection rules (a subset of synthesizeGo's — there is no header or
 // receiver to check):
 //   - Alignment must have at least one common span.
 //   - Holes must agree on `return`/`break`/`continue` presence.
 func synthesizeGoBlock(a, b scan.Snippet, blockID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between blocks"}
-	}
-	if reason, ok := rejectControlFlowAsymmetry(al.Holes); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := "extractedBlock_" + blockID
-	body := reindentBlock(a.Code, "\t")
-	divergence := formatDivergenceComment(al.Holes, "//")
-
-	src := strings.Builder{}
-	src.WriteString("// codetwin: starter helper extracted from the shared block\n")
-	src.WriteString("// " + nonEmpty(a.Name, "<block A>") +
-		" + " + nonEmpty(b.Name, "<block B>") +
-		" (block " + blockID + ").\n")
-	src.WriteString("// This is a literal copy of the first side's block — a statement\n")
-	src.WriteString("// run, not a whole function. Adapt control flow (returns, error\n")
-	src.WriteString("// paths) and replace the call sites by hand.\n")
-	src.WriteString(freeIdentComment(a.Code, a.Lang, "//"))
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString("func " + helperName + "() {\n")
-	src.WriteString(body)
-	src.WriteString("}\n")
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: blockConfidence(a, b, al),
-	}
+	return synthesizeBlockPair(a, b, blockID, al, blockEmitter{
+		commentPrefix: "//",
+		cfKeywords:    goControlFlowKeywords,
+		namePrefix:    "extractedBlock_",
+		bodyIndent:    "\t",
+		openHelper:    func(n string) string { return "func " + n + "() {\n" },
+		closeHelper:   "}\n",
+	})
 }
 
 // synthesizePythonBlock is synthesizeGoBlock adapted for Python:
 // snake_case helper name, `#` comments, 4-space body indent, and the
 // Python control-flow keyword set.
 func synthesizePythonBlock(a, b scan.Snippet, blockID string, al Alignment) Suggestion {
-	if len(al.Common) == 0 {
-		return Suggestion{Note: "rejected: no common lines between blocks"}
-	}
-	if reason, ok := rejectControlFlowAsymmetryWithKeywords(al.Holes,
-		[]string{"return", "break", "continue", "raise", "yield"}); !ok {
-		return Suggestion{Note: reason}
-	}
-
-	helperName := "extracted_block_" + blockID
-	body := reindentBlock(a.Code, "    ")
-	divergence := formatDivergenceComment(al.Holes, "#")
-
-	src := strings.Builder{}
-	src.WriteString("# codetwin: starter helper extracted from the shared block\n")
-	src.WriteString("# " + nonEmpty(a.Name, "<block A>") +
-		" + " + nonEmpty(b.Name, "<block B>") +
-		" (block " + blockID + ").\n")
-	src.WriteString("# This is a literal copy of the first side's block — a statement\n")
-	src.WriteString("# run, not a whole function. Adapt control flow (returns, error\n")
-	src.WriteString("# paths) and replace the call sites by hand.\n")
-	src.WriteString(freeIdentComment(a.Code, a.Lang, "#"))
-	if divergence != "" {
-		src.WriteString(divergence)
-	}
-	src.WriteString("def " + helperName + "():\n")
-	src.WriteString(body)
-
-	return Suggestion{
-		HelperName: helperName,
-		HelperSrc:  src.String(),
-		Confidence: blockConfidence(a, b, al),
-	}
-}
-
-// blockConfidence mirrors the v1 emitters' confidence formula:
-// CommonLines / max(linesA, linesB) over the two block slices.
-func blockConfidence(a, b scan.Snippet, al Alignment) float64 {
-	aLines := strings.Count(strings.TrimRight(a.Code, "\n"), "\n") + 1
-	bLines := strings.Count(strings.TrimRight(b.Code, "\n"), "\n") + 1
-	maxLines := aLines
-	if bLines > maxLines {
-		maxLines = bLines
-	}
-	if maxLines <= 0 {
-		return 0
-	}
-	return float64(al.CommonLines()) / float64(maxLines)
+	return synthesizeBlockPair(a, b, blockID, al, blockEmitter{
+		commentPrefix: "#",
+		cfKeywords:    pythonControlFlowKeywords,
+		namePrefix:    "extracted_block_",
+		bodyIndent:    "    ",
+		openHelper:    func(n string) string { return "def " + n + "():\n" },
+	})
 }
 
 // freeIdentComment renders the parameter TODO line: the free
@@ -465,7 +456,7 @@ func pythonAssignIndex(l string) int {
 // their contents can't contribute identifiers. Stripped bytes become
 // spaces, preserving line structure for the per-line binding scan.
 // Go: " ' ` literals, // line comments, /* */ block comments.
-// Python: " ' literals (including a naive """ / ''' handling), #
+// Python: " ' literals (including naive triple-quote handling), #
 // line comments.
 func stripStringsAndComments(code string, lang tokenizer.Language) string {
 	b := []byte(code)

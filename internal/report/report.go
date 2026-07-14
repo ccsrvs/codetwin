@@ -419,13 +419,15 @@ func PrepareBlocks(blocks []BlockClone, opts Options) ([]BlockClone, int) {
 		}
 		visible = append(visible, b)
 	}
-	visible = sortAndLimit(visible, blockLess, opts.Limit)
+	visible = sortAndLimit(visible, BlockLess, opts.Limit)
 	return visible, suppressed
 }
 
-// blockLess orders block clones best-first: higher containment, then
-// bigger block (min-side non-blank lines), then range names.
-func blockLess(a, b BlockClone) bool {
+// BlockLess orders block clones best-first: higher containment, then
+// bigger block (min-side non-blank lines), then range names. Exported
+// so the CLI's pre-dedup ordering (sortBlockClones) and PrepareBlocks
+// share one definition of "best".
+func BlockLess(a, b BlockClone) bool {
 	if a.Containment != b.Containment {
 		return a.Containment > b.Containment
 	}
@@ -626,13 +628,20 @@ func SplitPairsByCluster(pairs []Pair, clusters []Cluster) (outside []Pair, coll
 	return outside, collapsed, relations
 }
 
+// printSectionTitle emits the bold-white banner line every findings
+// section shares (SIMILARITY PAIRS, RELATED CLUSTERS, PARTIAL CLONES,
+// REFACTORING CLUSTERS).
+func printSectionTitle(w io.Writer, title string, opts Options) {
+	fmt.Fprintf(w, "%s%s %s%s\n\n",
+		color(bold, opts), color(white, opts), title, color(reset, opts))
+}
+
 // printRelations renders one line per pair of related clusters.
 func printRelations(w io.Writer, relations []ClusterRelation, opts Options) {
 	if len(relations) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%s%s RELATED CLUSTERS%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "RELATED CLUSTERS", opts)
 	for _, r := range relations {
 		_, clr := classify(r.Max)
 		fmt.Fprintf(w, "  %sCluster %d ↔ Cluster %d%s — %d pairs, %sup to %3.0f%%%s\n",
@@ -759,8 +768,7 @@ func printHeader(w io.Writer, opts Options) {
 }
 
 func printPairs(w io.Writer, pairs []Pair, opts Options) {
-	fmt.Fprintf(w, "%s%s SIMILARITY PAIRS%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "SIMILARITY PAIRS", opts)
 
 	for _, p := range pairs {
 		label, clr := classifyPair(p)
@@ -861,8 +869,7 @@ func printPartialClones(w io.Writer, blocks []BlockClone, opts Options) {
 	if len(blocks) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%s%s PARTIAL CLONES%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "PARTIAL CLONES", opts)
 	for _, b := range blocks {
 		fmt.Fprintf(w, "  %s%s[PARTIAL CLONE   ]%s  %s%3.0f%% contained%s · %d lines\n",
 			color(orange, opts), color(bold, opts), color(reset, opts),
@@ -893,8 +900,7 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 		return
 	}
 
-	fmt.Fprintf(w, "%s%s REFACTORING CLUSTERS%s\n\n",
-		color(bold, opts), color(white, opts), color(reset, opts))
+	printSectionTitle(w, "REFACTORING CLUSTERS", opts)
 
 	for _, c := range clusters {
 		if c.Score > 0 {
