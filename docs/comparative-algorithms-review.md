@@ -31,13 +31,19 @@ with the commands shown._
 > the default self-scan: **34 pairs / 8 clusters**, all production
 > findings.
 >
-> **§5.3 block-level detection is now grounded**: `testdata/bench/blocks`
-> (5 positives, 3 boilerplate negatives) + `TestBlockClones_GroundTruth`
-> define the acceptance contract (skipped until the detector lands), and
-> `TestBlockClones_FixturesAreInvisibleAtFunctionLevel` runs live to
-> enforce that every positive stays under the function-level threshold.
-> The detector implementation (§5.3) and §5.1/§5.2 granularity modes
-> remain open.
+> **§5.3 block-level detection is grounded AND implemented**:
+> `testdata/bench/blocks` (5 positives, 3 boilerplate negatives) +
+> `TestBlockClones_GroundTruth` define the acceptance contract — now
+> passing un-skipped against `internal/blocks` (seed–extend–chain over
+> shared winnowing fingerprints, exact-token verification, containment
+> ≥ 0.85, matched-line floor 8 on both sides). Gray-band candidates are
+> collected inside `BuildMatrix`; findings render in a `PARTIAL CLONES`
+> section / `partial_clones` JSON array behind `--min-block-lines`
+> (default 8, 0 = off), with test↔test blocks suppressed by default
+> like pairs. The review's dilution demo (verbatim 15-line block in
+> ~45-line hosts, pair score 0.37) now surfaces as `100% contained`.
+> Self-scan: 12 genuine partial clones by default, byte-identical
+> across runs. §5.1/§5.2 granularity modes remain open.
 
 ## Executive summary
 
