@@ -84,6 +84,30 @@ is an isolated duplicate that doesn't generalize beyond two callers.
 individually, pairs before clusters). `--json` output is always flat —
 machine consumers see every pair regardless.
 
+## Test code segregation (default)
+
+Files matching each language's test convention (`*_test.go`,
+`test_*.py` / `*_test.py` / `tests/`, `*.spec.*` / `*.test.*` /
+`__tests__/`, `src/test/`, Rust `tests/`, `*_test.exs` / `test/`) are
+classified as test code by path. Test↔test pairs and clusters whose
+members are all test snippets are suppressed from the default report
+and replaced with one summary line each, e.g.
+`1,874 test↔test pairs suppressed (--include-tests to show)`.
+Test↔production pairs and mixed clusters always render — copy-paste
+across the prod/test boundary is a real finding.
+
+Why: test functions are short and forced into a common shape by the API
+under test; they differ mostly in identifiers and string literals,
+which normalization erases. They really are token-clones — just rarely
+actionable ones, and on test-heavy repos they can be ~98% of the report.
+
+`--include-tests` restores the full listing. In JSON, suppression
+removes the findings from `pairs`/`clusters` and adds a top-level
+`suppressed` object with the counts; with `--include-tests` the JSON is
+identical to the pre-segregation schema. Scores and clustering are
+unchanged — this is purely a presentation filter, applied after the
+threshold and before `--limit`.
+
 ## What moves the labels
 
 - `--threshold N` filters which pairs are *reported*. Doesn't change the math, just hides anything below.
@@ -110,6 +134,8 @@ machine consumers see every pair regardless.
 - `--verbose` includes weak similarities in addition to the labelled
   tiers. For memory reasons pairs are only materialized down to
   `max(0.30, threshold − 0.20)`, so even `--verbose` bottoms out there.
+- `--include-tests` restores test↔test pairs and test-only clusters,
+  which are suppressed by default (see "Test code segregation" above).
 - `--eps` only affects clusters. Stricter (lower) eps means tighter clusters
   with fewer members each; looser (higher) eps admits weaker pairs and grows
   chains. The default 0.35 keeps cluster linking aligned with the

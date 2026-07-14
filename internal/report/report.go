@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,8 @@ type Pair struct {
 	LinesB     int     // non-blank line count of snippet B's chunk
 	LangA      string  // detected language of snippet A (e.g. "Go", "Python"); empty when unknown
 	LangB      string  // detected language of snippet B; empty when unknown
+	IsTestA    bool    // snippet A's file path follows its language's test convention
+	IsTestB    bool    // snippet B's file path follows its language's test convention
 
 	// ProvenanceA / ProvenanceB carry git blame metadata for each
 	// endpoint, populated when --blame is on. Nil when blame wasn't
@@ -75,6 +78,20 @@ type Cluster struct {
 	// each other — a low MinScore relative to Score is the tell. Zero
 	// when never computed (e.g. clusters built outside main.go).
 	MinScore float64
+
+	// TestOnly marks clusters whose every member is a test snippet.
+	// Such clusters are suppressed by default (Options.IncludeTests
+	// restores them); mixed test/production clusters always render.
+	TestOnly bool
+}
+
+// Suppressed counts findings dropped by the default test-code
+// segregation: test↔test pairs and clusters whose members are all test
+// snippets. Counted after threshold filtering, so the numbers describe
+// findings that would otherwise have rendered.
+type Suppressed struct {
+	TestTestPairs    int
+	TestOnlyClusters int
 }
 
 // Preview is a code excerpt to display under a pair or cluster member.
@@ -176,6 +193,20 @@ type Options struct {
 	Limit         int      // cap pairs and clusters at N items each (0 = no limit)
 	CrossLangOnly bool     // keep only pairs whose two snippets have different, known languages
 
+	// IncludeTests keeps test↔test pairs and test-only clusters in the
+	// report. By default (false) they are suppressed and replaced by a
+	// one-line summary — test scaffolding is forced into a common shape
+	// by the API under test, so test↔test token-clones are rarely
+	// actionable. test↔production pairs and mixed clusters always render.
+	IncludeTests bool
+
+	// Suppressed carries counts from an upstream Prepare call. Callers
+	// that Prepare before Render (to build previews, say) should copy
+	// the returned counts here so Render's summary can report them —
+	// Render's own internal Prepare sees already-filtered data and
+	// would otherwise count zero.
+	Suppressed Suppressed
+
 	// Flat lists every pair individually, the pre-cluster-first
 	// behaviour. By default the terminal report is cluster-first: a
 	// clone family of n members implies n·(n-1)/2 pairs, so families
@@ -203,8 +234,9 @@ const (
 )
 
 // Prepare applies the report pipeline to raw pairs+clusters: filter by
-// Options.Threshold (unless Verbose), then sort by Options.Sort, then cap
-// each section to Options.Limit.
+// Options.Threshold (unless Verbose), suppress test↔test pairs and
+// test-only clusters (unless Options.IncludeTests), then sort by
+// Options.Sort, then cap each section to Options.Limit.
 //
 // Order matters for performance on big repos. Filtering before sorting
 // drops millions of below-threshold pairs before they pay the n-log-n
@@ -212,11 +244,16 @@ const (
 // full sort entirely — turning 20s of sorting on 11M pairs into a single
 // O(n log k) pass.
 //
+// Test suppression runs after the threshold/cross-lang checks so the
+// returned Suppressed counts describe only findings that would have
+// rendered, and before the limit so --limit applies to what remains.
+//
 // Both Render and JSON consumers call Prepare so the two output formats
 // always reflect the same set of findings.
-func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster) {
+func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster, Suppressed) {
+	var sup Suppressed
 	visiblePairs := pairs
-	if !opts.Verbose || opts.CrossLangOnly {
+	if !opts.Verbose || opts.CrossLangOnly || !opts.IncludeTests {
 		visiblePairs = make([]Pair, 0, len(pairs))
 		for _, p := range pairs {
 			if !opts.Verbose && p.Score < opts.Threshold {
@@ -225,13 +262,29 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster)
 			if opts.CrossLangOnly && (p.LangA == "" || p.LangB == "" || p.LangA == p.LangB) {
 				continue
 			}
+			if !opts.IncludeTests && p.IsTestA && p.IsTestB {
+				sup.TestTestPairs++
+				continue
+			}
 			visiblePairs = append(visiblePairs, p)
 		}
 	}
 
+	visibleClusters := clusters
+	if !opts.IncludeTests {
+		visibleClusters = make([]Cluster, 0, len(clusters))
+		for _, c := range clusters {
+			if c.TestOnly {
+				sup.TestOnlyClusters++
+				continue
+			}
+			visibleClusters = append(visibleClusters, c)
+		}
+	}
+
 	visiblePairs = sortAndLimit(visiblePairs, pairLessFunc(opts.Sort), opts.Limit)
-	visibleClusters := sortAndLimit(clusters, clusterLessFunc(opts.Sort), opts.Limit)
-	return visiblePairs, visibleClusters
+	visibleClusters = sortAndLimit(visibleClusters, clusterLessFunc(opts.Sort), opts.Limit)
+	return visiblePairs, visibleClusters, sup
 }
 
 // sortAndLimit returns up to `limit` items in the order defined by `less`
@@ -302,20 +355,27 @@ func (h *topKHeap[T]) Pop() any {
 // n·(n-1)/2 pairs, and listing them individually buries everything else.
 // Options.Flat restores the flat everything-is-a-pair listing.
 func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
-	visiblePairs, visibleClusters := Prepare(pairs, clusters, opts)
+	visiblePairs, visibleClusters, sup := Prepare(pairs, clusters, opts)
+	// Callers that prepared upstream pass their counts via opts; our own
+	// Prepare call re-counts anything still present, so the sum is right
+	// whether the input was raw or already prepared.
+	sup.TestTestPairs += opts.Suppressed.TestTestPairs
+	sup.TestOnlyClusters += opts.Suppressed.TestOnlyClusters
 
 	printHeader(w, opts)
 
 	if len(visiblePairs) == 0 && len(visibleClusters) == 0 {
-		fmt.Fprintf(w, "\n%s  No similarities found above threshold %.0f%%%s\n\n",
+		fmt.Fprintf(w, "\n%s  No similarities found above threshold %.0f%%%s\n",
 			color(green, opts), opts.Threshold*100, color(reset, opts))
+		printSuppressed(w, sup, opts)
+		fmt.Fprintln(w)
 		return
 	}
 
 	if opts.Flat {
 		printPairs(w, visiblePairs, opts)
 		printClusters(w, visibleClusters, opts)
-		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, opts)
+		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, sup, opts)
 		return
 	}
 
@@ -329,7 +389,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	for _, r := range relations {
 		crossCollapsed += r.Count
 	}
-	printSummary(w, shownPairs, visiblePairs, visibleClusters, collapsed, crossCollapsed, opts)
+	printSummary(w, shownPairs, visiblePairs, visibleClusters, collapsed, crossCollapsed, sup, opts)
 }
 
 // ClusterRelation aggregates the pairs whose endpoints sit in two
@@ -662,7 +722,7 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 // allVisible so "Exact clones" describes the scan, not just the
 // standalone leftovers (a repo whose exact clones all live inside
 // clusters would otherwise report "Exact clones 0").
-func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, opts Options) {
+func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, sup Suppressed, opts Options) {
 	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
 	for _, p := range allVisible {
 		// Bucket by the same gated classification the pair labels use,
@@ -710,8 +770,56 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 		fmt.Fprintf(w, "  %sWeak similarities%s %s%d%s\n",
 			color(grey, opts), color(reset, opts), color(grey, opts), weak, color(reset, opts))
 	}
-	fmt.Fprintf(w, "  %sClusters found%s    %s%d%s\n\n",
+	fmt.Fprintf(w, "  %sClusters found%s    %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(green, opts), len(clusters), color(reset, opts))
+	printSuppressed(w, sup, opts)
+	fmt.Fprintln(w)
+}
+
+// printSuppressed emits one summary line per suppressed-finding class
+// (test↔test pairs, test-only clusters). No-op when nothing was
+// suppressed, so reports without test code look exactly as before.
+func printSuppressed(w io.Writer, sup Suppressed, opts Options) {
+	if sup.TestTestPairs > 0 {
+		fmt.Fprintf(w, "  %s%s test↔test %s suppressed (--include-tests to show)%s\n",
+			color(grey, opts), groupDigits(sup.TestTestPairs),
+			plural(sup.TestTestPairs, "pair", "pairs"), color(reset, opts))
+	}
+	if sup.TestOnlyClusters > 0 {
+		fmt.Fprintf(w, "  %s%s test-only %s suppressed (--include-tests to show)%s\n",
+			color(grey, opts), groupDigits(sup.TestOnlyClusters),
+			plural(sup.TestOnlyClusters, "cluster", "clusters"), color(reset, opts))
+	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// groupDigits renders n with comma thousands separators ("1819" → "1,819").
+func groupDigits(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var sb strings.Builder
+	if neg {
+		sb.WriteByte('-')
+	}
+	pre := len(s) % 3
+	if pre == 0 {
+		pre = 3
+	}
+	sb.WriteString(s[:pre])
+	for i := pre; i < len(s); i += 3 {
+		sb.WriteByte(',')
+		sb.WriteString(s[i : i+3])
+	}
+	return sb.String()
 }
 
 // tier groups the per-band facts (boundary, terminal label, color, JSON

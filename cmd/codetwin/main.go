@@ -83,6 +83,7 @@ func main() {
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
+	includeTests := flag.Bool("include-tests", false, "include test↔test pairs and test-only clusters in the report; by default they are suppressed and replaced by a one-line summary")
 	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
@@ -136,7 +137,7 @@ func main() {
 		applied := flagsExplicitlySet()
 		applyConfigDefaults(cfg.Defaults, applied,
 			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
-			preview, previewLines, sortMode, limit, minConfLines)
+			preview, previewLines, sortMode, limit, minConfLines, includeTests)
 	}
 
 	ignoreMatcher, err := compileIgnoreMatcher(cfg)
@@ -321,6 +322,11 @@ func main() {
 	debugf("similarity.BuildMatrix: %d pairs above materialization floor (%.2f)",
 		len(pairs), similarity.MaterializationFloor(*threshold))
 
+	// Tag each pair endpoint with its snippet's test-file classification
+	// so report.Prepare can segregate test↔test findings by default.
+	// Metadata only — no score or matrix changes.
+	markTestPairs(pairs, snippets)
+
 	if pairIgnoreMatcher != nil {
 		var ignored int
 		pairs, ignored = applyPairIgnores(pairs, matrix, snippets, pairIgnoreMatcher)
@@ -349,6 +355,7 @@ func main() {
 		snippetNames[i] = s.Name
 	}
 	clusters := buildReportClusters(groups, matrix, snippetNames, *threshold)
+	markTestOnlyClusters(clusters, snippets)
 	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
 	if *since != "" {
@@ -364,6 +371,7 @@ func main() {
 		Sort:          report.SortMode(*sortMode),
 		Limit:         *limit,
 		CrossLangOnly: *crossLangOnly,
+		IncludeTests:  *includeTests,
 		Flat:          *flat,
 	}
 
@@ -371,9 +379,13 @@ func main() {
 	// previews scoped to just the snippets that will actually render.
 	// On a big repo this avoids an O(shown²) MatchRange storm over
 	// thousands of snippets when --limit means we'll only show a handful.
-	visiblePairs, visibleClusters := report.Prepare(pairs, clusters, opts)
-	debugf("prepared: %d visible pairs, %d visible clusters",
-		len(visiblePairs), len(visibleClusters))
+	visiblePairs, visibleClusters, suppressed := report.Prepare(pairs, clusters, opts)
+	// Render re-runs Prepare on the already-filtered slices, which counts
+	// zero suppressions — carry the real counts through Options.
+	opts.Suppressed = suppressed
+	debugf("prepared: %d visible pairs, %d visible clusters (%d test↔test pairs, %d test-only clusters suppressed)",
+		len(visiblePairs), len(visibleClusters),
+		suppressed.TestTestPairs, suppressed.TestOnlyClusters)
 
 	// --suggest <pair-id> short-circuits the rest of the report. We
 	// look up across all materialized pairs (not just visiblePairs) so
@@ -411,7 +423,7 @@ func main() {
 			suggestions = buildSuggestionMap(visiblePairs, snippets)
 			debugf("--suggest-all: built %d suggestions", len(suggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, opts.Previews, suggestions)
+		printJSON(visiblePairs, visibleClusters, opts.Previews, suggestions, suppressed)
 		debugf("done (json)")
 		return
 	}
@@ -680,6 +692,18 @@ type jsonOutput struct {
 	Pairs    []jsonPair             `json:"pairs"`
 	Clusters []jsonCluster          `json:"clusters"`
 	Previews map[string]jsonPreview `json:"previews,omitempty"`
+
+	// Suppressed summarizes findings dropped by the default test-code
+	// segregation. Omitted entirely when nothing was suppressed — in
+	// particular with --include-tests, so that flag preserves the exact
+	// pre-segregation JSON schema for CI consumers.
+	Suppressed *jsonSuppressed `json:"suppressed,omitempty"`
+}
+
+// jsonSuppressed mirrors report.Suppressed in the JSON schema.
+type jsonSuppressed struct {
+	TestTestPairs    int `json:"test_test_pairs,omitempty"`
+	TestOnlyClusters int `json:"test_only_clusters,omitempty"`
 }
 
 type jsonPair struct {
@@ -752,9 +776,16 @@ type jsonPreview struct {
 // pairs and clusters as JSON. Sort and limit are applied upstream via
 // report.Prepare so JSON consumers see the same set of findings as the
 // terminal renderer. When suggestions is non-nil, each pair's
-// suggested_patch field is populated by ID lookup.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview, suggestions map[string]jsonPatch) {
+// suggested_patch field is populated by ID lookup. Non-zero suppressed
+// counts add a top-level `suppressed` summary object.
+func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview, suggestions map[string]jsonPatch, suppressed report.Suppressed) {
 	out := jsonOutput{}
+	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 {
+		out.Suppressed = &jsonSuppressed{
+			TestTestPairs:    suppressed.TestTestPairs,
+			TestOnlyClusters: suppressed.TestOnlyClusters,
+		}
+	}
 	if len(previews) > 0 {
 		out.Previews = make(map[string]jsonPreview, len(previews))
 		for k, v := range previews {
@@ -895,7 +926,7 @@ func applyConfigDefaults(
 	threshold *float64, plain *bool, jsonOut *bool, verbose *bool,
 	minLines *int, eps *float64, minPts *int,
 	preview *bool, previewLines *int, sortMode *string, limit *int,
-	minConfLines *int,
+	minConfLines *int, includeTests *bool,
 ) {
 	if d.Threshold != nil && !explicit["threshold"] {
 		*threshold = *d.Threshold
@@ -932,6 +963,9 @@ func applyConfigDefaults(
 	}
 	if d.MinConfidenceLines != nil && !explicit["min-confidence-lines"] {
 		*minConfLines = *d.MinConfidenceLines
+	}
+	if d.IncludeTests != nil && !explicit["include-tests"] {
+		*includeTests = *d.IncludeTests
 	}
 }
 
@@ -1021,6 +1055,42 @@ func attachProvenance(pairs []report.Pair, provs map[string]*report.Provenance) 
 		if p, ok := provs[pairs[i].NameB]; ok {
 			pairs[i].ProvenanceB = p
 		}
+	}
+}
+
+// markTestPairs sets each pair's IsTestA/IsTestB from the endpoint
+// snippets' test-file classification (scan.IsTestFile on the scanned
+// path). Presentation metadata only: report.Prepare uses the flags to
+// suppress test↔test pairs by default; scores are untouched.
+func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
+	isTest := make(map[string]bool, len(snippets))
+	for _, s := range snippets {
+		isTest[s.Name] = s.IsTest
+	}
+	for i := range pairs {
+		pairs[i].IsTestA = isTest[pairs[i].NameA]
+		pairs[i].IsTestB = isTest[pairs[i].NameB]
+	}
+}
+
+// markTestOnlyClusters sets Cluster.TestOnly on clusters whose every
+// member is a test snippet. Runs after buildReportClusters so the flag
+// reflects the final member lists (low-cohesion splitting may have
+// regrouped members). Same presentation-only contract as markTestPairs.
+func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
+	isTest := make(map[string]bool, len(snippets))
+	for _, s := range snippets {
+		isTest[s.Name] = s.IsTest
+	}
+	for i := range clusters {
+		allTest := len(clusters[i].Members) > 0
+		for _, m := range clusters[i].Members {
+			if !isTest[m] {
+				allTest = false
+				break
+			}
+		}
+		clusters[i].TestOnly = allTest
 	}
 }
 
@@ -1158,6 +1228,9 @@ FLAGS:
   --debug              print phase checkpoints with elapsed time to stderr
   --cross-lang-only    report only pairs whose two snippets are in different languages
                        (e.g. duplicate logic across Go service + TS dashboard)
+  --include-tests      include test↔test pairs and test-only clusters; by default
+                       they are suppressed and replaced by a one-line summary
+                       (test↔production pairs and mixed clusters always render)
   --since string       PR-delta mode: keep only findings where ≥1 endpoint overlaps
                        lines changed since <ref> (e.g. main, HEAD~5, abc123).
                        Requires git on PATH and a git repository.

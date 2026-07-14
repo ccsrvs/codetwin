@@ -122,6 +122,7 @@ codetwin --suggest <pair-id> ./src
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
+| `--include-tests` | false | Include test↔test pairs and test-only clusters; by default they are suppressed and summarized in one line. See [Test code segregation](#test-code-segregation). |
 | `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
@@ -175,6 +176,53 @@ that drop below the eps threshold don't cluster. Raise it (e.g.
 report, or pass `--min-confidence-lines 0` to turn it off and restore
 raw scores.
 
+## Test code segregation
+
+Test scaffolding dominates clone reports: test functions are short,
+forced into a common shape by the API under test, and differ mostly in
+identifiers and string literals — exactly the token classes the
+normalizer erases. On a self-scan of this repository, 98% of all
+reported pairs had at least one `_test.go` endpoint. They are genuine
+token-clones, but they are rarely actionable findings.
+
+By default codetwin therefore classifies each file by its language's
+test-file convention and:
+
+- **keeps test↔production pairs** (copy-paste between prod and tests is
+  a real finding) and **mixed clusters** (some test, some prod members);
+- **suppresses test↔test pairs** and **clusters whose members are all
+  test snippets**, replacing them with one summary line each:
+
+```
+  1,874 test↔test pairs suppressed (--include-tests to show)
+  64 test-only clusters suppressed (--include-tests to show)
+```
+
+In `--json` mode the suppressed findings are omitted from `pairs` /
+`clusters` and a `"suppressed": {"test_test_pairs": N,
+"test_only_clusters": M}` object is added. `--include-tests` (or
+`"include_tests": true` under `defaults` in `.codetwin.json`) restores
+the previous behaviour exactly — full pair list, no `suppressed`
+object — so existing CI contracts stay stable.
+
+Classification is by path only (no file contents are read):
+
+| Language | Test convention |
+|---|---|
+| Go | `*_test.go` |
+| Python | `test_*.py`, `*_test.py`, or a `tests/` / `test/` directory component |
+| JS / TS | `*.spec.*`, `*.test.*`, or a `__tests__/` directory component |
+| Java | a `src/test/` path component sequence |
+| Rust | a `tests/` directory component |
+| Elixir | `*_test.exs`, or a `test/` directory component |
+
+This is presentation-layer only: scores, the similarity matrix, and
+clustering are unchanged, and suppression happens after threshold
+filtering (the summary counts only findings that would have rendered)
+and before `--limit` (the limit applies to what remains). Unlike adding
+`**/*_test.go` to `ignore_paths`, segregation keeps test files in the
+scan, so cross-boundary test↔production findings still surface.
+
 ## Sorting
 
 `--sort` applies the same mode to both pairs and clusters, with each section
@@ -208,7 +256,8 @@ individual false-positive pairs. CLI flags always win over config defaults.
     "preview_lines": 15,
     "sort": "size",
     "limit": 20,
-    "min_confidence_lines": 20
+    "min_confidence_lines": 20,
+    "include_tests": false
   },
   "ignore_paths": [
     "vendor/**",
