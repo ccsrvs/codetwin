@@ -15,8 +15,9 @@
 //   - ignore_patterns change (patterns hash mismatch)
 //   - cache storage format change (Version constant bump)
 //   - algorithm parameter change — fingerprint.DefaultK/DefaultW,
-//     fingerprint.SchemaVersion, tokenizer.SchemaVersion — via the
-//     SchemaTag stored in the cache file (no Version bump needed)
+//     fingerprint.SchemaVersion, tokenizer.SchemaVersion,
+//     splitter.SchemaVersion — via the SchemaTag stored in the cache
+//     file (no Version bump needed)
 package cache
 
 import (
@@ -30,6 +31,7 @@ import (
 	"sync"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -45,9 +47,9 @@ const Filename = ".codetwin-cache.bin"
 //
 // Version is only ONE component of the schema check — algorithm
 // parameters (fingerprint k/w, fingerprint hash schema, tokenizer
-// schema) are folded in via SchemaTag, so retuning any of them
-// invalidates the cache without a manual bump here. Reserve Version
-// bumps for changes to the cache's own storage format.
+// schema, splitter schema) are folded in via SchemaTag, so retuning
+// any of them invalidates the cache without a manual bump here.
+// Reserve Version bumps for changes to the cache's own storage format.
 //
 // v4: added Chunk.Kind and class-span chunks for Python/Java/JS
 // (§5.2 class-level granularity). Entries written by earlier versions
@@ -57,21 +59,24 @@ const Version uint32 = 4
 
 // SchemaTag encodes every algorithm parameter whose change makes cached
 // per-file output stale: the cache storage version, the fingerprint
-// k-gram size and winnowing window, the fingerprint hash schema, and the
-// tokenizer output schema. Load drops any cache whose stored tag differs
-// from the current one, so a retune of ANY of these constants
-// auto-invalidates old caches — the historical trap was that only a
-// manual Version bump did.
+// k-gram size and winnowing window, the fingerprint hash schema, the
+// tokenizer output schema, and the splitter output schema. Load drops
+// any cache whose stored tag differs from the current one, so a retune
+// of ANY of these constants auto-invalidates old caches — the
+// historical trap was that only a manual Version bump did. The splitter
+// component closes the last such gap: a splitter change (new chunk
+// kinds or spans, e.g. Elixir defmodule class chunks) alters the chunk
+// set for UNCHANGED file content, which no content hash can catch.
 func SchemaTag() string {
 	return schemaTag(Version, fingerprint.DefaultK, fingerprint.DefaultW,
-		fingerprint.SchemaVersion, tokenizer.SchemaVersion)
+		fingerprint.SchemaVersion, tokenizer.SchemaVersion, splitter.SchemaVersion)
 }
 
 // schemaTag is the parameterized core of SchemaTag, split out so tests
 // can prove each component independently changes the tag.
-func schemaTag(cacheVersion uint32, k, w, fpSchema, tokSchema int) string {
-	return fmt.Sprintf("cache=%d;fp=k%d,w%d,s%d;tok=s%d",
-		cacheVersion, k, w, fpSchema, tokSchema)
+func schemaTag(cacheVersion uint32, k, w, fpSchema, tokSchema, splitSchema int) string {
+	return fmt.Sprintf("cache=%d;fp=k%d,w%d,s%d;tok=s%d;split=s%d",
+		cacheVersion, k, w, fpSchema, tokSchema, splitSchema)
 }
 
 // Chunk mirrors enough of the tokenizer + fingerprint output to reconstruct

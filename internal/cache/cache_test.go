@@ -225,20 +225,21 @@ func TestLoad_PreSplitterSchemaCacheRejected(t *testing.T) {
 // into the schema tag must change the tag on its own, so a retune of any
 // single one auto-invalidates the cache.
 func TestSchemaTag_DistinctPerComponent(t *testing.T) {
-	base := schemaTag(3, 10, 4, 1, 1)
+	base := schemaTag(3, 10, 4, 1, 1, 1)
 	variants := map[string]string{
-		"cache version":      schemaTag(4, 10, 4, 1, 1),
-		"fingerprint k":      schemaTag(3, 11, 4, 1, 1),
-		"winnowing w":        schemaTag(3, 10, 5, 1, 1),
-		"fingerprint schema": schemaTag(3, 10, 4, 2, 1),
-		"tokenizer schema":   schemaTag(3, 10, 4, 1, 2),
+		"cache version":      schemaTag(4, 10, 4, 1, 1, 1),
+		"fingerprint k":      schemaTag(3, 11, 4, 1, 1, 1),
+		"winnowing w":        schemaTag(3, 10, 5, 1, 1, 1),
+		"fingerprint schema": schemaTag(3, 10, 4, 2, 1, 1),
+		"tokenizer schema":   schemaTag(3, 10, 4, 1, 2, 1),
+		"splitter schema":    schemaTag(3, 10, 4, 1, 1, 2),
 	}
 	for name, v := range variants {
 		if v == base {
 			t.Errorf("changing %s did not change the schema tag: %q", name, base)
 		}
 	}
-	if got := schemaTag(3, 10, 4, 1, 1); got != base {
+	if got := schemaTag(3, 10, 4, 1, 1, 1); got != base {
 		t.Errorf("schemaTag must be deterministic: %q vs %q", got, base)
 	}
 }

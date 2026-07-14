@@ -94,11 +94,19 @@ func TestElixirModuleChunks_KindGateAndNestingSuppression(t *testing.T) {
   def add(n, x) do
     n + x
   end
+
+  def sub(n, x) do
+    n - x
+  end
 end
 `
 	codeB := `defmodule LedgerB do
   def plus(n, x) do
     n + x
+  end
+
+  def minus(n, x) do
+    n - x
   end
 end
 `
@@ -113,7 +121,9 @@ end
 			case splitter.KindClass:
 				mod, haveMod = s, true
 			default:
-				def, haveDef = s, true
+				if !haveDef {
+					def, haveDef = s, true
+				}
 			}
 		}
 		if !haveMod || !haveDef {

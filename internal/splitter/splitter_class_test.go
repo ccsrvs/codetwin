@@ -447,10 +447,16 @@ IO.puts("after")
 func TestSplit_ElixirNestedModulesEmitBothSpans(t *testing.T) {
 	// Mirrors Java's nested-type behavior: both the outer and the inner
 	// module get a span, and the defs inside remain individual chunks.
+	// (Both modules aggregate ≥ 2 defs; nested defs count toward the
+	// outer span too.)
 	code := `defmodule Outer do
   defmodule Inner do
     def ping(x) do
       x
+    end
+
+    def pong(y) do
+      y
     end
   end
 
@@ -467,18 +473,45 @@ end
 	if classes[0].Symbol != "Outer" || classes[1].Symbol != "Inner" {
 		t.Errorf("module symbols = %q, %q; want Outer, Inner", classes[0].Symbol, classes[1].Symbol)
 	}
-	if classes[0].StartLine != 1 || classes[0].EndLine != 11 {
-		t.Errorf("Outer span = %d-%d, want 1-11", classes[0].StartLine, classes[0].EndLine)
+	if classes[0].StartLine != 1 || classes[0].EndLine != 15 {
+		t.Errorf("Outer span = %d-%d, want 1-15", classes[0].StartLine, classes[0].EndLine)
 	}
-	if classes[1].StartLine != 2 || classes[1].EndLine != 6 {
-		t.Errorf("Inner span = %d-%d, want 2-6", classes[1].StartLine, classes[1].EndLine)
+	if classes[1].StartLine != 2 || classes[1].EndLine != 10 {
+		t.Errorf("Inner span = %d-%d, want 2-10", classes[1].StartLine, classes[1].EndLine)
 	}
 	var symbols []string
 	for _, f := range funcs {
 		symbols = append(symbols, f.Symbol)
 	}
-	if len(symbols) != 2 || symbols[0] != "ping" || symbols[1] != "outer_fun" {
-		t.Errorf("def chunks = %v, want [ping outer_fun]", symbols)
+	if len(symbols) != 3 || symbols[0] != "ping" || symbols[1] != "pong" || symbols[2] != "outer_fun" {
+		t.Errorf("def chunks = %v, want [ping pong outer_fun]", symbols)
+	}
+}
+
+func TestSplit_ElixirSingleDefModuleNotSpanChunked(t *testing.T) {
+	// The §5.2 value-add is aggregation: a module span matters when a
+	// copied module's reordered defs would scatter across method-level
+	// pairs. A single-def module aggregates nothing — its span is the
+	// def plus defmodule/end boilerplate, which duplicates the def
+	// finding while inflating similarity. Elixir's pervasive
+	// one-callback modules (`use GenServer` + one handle_*) would
+	// otherwise pair up as module↔module near-noise (the
+	// negative-short bench fixture pins the report-level contract).
+	code := `defmodule MetricsSink do
+  use GenServer
+
+  def handle_cast({:record, name, value}, state) do
+    {:noreply, Map.update(state, name, value, &(&1 + value))}
+  end
+end
+`
+	chunks := Split("m.ex", code, tokenizer.Elixir)
+	classes, funcs := chunksByKind(chunks)
+	if len(classes) != 0 {
+		t.Errorf("single-def module must not be span-chunked, got %+v", classes)
+	}
+	if len(funcs) != 1 || funcs[0].Symbol != "handle_cast" {
+		t.Errorf("the def itself must still be chunked, got %+v", funcs)
 	}
 }
 
@@ -541,6 +574,10 @@ func TestSplit_ElixirModuleShorthandFormNotSpanChunked(t *testing.T) {
 defmodule Real do
   def run(x) do
     x
+  end
+
+  def rerun(x) do
+    run(x)
   end
 end
 `

@@ -1005,15 +1005,23 @@ func TestSynthesize_ElixirMultiClauseErrorClause(t *testing.T) {
 
 // Given the multi-clause fixture, when the splitter runs, then each
 // of the 4 def clauses (binary guard, integer guard, error pattern,
-// nil shorthand) becomes its own chunk. Pins the splitter's behaviour
-// on multi-clause idioms.
+// nil shorthand) becomes its own function-kind chunk. Pins the
+// splitter's behaviour on multi-clause idioms. (Since §5.2 the
+// wrapping defmodule is ALSO emitted, as a class-kind span — filtered
+// out here because extraction targets defs, mirroring the CLI's
+// class-pair rejection.)
 func TestSplit_ElixirRealworldMultiClause_AllClauses(t *testing.T) {
 	t.Helper()
 	data, err := os.ReadFile("../../testdata/refactor/elixir/realworld-multiclause/a.ex")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	chunks := splitter.Split("a.ex", string(data), tokenizer.Elixir)
+	var chunks []splitter.Chunk
+	for _, c := range splitter.Split("a.ex", string(data), tokenizer.Elixir) {
+		if c.Kind != splitter.KindClass {
+			chunks = append(chunks, c)
+		}
+	}
 	if len(chunks) != 4 {
 		t.Fatalf("expected 4 clauses, got %d (%v)", len(chunks), summariseChunks(chunks))
 	}

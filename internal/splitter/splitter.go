@@ -17,6 +17,19 @@ import (
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
+// SchemaVersion identifies the splitter's OUTPUT schema: bump it
+// whenever a change to chunk extraction alters the chunk set produced
+// for unchanged source (new chunk kinds, new container spans, boundary
+// fixes). It is folded into cache.SchemaTag so any bump auto-invalidates
+// cached chunks — without it, a splitter change silently serves stale
+// chunk sets, because the file content (and thus the cache key) is
+// unchanged.
+//
+// v2: Elixir `defmodule` blocks are emitted as KindClass spans; entries
+// cached under v1 lack the module chunks and would drop module↔module
+// findings.
+const SchemaVersion = 2
+
 // ChunkKind classifies the granularity of a chunk. Downstream scoring
 // only compares chunks of the same kind: a class span weakly resembling
 // a small function across files is container-vs-part noise, not a
@@ -29,7 +42,8 @@ const (
 	// class-level granularity existed.
 	KindFunction ChunkKind = "function"
 	// KindClass covers class-span chunks: Python `class` blocks, Java
-	// class/interface/enum/record bodies, JS/TS `class` declarations.
+	// class/interface/enum/record bodies, JS/TS `class` declarations,
+	// and Elixir `defmodule` blocks.
 	KindClass ChunkKind = "class"
 )
 
@@ -669,20 +683,68 @@ func jsHeaderMatch(line string) (string, bool) {
 
 // ── Elixir ────────────────────────────────────────────────────────────────────
 
-var exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp|defmacro|defmacrop)\s+(\w+)`)
+var (
+	exDefRe = regexp.MustCompile(`^([ \t]*)(?:def|defp|defmacro|defmacrop)\s+(\w+)`)
 
-// splitElixir chunks an Elixir source file into per-def blocks. Each
+	// exModuleRe matches a `defmodule` header, capturing the (possibly
+	// dotted) module name. Only the block form (`defmodule Foo do … end`)
+	// is span-chunked: real-world defmodules always fit the name and the
+	// `do` on one line, so a header that doesn't end in bare `do` (the
+	// `, do:` shorthand, or a hypothetical wrapped header) is skipped
+	// rather than risking a misparse.
+	exModuleRe = regexp.MustCompile(`^([ \t]*)defmodule\s+([\w.]+)`)
+)
+
+// splitElixir chunks an Elixir source file into per-def blocks PLUS one
+// module-span chunk per `defmodule Foo do … end` block (§5.2
+// class-level granularity — Elixir's container equivalent). Each def
 // chunk runs from the def's header line through either the matching
 // `end` keyword (block form: `def name(args) do … end`) or the last
 // continuation line of the body expression (shorthand form: `def
-// name(args), do: expr`). Module wrappers (`defmodule`) are not
-// chunked; their inner defs are. Recognised heads: `def`, `defp`,
-// `defmacro`, `defmacrop`.
+// name(args), do: expr`). Recognised heads: `def`, `defp`, `defmacro`,
+// `defmacrop`.
+//
+// A defmodule header emits a KindClass chunk spanning through its
+// matching `end` (indent-based, reusing the def machinery) and the
+// loop then DESCENDS into the body (advances one line) so the defs —
+// and any nested defmodule, which gets its own span, mirroring Java's
+// nested types — are still emitted. Def chunks, by contrast, jump past
+// their bodies, so a defmodule generated inside a def/defmacro body
+// (e.g. inside a `quote` block) is not emitted — the same rule as a JS
+// class declared inside a function body.
+//
+// A module span is only emitted when the module body contains at
+// least two definition headers. The §5.2 value-add is AGGREGATION — a
+// copied module whose reordered defs would otherwise scatter across
+// method-level pairs — and a single-def module aggregates nothing:
+// its span is the def chunk plus `defmodule`/`end` boilerplate, which
+// duplicates the def finding while inflating similarity (Elixir's
+// pervasive one-callback modules — `use GenServer` plus one handle_*
+// — would flood reports with module↔module near-noise; the
+// negative-short bench fixture pins this). Def-less modules (e.g.
+// schema-only DSL blocks) likewise get no span and keep today's
+// whole-file fallback behavior.
 func splitElixir(code string) []Chunk {
 	lines := strings.Split(code, "\n")
 	var chunks []Chunk
 	i := 0
 	for i < len(lines) {
+		if m := exModuleRe.FindStringSubmatch(lines[i]); m != nil {
+			if exHeaderEndsWithDo(lines[i]) {
+				modIndent := indentLen(m[1])
+				if end := exFindMatchingEnd(lines, i, modIndent); end >= 0 && exCountDefs(lines, i+1, end-1) >= 2 {
+					chunks = append(chunks, Chunk{
+						StartLine: i + 1,
+						EndLine:   end + 1,
+						Symbol:    m[2],
+						Kind:      KindClass,
+						Code:      strings.Join(lines[i:end+1], "\n"),
+					})
+				}
+			}
+			i++
+			continue
+		}
 		m := exDefRe.FindStringSubmatch(lines[i])
 		if m == nil {
 			i++
@@ -703,6 +765,20 @@ func splitElixir(code string) []Chunk {
 		i = end + 1
 	}
 	return chunks
+}
+
+// exCountDefs counts definition headers (def/defp/defmacro/defmacrop)
+// on lines[from..to] inclusive. Nested modules' defs count toward the
+// outer module too — the outer span aggregates them just the same.
+// Used by splitElixir's ≥2-defs module-span gate.
+func exCountDefs(lines []string, from, to int) int {
+	n := 0
+	for j := from; j <= to && j < len(lines); j++ {
+		if exDefRe.MatchString(lines[j]) {
+			n++
+		}
+	}
+	return n
 }
 
 // exFindDefEnd determines where a def chunk ends. The header itself

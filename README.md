@@ -309,6 +309,12 @@ addition to** the method chunks inside them:
 - **JS / TS** — `class Foo { ... }` declarations. Class *expressions*
   (`const A = class { ... }`) are not span-chunked (their methods still
   are).
+- **Elixir** — `defmodule Foo do ... end` blocks (block form only;
+  nested modules each get their own span, like Java's nested types).
+  A module wrapping fewer than two defs is not span-chunked — its span
+  would just duplicate the single def plus `defmodule`/`end`
+  boilerplate, and Elixir's pervasive one-callback modules would
+  otherwise pair up as module↔module near-noise.
 
 This catches the case method-level granularity underreports: a whole
 class copied and renamed with its methods slightly reordered surfaces
@@ -328,8 +334,7 @@ same-kind pair.
 Go and Rust have no class-span equivalent: Go methods live *outside*
 the type block, so "class-level" there means struct+methodset symbol
 grouping — a possible follow-up, tracked in
-`docs/comparative-algorithms-review.md` §5.2, as is Elixir `defmodule`
-grouping.
+`docs/comparative-algorithms-review.md` §5.2.
 
 With `--preview` on, each side renders a line-numbered excerpt of its
 exact block range (capped by `--preview-lines`); in JSON the
@@ -556,9 +561,10 @@ Breaks each file into per-definition chunks: every Python `def`, Go `func`
 Elixir `def`/`defp`. Each chunk is then compared independently. A 500-line
 module with one duplicated 20-line helper now scores high on that helper
 instead of being washed out by 480 lines of unrelated code. For the
-class-based languages (Python, Java, JS/TS) the splitter ALSO emits one
-class-span chunk per `class`/`interface`/`enum`/`record` declaration,
-tagged with a distinct chunk kind — see "Class-level matching" below.
+container languages (Python, Java, JS/TS, Elixir) the splitter ALSO emits
+one class-span chunk per `class`/`interface`/`enum`/`record`/`defmodule`
+declaration, tagged with a distinct chunk kind — see "Class-level
+matching" below.
 
 **Fingerprint** (`internal/fingerprint`)
 Implements the Winnowing algorithm. Slides a window over k-gram hashes and

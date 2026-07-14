@@ -213,11 +213,17 @@ file mode answers "which files should be merged."
 
 ## Class-level findings
 
-For Python, Java, and JS/TS, classes are chunked twice: once per method
-and once as a whole class span (named `path:start-end ClassName`). A
-class↔class finding means the *container* matches — a copied class,
-renamed, possibly with its methods reordered — which method-level
-pairs alone underreport (each method pair looks small and independent).
+For Python, Java, JS/TS, and Elixir, containers are chunked twice: once
+per method/def and once as a whole class span (named
+`path:start-end ClassName` — for Elixir, the span is the
+`defmodule Foo do ... end` block and the symbol is the dotted module
+name). A class↔class finding means the *container* matches — a copied
+class or module, renamed, possibly with its methods reordered — which
+method-level pairs alone underreport (each method pair looks small and
+independent). Elixir modules wrapping fewer than two defs get no span:
+a single-def module's span would only duplicate the def finding, and
+one-callback modules (`use GenServer` + one `handle_*`) are pervasive
+enough to become noise.
 Class chunks are only ever compared against other class chunks: a class
 never pairs with a loose function or a single method across files
 (container-vs-part comparisons are dilution noise, not clones), and a

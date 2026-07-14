@@ -587,9 +587,12 @@ impl Foo {
 }
 
 // Given an Elixir module with one top-level `def` block, when the
-// splitter runs, then exactly one chunk is produced — the def itself,
-// not the wrapping defmodule. Detection should match individual
-// functions rather than swallowing whole modules. Cycle 1.
+// splitter runs, then exactly one FUNCTION chunk is produced — the def
+// itself. Detection matches individual functions rather than
+// swallowing whole modules; since §5.2 the wrapping defmodule is ALSO
+// emitted, as a separate class-kind span (covered in
+// splitter_class_test.go), which never mixes with def-level scoring.
+// Cycle 1.
 func TestSplit_ElixirModuleAndDef(t *testing.T) {
 	code := `defmodule TaxA do
   def price_with_tax(amount) do
@@ -599,16 +602,16 @@ func TestSplit_ElixirModuleAndDef(t *testing.T) {
   end
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
-	got := make([]string, 0, len(chunks))
-	for _, c := range chunks {
+	_, funcs := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
+	got := make([]string, 0, len(funcs))
+	for _, c := range funcs {
 		got = append(got, c.Symbol)
 	}
 	if len(got) != 1 || got[0] != "price_with_tax" {
 		t.Fatalf("expected [price_with_tax], got %v", got)
 	}
-	if !strings.Contains(chunks[0].Code, "rounded * 0.07") {
-		t.Errorf("expected chunk body to include `rounded * 0.07`; got:\n%s", chunks[0].Code)
+	if !strings.Contains(funcs[0].Code, "rounded * 0.07") {
+		t.Errorf("expected chunk body to include `rounded * 0.07`; got:\n%s", funcs[0].Code)
 	}
 }
 
@@ -625,9 +628,9 @@ func TestSplit_ElixirMultipleDefs(t *testing.T) {
   end
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
-	got := make([]string, 0, len(chunks))
-	for _, c := range chunks {
+	_, funcs := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
+	got := make([]string, 0, len(funcs))
+	for _, c := range funcs {
 		got = append(got, c.Symbol)
 	}
 	if len(got) != 2 || got[0] != "add" || got[1] != "mul" {
@@ -653,9 +656,9 @@ func TestSplit_ElixirMultiLineHeader(t *testing.T) {
   def index(conn, _), do: render(conn, "index.html")
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
+	_, chunks := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
 	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+		t.Fatalf("expected 2 def chunks, got %d", len(chunks))
 	}
 	if chunks[0].Symbol != "update" || chunks[1].Symbol != "index" {
 		t.Errorf("expected [update index], got [%s %s]", chunks[0].Symbol, chunks[1].Symbol)
@@ -682,9 +685,9 @@ func TestSplit_ElixirDoShorthandMultiLine(t *testing.T) {
   def other(x), do: x
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
+	_, chunks := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
 	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(chunks))
+		t.Fatalf("expected 2 def chunks, got %d", len(chunks))
 	}
 	if chunks[0].Symbol != "transform" {
 		t.Errorf("first chunk Symbol = %q, want transform", chunks[0].Symbol)
@@ -715,7 +718,7 @@ func TestSplit_ElixirDoShorthand(t *testing.T) {
   end
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
+	_, chunks := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
 	got := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		got = append(got, c.Symbol)
@@ -754,7 +757,7 @@ func TestSplit_ElixirDefmacro(t *testing.T) {
   end
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
+	_, chunks := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
 	got := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		got = append(got, c.Symbol)
@@ -777,7 +780,7 @@ func TestSplit_ElixirDefp(t *testing.T) {
   end
 end
 `
-	chunks := Split("a.ex", code, tokenizer.Elixir)
+	_, chunks := chunksByKind(Split("a.ex", code, tokenizer.Elixir))
 	got := make([]string, 0, len(chunks))
 	for _, c := range chunks {
 		got = append(got, c.Symbol)

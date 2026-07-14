@@ -352,8 +352,12 @@ granularity work.
 > score against other class chunks; mixed-kind pairs are skipped like
 > nested same-file pairs), pinned by the `bench/classes` category
 > (positive `python-class-clone` / `java-class-clone`, negative
-> `js-class-vs-loose-funcs`). Follow-ups: Go struct+methodset and
-> Elixir `defmodule` symbol-grouping (span-based chunks don't apply —
+> `js-class-vs-loose-funcs`). Elixir `defmodule` spans landed as a
+> follow-up (`elixir-module-clone` bench case; modules with < 2 defs
+> are not span-chunked — one-callback modules would be pure noise —
+> and the change added a splitter schema component to cache.SchemaTag
+> so pre-module-span caches invalidate). Remaining follow-ups: Go
+> struct+methodset symbol-grouping (span-based chunks don't apply —
 > methods live outside the type block), and JS class *expressions*
 > (`const A = class {}`), which are not span-chunked.
 
