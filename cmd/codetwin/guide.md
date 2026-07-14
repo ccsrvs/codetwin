@@ -15,7 +15,7 @@ shown as a label and a number. Bands use strict `>` thresholds:
 | NEAR CLONE | > 85% | Virtually identical with one or two token-level edits (a swapped literal, a different default arg). Treat as a clone unless the difference is intentional. |
 | STRUCTURAL TWIN | > 85%, lexical < 20% | Same token shape, different content: the pair's raw identifier/string vocabulary barely overlaps, so this is likely parallel boilerplate (table tests, per-field validators, generated handlers) rather than copy-paste. See "Structural twins" below. |
 | STRONG CLONE | > 65% | Same shape and most of the same structure, with substantive divergences. Parameterize the differing parts. |
-| REFACTOR TARGET | > 45% | Same general approach to the same problem, with real differences in execution. Evaluate whether a shared abstraction reduces duplication; sometimes "no" is the right answer. |
+| REFACTOR TARGET | > 45% | Same general approach to the same problem, with real differences in execution (`refactor_candidate` in JSON). Evaluate whether a shared abstraction reduces duplication; sometimes "no" is the right answer. |
 | WEAK SIMILARITY | ≤ 45% | Probably coincidental token overlap. Hidden by default; visible with `--verbose`. |
 
 ## The two sub-scores
@@ -431,7 +431,8 @@ the (astronomically unlikely) collision. For a pair the helper is a
 literal copy of A's body; for a partial clone it is A's block span
 wrapped in a fresh helper signature (see the PARTIAL CLONES section).
 Either way it's prefaced by a `Divergences (B vs A):` comment block
-listing exactly what differs (`//` for Go, `#` for Python). Codetwin
+listing exactly what differs (`//` for Go/Java/JS-TS/Rust, `#` for
+Python/Elixir). Codetwin
 doesn't rewrite the call sites — it plants a starting point so a human
 (or the Claude skill) can finish the extraction with full visibility
 on every divergence.
@@ -474,9 +475,15 @@ A few things worth knowing:
   `defmacro`/`defmacrop` block-form, `, do:` shorthand (single-line
   and split forms), multi-line wrapping headers, pattern-matched
   args, and `when` guards. The helper preserves the input's keyword
-  form and shorthand-vs-block style and ALWAYS carries a `# NOTE:
-  appended at file scope; Elixir defs must live inside a defmodule…`
-  comment, since Elixir cannot have free-standing defs.
+  form and shorthand-vs-block style; adjacent clauses of the same
+  name/arity are grouped into one multi-clause helper, and any
+  symbol-scoped `@doc`/`@spec` block above the def is carried onto
+  the helper (`@spec` renamed to match). The helper is inserted
+  inside the innermost defmodule enclosing the source def (before
+  its closing `end`, indented as a sibling def) so the patched file
+  compiles as emitted; only when no defmodule encloses the chunk
+  does it fall back to a file-scope append with a `# NOTE: appended
+  at file scope…` comment.
 - **Partial-clone (block) coverage.** Block suggestions ship for Go
   and Python only. The block is a statement run, not a function, so
   the emitter wraps it in a fresh signature with no parameters and a
@@ -484,12 +491,6 @@ A few things worth knowing:
   (lexical heuristic — package names may appear; full inference is out
   of scope). The diff inserts the helper right after side A's
   enclosing function instead of at end-of-file.
-  form and shorthand-vs-block style and is inserted inside the
-  innermost defmodule enclosing the source def (before its closing
-  `end`, indented as a sibling def) so the patched file compiles as
-  emitted; only when no defmodule encloses the chunk does it fall
-  back to a file-scope append with a `# NOTE: appended at file
-  scope…` comment.
 
 ## A note on config
 

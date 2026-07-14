@@ -34,6 +34,16 @@ What sets codetwin apart from other clone detectors:
   shared library" candidates platform teams have no other way to find.
   `--cross-repo-only` keeps just those. See
   [Cross-repo scanning](#cross-repo-scanning).
+- **Clone watchlist + drift alerts** — snapshot today's clone families with
+  `--update-baseline`, then gate CI with `--baseline`: one stderr line per
+  drift event (a new copy pasted in, a copy refactored away, a member's body
+  edited while its siblings weren't) and exit 1 on any drift. See
+  [Clone watchlist](#clone-watchlist-drift-alerts).
+- **Test code segregation** — test↔test findings (API-forced scaffolding
+  shape, rarely actionable) are suppressed by default and replaced with a
+  one-line summary, while test↔production copy-paste still renders.
+  `--include-tests` restores the full listing. See
+  [Test code segregation](#test-code-segregation).
 
 The git-aware features (`--since`, `--blame`, `--sort age`) require git on
 `PATH` and a git repository in the working directory; without them codetwin
@@ -122,7 +132,7 @@ codetwin --baseline .codetwin-baseline.json ./src   # exits 1 on drift
 # Annotate findings with git provenance, newest clones first
 codetwin --blame --sort age --limit 10 ./src
 
-# Suggest a starter helper for one Go-Go pair (look up <id> in --json output)
+# Suggest a starter helper for one same-language pair (look up <id> in --json output)
 codetwin --suggest <pair-id> ./src
 ```
 
@@ -139,7 +149,7 @@ codetwin --suggest <pair-id> ./src
 | `--min-pts` | `2` | DBSCAN minimum cluster size |
 | `--preview` | false | Show line-numbered code excerpts under each finding |
 | `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
-| `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
+| `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name`, `age`, `age-asc` (age modes require `--blame`) |
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
 | `--min-confidence-lines` | `10` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). On by default. See [Scoring](#scoring). |
 | `--min-block-lines` | `8` | Report sub-function partial clones spanning at least N matched lines on both sides (0 = off). See [Partial clones](#partial-clones-block-level). |
@@ -160,6 +170,7 @@ codetwin --suggest <pair-id> ./src
 | `--suggest-all` | false | With `--json`: populate `suggested_patch` on every visible pair and partial clone. |
 | `--skill` | false | Print the full skill guide (embedded in the binary) and exit |
 | `--guide` | false | Print the report interpretation guide and exit |
+| `--version` | false | Print the codetwin version and exit |
 
 ## Scoring
 
@@ -282,6 +293,23 @@ bigger extractions, or pass `--min-block-lines 0` to disable the
 channel entirely. Test↔test partial clones follow the same
 [test code segregation](#test-code-segregation) as pairs.
 
+With `--preview` on, each side renders a line-numbered excerpt of its
+exact block range (capped by `--preview-lines`); in JSON the
+`previews` map gains entries keyed by each side's `file:start-end`
+range name, so block previews never collide with the whole-chunk
+preview of the same snippet.
+
+Partial clones are also `--suggest` targets: pass the finding's 8-char
+`id` from the JSON output and codetwin emits a unified diff that wraps
+side A's block in a fresh helper (`extractedBlock_<id>` in Go,
+`extracted_block_<id>` in Python), inserted right after the enclosing
+function. The helper is a literal copy of the block — parameters are
+left as a `TODO(codetwin)` comment listing the free identifiers the
+block uses (a lexical heuristic; the human finishes the extraction).
+Block suggestions ship for Go and Python; other languages print a
+`note:` and exit 1. `--suggest-all --json` fills `suggested_patch` on
+every visible partial clone under the same per-language scope.
+
 ## Granularity
 
 By default codetwin compares per-definition chunks (functions, methods),
@@ -374,23 +402,6 @@ pair, but not in the partial-clone block channel: every method inside
 a container is already its own function chunk there, so container-level
 block detection would only re-find the same text — and a Go group's
 joined non-contiguous code would misreport block line ranges.
-
-With `--preview` on, each side renders a line-numbered excerpt of its
-exact block range (capped by `--preview-lines`); in JSON the
-`previews` map gains entries keyed by each side's `file:start-end`
-range name, so block previews never collide with the whole-chunk
-preview of the same snippet.
-
-Partial clones are also `--suggest` targets: pass the finding's 8-char
-`id` from the JSON output and codetwin emits a unified diff that wraps
-side A's block in a fresh helper (`extractedBlock_<id>` in Go,
-`extracted_block_<id>` in Python), inserted right after the enclosing
-function. The helper is a literal copy of the block — parameters are
-left as a `TODO(codetwin)` comment listing the free identifiers the
-block uses (a lexical heuristic; the human finishes the extraction).
-Block suggestions ship for Go and Python; other languages print a
-`note:` and exit 1. `--suggest-all --json` fills `suggested_patch` on
-every visible partial clone under the same per-language scope.
 
 ## Cross-repo scanning
 
@@ -489,11 +500,13 @@ test-file convention and:
 ```
   1,874 test↔test pairs suppressed (--include-tests to show)
   64 test-only clusters suppressed (--include-tests to show)
+  12 test↔test partial clones suppressed (--include-tests to show)
 ```
 
 In `--json` mode the suppressed findings are omitted from `pairs` /
-`clusters` and a `"suppressed": {"test_test_pairs": N,
-"test_only_clusters": M}` object is added. `--include-tests` (or
+`clusters` / `partial_clones` and a `"suppressed": {"test_test_pairs": N,
+"test_only_clusters": M, "test_test_blocks": K}` object is added (zero
+counts are omitted). `--include-tests` (or
 `"include_tests": true` under `defaults` in `.codetwin.json`) restores
 the previous behaviour exactly — full pair list, no `suppressed`
 object — so existing CI contracts stay stable.
@@ -618,6 +631,7 @@ individual false-positive pairs. CLI flags always win over config defaults.
     "sort": "size",
     "limit": 20,
     "min_confidence_lines": 20,
+    "min_block_lines": 8,
     "include_tests": false,
     "granularity": "function"
   },
@@ -678,6 +692,8 @@ snippets in a cluster.
 from snippet names before matching so your entries survive routine edits
 that shift line numbers.
 
+## Performance
+
 codetwin is designed to handle large repositories. A few mechanisms in
 play:
 
@@ -711,18 +727,25 @@ force off.
 ```
 codetwin/
 ├── cmd/codetwin/
-│   └── main.go                  # CLI: flag parsing, file collection, orchestration
+│   ├── main.go                  # CLI: flag parsing, file collection, orchestration
+│   ├── blocks.go                # Partial-clone orchestration + partial_clones JSON schema
+│   ├── repos.go                 # Cross-repo mode: repo labels + snippet namespacing
+│   └── baseline.go              # Clone-watchlist CLI glue (--update-baseline / --baseline)
 └── internal/
     ├── tokenizer/               # Language-aware lexing + normalization
     ├── splitter/                # Function/class-level chunking per language
     ├── fingerprint/             # Winnowing algorithm (structural similarity)
-    ├── similarity/              # TF-IDF vectors + cosine similarity (semantic)
+    ├── similarity/              # TF-IDF vectors + cosine similarity (semantic); matrix + pair materialization
+    ├── blocks/                  # Sub-function partial-clone detector (seed → extend → chain → verify)
     ├── cluster/                 # DBSCAN clustering
     ├── report/                  # ANSI terminal + plain text rendering
+    ├── refactor/                # --suggest pipeline: align → synthesize → place → patch
+    ├── baseline/                # Clone-watchlist snapshots + drift diffing
     ├── config/                  # .codetwin.json loading + ignore matching
     ├── cache/                   # .codetwin-cache.bin persistence
     ├── scan/                    # Per-file pipeline + parallel orchestrator (split → tokenize → fingerprint)
     ├── git/                     # Optional git integration: repo detection, diff parsing, blame
+    ├── bench/                   # Test-only ground-truth benchmark (detection-quality gate)
     └── pathutil/                # Lexical path helpers (Dedupe, Contains)
 ```
 
@@ -765,6 +788,16 @@ cosine similarity. This is the **semantic score** — it catches functionally
 similar code even when structure differs (e.g. a Python loop vs a Go loop
 with different control flow patterns).
 
+**Blocks** (`internal/blocks`)
+The sub-function partial-clone detector behind `--min-block-lines`.
+`BuildMatrix` hands it the "gray band" — same-language pairs that share
+fingerprints but score below the report threshold — and for each candidate it
+seeds on shared fingerprint positions, extends them to maximal
+exactly-matching token runs, chains runs across small gaps, and verifies each
+block with exact token comparison (containment ≥ 0.85 plus the matched-line
+floor on both sides). `cmd/codetwin/blocks.go` dedupes and packages the
+findings for the `PARTIAL CLONES` section / `partial_clones` JSON array.
+
 **Cluster** (`internal/cluster`)
 DBSCAN over the combined similarity matrix. Rather than reporting O(n²) pairs,
 it groups families of similar snippets into clusters. Each cluster is one
@@ -780,6 +813,24 @@ Renders results to stdout with ANSI colour-coded labels and cluster membership.
 Sort, threshold filter, and limit run in a shared `Prepare()` helper so
 terminal and JSON output reflect the same set of findings. `--plain` disables
 colour for CI pipelines. `--json` emits machine-readable output.
+
+**Refactor** (`internal/refactor`)
+The `--suggest` / `--suggest-all` pipeline: `align.go` computes a line-level
+LCS alignment over the raw source (common spans + divergence "holes"),
+`synth.go` dispatches to a per-language emitter that produces a starter
+helper (a literal copy of A's body with a divergence comment block),
+`place.go` finds the innermost enclosing class/defmodule for Java/Elixir
+placement, and `patch.go` wraps the helper in a unified diff. All six
+languages have pair emitters (blocks: Go and Python); synthesis is rejected
+with a structured note for cross-language pairs, class-level pairs,
+control-flow-asymmetric holes, and chunks without a recognisable header.
+
+**Baseline** (`internal/baseline`)
+The clone watchlist behind `--update-baseline` / `--baseline`: versioned,
+byte-deterministic JSON snapshots of the visible clusters (member keys are
+line-range-stripped, root-relative names plus a normalized-token body hash)
+and the drift diff that matches clusters by membership overlap and emits the
+five drift event kinds.
 
 **Config** (`internal/config`)
 Loads `.codetwin.json` from the working directory. Compiles `ignore_paths`
@@ -851,52 +902,51 @@ go test -run TestNormalize # single test by name
 
 ## Example output
 
+From `codetwin --preview testdata/sum_a.js testdata/sum_b.js`:
+
 ```
  codetwin · code similarity report
 ────────────────────────────────────────────────────────────
 
- SIMILARITY PAIRS
-
-  [STRONG CLONE    ]   85%
-    src/utils/sum.go:3-9 SumSlice
-         3 │ func SumSlice(nums []int) int {
-         4 │     total := 0
-         5 │     for i := 0; i < len(nums); i++ {
-         6 │         total += nums[i]
-         7 │     }
-         8 │     return total
-         9 │ }
-    src/aggregate.go:14-20 SumAll
-        14 │ func SumAll(values []int) int {
-        15 │     total := 0
-        16 │     for i := 0; i < len(values); i++ {
-        17 │         total += values[i]
-        18 │     }
-        19 │     return total
-        20 │ }
-  structural: 100%  semantic: 100%
-
  REFACTORING CLUSTERS
 
-  Cluster 1 — 2 snippets
-    · src/utils/sum.go:3-9 SumSlice
-    · src/aggregate.go:14-20 SumAll
+  Cluster 1 — 2 snippets · avg similarity  85% · cohesion  85%
+    · testdata/sum_a.js:1-7 sumArray
+         1 │ function sumArray(arr) {
+         2 │   let total = 0;
+         3 │   for (let i = 0; i < arr.length; i++) {
+         4 │     total += arr[i];
+         5 │   }
+         6 │   return total;
+         7 │ }
+    · testdata/sum_b.js:1-7 addNumbers
+         1 │ function addNumbers(nums) {
+         2 │   let result = 0;
+         3 │   for (let i = 0; i < nums.length; i++) {
+         4 │     result += nums[i];
+         5 │   }
+         6 │   return result;
+         7 │ }
 
  SUMMARY
 ────────────────────────────────────────────────────────────
-  Pairs shown       1
+  Pairs shown       0
+  In-cluster pairs  1 (inside the clusters above; --flat lists them)
   Exact clones      0
+  Near clones       0
   Strong clones     1
   Refactor targets  0
   Clusters found    1
 ```
 
-The two functions are token-identical (structural and semantic both
-100%), but at 7 non-blank lines each the default short-snippet dampener
-(`--min-confidence-lines 10`) scales the combined score to 85%. Run
-with `--min-confidence-lines 0` to see the raw 100% — it would render
-as a NEAR CLONE, since the EXACT CLONE label needs ≥ 10 non-blank
-lines on both sides.
+The default report is cluster-first: the pair between the two members
+renders once, as the cluster (`--flat` lists it individually, with its
+`structural: 100%  semantic: 100%` sub-score line). The two functions
+are token-identical, but at 7 non-blank lines each the default
+short-snippet dampener (`--min-confidence-lines 10`) scales the
+combined score to 85%. Run with `--min-confidence-lines 0` to see the
+raw 100% — it would render as a NEAR CLONE, since the EXACT CLONE
+label needs ≥ 10 non-blank lines on both sides.
 
 ## Recipes
 
@@ -913,7 +963,7 @@ codetwin --min-confidence-lines 20 --threshold 0.50 ./src
 # See raw, undampened scores (short-snippet dampening off)
 codetwin --min-confidence-lines 0 ./src
 
-# Strict CI gate — fail if any exact clones exist
+# Strict CI gate — fail if any exact or near clones exist
 codetwin --json --threshold 0.85 ./src | jq '.pairs | length' \
   | xargs -I{} test {} -eq 0
 

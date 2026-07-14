@@ -71,7 +71,7 @@ func main() {
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
-	minLines := flag.Int("min-lines", 3, "skip files with fewer than N non-blank lines")
+	minLines := flag.Int("min-lines", 3, "skip chunks with fewer than N non-blank lines")
 	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
@@ -1460,7 +1460,7 @@ FLAGS:
   --plain              no ANSI colors, suitable for pipes and CI
   --json               output as JSON
   --verbose            show all pairs including weak similarities
-  --min-lines int      skip files with fewer than N non-blank lines (default 3)
+  --min-lines int      skip chunks with fewer than N non-blank lines (default 3)
   --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
                        the 'strong clone' band)
   --min-pts int        DBSCAN min cluster size (default 2)
@@ -1504,6 +1504,13 @@ FLAGS:
                        drift exits 1 (CI gate). Both runs must use the same threshold/
                        eps/min-pts/granularity/include-tests. Mutually exclusive with
                        --update-baseline.
+  --suggest string     print a unified diff that adds a starter helper extracted from
+                       the pair or partial-clone block with the given 8-char ID (look
+                       it up in --json output). Pairs: all six languages; blocks: Go
+                       and Python. Rejections print a 'note' on stderr and exit 1.
+  --suggest-all        with --json: populate suggested_patch on every visible pair and
+                       partial clone (off by default — synthesis cost scales with
+                       finding count)
   --skill              print the full skill guide and exit
   --guide              print the report interpretation guide and exit
   --version            print the codetwin version and exit
