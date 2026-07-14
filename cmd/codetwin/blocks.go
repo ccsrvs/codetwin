@@ -145,6 +145,39 @@ func filterBlocksBySince(bcs []report.BlockClone, repoRoot string, diff git.Diff
 	return kept, dropped
 }
 
+// addBlockPreviews inserts a Preview for each side of every visible
+// partial clone into the previews map, keyed by the side's
+// "file:start-end" range name. Range-qualified keys keep block
+// previews from colliding with the whole-chunk preview of the same
+// snippet (chunk previews are keyed by the snippet's full name).
+// Unlike pair previews there is no MatchRange work: block matches
+// already carry exact line ranges, so each preview is just the block
+// slice of the host chunk's code, truncated to previewLines.
+func addBlockPreviews(
+	previews map[string]report.Preview,
+	blocks []report.BlockClone,
+	snippets []scan.Snippet,
+	previewLines int,
+) {
+	if len(blocks) == 0 {
+		return
+	}
+	byName := make(map[string]scan.Snippet, len(snippets))
+	for _, s := range snippets {
+		byName[s.Name] = s
+	}
+	for _, b := range blocks {
+		if s, ok := byName[b.ChunkA]; ok {
+			previews[b.RangeNameA()] = report.BuildBlockPreview(
+				s.Code, s.StartLine, b.AStartLine, b.AEndLine, previewLines)
+		}
+		if s, ok := byName[b.ChunkB]; ok {
+			previews[b.RangeNameB()] = report.BuildBlockPreview(
+				s.Code, s.StartLine, b.BStartLine, b.BEndLine, previewLines)
+		}
+	}
+}
+
 // blockPseudoSnippets resolves a block clone back to its two host
 // snippets and slices each side's chunk code down to the block's line
 // range, yielding the pseudo-snippets the refactor pipeline consumes.

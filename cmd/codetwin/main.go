@@ -430,6 +430,7 @@ func main() {
 			fmt.Fprint(os.Stderr, "\r\033[Kbuilding previews...")
 		}
 		opts.Previews = buildPreviews(visiblePairs, visibleClusters, snippets, *previewLines)
+		addBlockPreviews(opts.Previews, visibleBlocks, snippets, *previewLines)
 		debugf("previews built: %d", len(opts.Previews))
 	}
 

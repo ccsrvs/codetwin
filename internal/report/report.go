@@ -231,6 +231,37 @@ func BuildMatchPreview(code string, tokenLines []int, chunkStartLine, firstTok, 
 	}
 }
 
+// BuildBlockPreview returns a Preview of a block clone's exact line
+// range, sliced out of the enclosing chunk's code. Unlike
+// BuildMatchPreview there is no whole-chunk fallback: block matches
+// know their precise bounds, so the preview is always the block
+// itself, truncated to maxLines when positive (maxLines <= 0 shows
+// the whole block). blockStart/blockEnd are 1-based absolute source
+// lines (the BlockClone convention); chunkStartLine anchors them into
+// code.
+func BuildBlockPreview(code string, chunkStartLine, blockStart, blockEnd, maxLines int) Preview {
+	chunkLines := strings.Split(strings.TrimSuffix(code, "\n"), "\n")
+	first := blockStart - chunkStartLine
+	last := blockEnd - chunkStartLine
+	if first < 0 {
+		first = 0
+	}
+	if last > len(chunkLines)-1 {
+		last = len(chunkLines) - 1
+	}
+	if last < first {
+		last = first
+	}
+	selected := chunkLines[first : last+1]
+	if maxLines > 0 && len(selected) > maxLines {
+		selected = selected[:maxLines]
+	}
+	return Preview{
+		StartLine: chunkStartLine + first,
+		Text:      strings.Join(selected, "\n"),
+	}
+}
+
 // SortMode controls the ordering of pairs and clusters in the rendered
 // report. The same mode applies to both sections, with each section using
 // the natural interpretation: pair size = max(LinesA, LinesB), cluster size
@@ -806,7 +837,11 @@ func printPreview(w io.Writer, name string, opts Options) {
 
 // printPartialClones renders the block-level findings section. Each
 // finding shows the containment score, the block's line ranges in both
-// files, and (when known) the enclosing function of each side.
+// files, and (when known) the enclosing function of each side. With
+// --preview on, each side also gets a line-numbered excerpt of its
+// matched block range — Options.Previews is keyed by the side's
+// "file:start-end" range name (range-qualified so a block preview
+// never collides with the whole-chunk preview of the same snippet).
 func printPartialClones(w io.Writer, blocks []BlockClone, opts Options) {
 	if len(blocks) == 0 {
 		return
@@ -819,7 +854,9 @@ func printPartialClones(w io.Writer, blocks []BlockClone, opts Options) {
 			color(orange, opts), b.Containment*100, color(reset, opts),
 			minInt(b.LinesA, b.LinesB))
 		printBlockSide(w, b.RangeNameA(), b.SymbolA, opts)
+		printPreview(w, b.RangeNameA(), opts)
 		printBlockSide(w, b.RangeNameB(), b.SymbolB, opts)
+		printPreview(w, b.RangeNameB(), opts)
 		fmt.Fprintln(w)
 	}
 }
