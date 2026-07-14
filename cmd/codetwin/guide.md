@@ -126,6 +126,34 @@ is an isolated duplicate that doesn't generalize beyond two callers.
 individually, pairs before clusters). `--json` output is always flat —
 machine consumers see every pair regardless.
 
+### Reading cross-repo clusters
+
+When codetwin was invoked with two or more directory roots, each root
+is a "repo" and snippet names carry a `repo:` prefix with the path
+shown relative to its root (`svc-a:src/handler.go:10-30 Parse`). A
+cluster whose members span at least two repos gets a **cross-repo** tag
+in its header, and its members render grouped per repo:
+
+```
+  Cluster 1 — 2 snippets · avg similarity 100% · cohesion 100% · cross-repo
+    svc-a — 1 snippet
+      · svc-a:pricing.go:7-26 ApplyDiscount
+    svc-b — 1 snippet
+      · svc-b:billing.go:7-26 ApplyDiscount
+```
+
+Read a cross-repo cluster as a **shared-library candidate**: the same
+logic is maintained independently in every listed repo, so a fix in one
+copy won't reach the others until someone extracts it. Triage them
+above same-repo clusters — the repo group lines tell you at a glance
+which teams the extraction has to involve. A cluster confined to one
+repo renders flat (the name prefix already names the repo) and is an
+ordinary within-repo refactor.
+
+`--cross-repo-only` filters the whole report down to repo-spanning
+findings. In JSON, look for `cross_repo: true` on clusters and
+`repo_a`/`repo_b` on pairs and partial clones.
+
 ## Partial clones (PARTIAL CLONES section)
 
 Everything above scores *whole functions* against each other, and that

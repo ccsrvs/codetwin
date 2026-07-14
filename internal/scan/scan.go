@@ -75,6 +75,14 @@ type Snippet struct {
 	// splitter.KindClass, everything else splitter.KindFunction.
 	// BuildMatrix only scores same-kind pairs against each other.
 	Kind splitter.ChunkKind
+
+	// Repo is the repo label the snippet belongs to in a multi-root
+	// ("cross-repo") scan: the base name of the directory root the file
+	// was collected under. Empty on single-root and file-argument
+	// invocations — the scan package never sets it; cmd/codetwin
+	// assigns it (and prefixes Name with "repo:") only when the CLI was
+	// given two or more directory roots.
+	Repo string
 }
 
 // ProcessFiles runs the per-file split → tokenize → fingerprint pipeline

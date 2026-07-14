@@ -28,6 +28,12 @@ What sets codetwin apart from other clone detectors:
   anyway and reports it with exact line ranges in a dedicated
   `PARTIAL CLONES` section. See
   [Partial clones (block level)](#partial-clones-block-level).
+- **Cross-repo / org-level scanning** — point codetwin at N service repos at
+  once (`codetwin ../svc-a ../svc-b ../svc-c`) and clusters that span repos
+  are tagged `cross-repo` with members grouped per repo: the "promote to a
+  shared library" candidates platform teams have no other way to find.
+  `--cross-repo-only` keeps just those. See
+  [Cross-repo scanning](#cross-repo-scanning).
 
 The git-aware features (`--since`, `--blame`, `--sort age`) require git on
 `PATH` and a git repository in the working directory; without them codetwin
@@ -99,6 +105,13 @@ codetwin --verbose ./src
 # Cross-language only — duplicate logic across Go service + TS dashboard
 codetwin --cross-lang-only --threshold 0.50 ./
 
+# Cross-repo scan — each directory root is a repo; clusters spanning repos
+# are tagged cross-repo ("promote to a shared library" candidates)
+codetwin ../svc-a ../svc-b ../svc-c
+
+# Only findings whose endpoints live in different repos
+codetwin --cross-repo-only ../svc-a ../svc-b ../svc-c
+
 # CI gate: fail on any new strong clone introduced since main
 codetwin --since main --threshold 0.85 --json ./src
 
@@ -136,6 +149,7 @@ codetwin --suggest <pair-id> ./src
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
+| `--cross-repo-only` | false | Report only findings whose endpoints are in different repos; requires ≥ 2 directory roots. See [Cross-repo scanning](#cross-repo-scanning). |
 | `--include-tests` | false | Include test↔test pairs and test-only clusters; by default they are suppressed and summarized in one line. See [Test code segregation](#test-code-segregation). |
 | `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
@@ -358,6 +372,83 @@ block uses (a lexical heuristic; the human finishes the extraction).
 Block suggestions ship for Go and Python; other languages print a
 `note:` and exit 1. `--suggest-all --json` fills `suggested_patch` on
 every visible partial clone under the same per-language scope.
+
+## Cross-repo scanning
+
+Existing clone detectors are repo-scoped, so platform teams have no good
+way to find logic that should be a shared library across N service
+repos. Codetwin's matrix already operates on a flat snippet list, so
+cross-repo scanning is just an invocation shape: **pass two or more
+directory roots and each root is treated as a "repo"**. No flag — the
+mode is automatic.
+
+```bash
+# The org-level recipe: check out the services side by side, then
+git clone git@github.com:org/svc-a && git clone git@github.com:org/svc-b && git clone git@github.com:org/svc-c
+codetwin svc-a svc-b svc-c
+
+# Only the findings that span repos — the shared-library candidates
+codetwin --cross-repo-only svc-a svc-b svc-c
+
+# Machine-readable: which clusters cross repo boundaries?
+codetwin --json svc-a svc-b svc-c | jq '.clusters[] | select(.cross_repo)'
+```
+
+What changes in cross-repo mode (and *only* then — single-root and
+file-argument invocations are byte-identical to before):
+
+- **Repo labels.** Each root is labelled by the base name of its
+  absolute path (`../teams/payments/api` → `api`). Two roots with the
+  same base name disambiguate deterministically by input order: `api`,
+  `api~2`, `api~3` …
+- **Namespaced snippet names.** Names become
+  `repo:path:start-end Symbol`, with the file path shown *relative to
+  its root*: `svc-a:src/handler.go:10-30 Parse`. Files passed directly
+  as arguments alongside directory roots keep their plain names and no
+  repo label.
+- **Per-repo cluster grouping.** A cluster whose members span ≥ 2 repos
+  gets a `cross-repo` tag in its header, and its members render grouped
+  under one `repo — N snippets` line per repo:
+
+  ```
+    Cluster 1 — 2 snippets · avg similarity 100% · cohesion 100% · cross-repo
+      svc-a — 1 snippet
+        · svc-a:pricing.go:7-26 ApplyDiscount
+      svc-b — 1 snippet
+        · svc-b:billing.go:7-26 ApplyDiscount
+  ```
+
+  Clusters confined to one repo render flat, exactly as before (the
+  name prefix already tells you the repo).
+- **JSON fields.** Pairs and `partial_clones` entries gain
+  `repo_a`/`repo_b`; clusters gain `member_repos` (parallel to
+  `members`) and `cross_repo`. All are `omitempty`, so the single-root
+  schema is untouched.
+- **`--cross-repo-only`.** Keeps only findings whose endpoints live in
+  different repos: pairs and partial clones with two distinct repo
+  labels, clusters spanning ≥ 2 repos. Composes with
+  `--cross-lang-only` (both filters apply). Errors out when fewer than
+  two directory roots were given.
+
+Interactions worth knowing:
+
+- **`ignore_pairs` match the un-prefixed name.** Write endpoints
+  without the repo label (`"src/handler.go Parse"`, matched against the
+  root-relative path) — one config works for single-root and multi-root
+  invocations alike.
+- **The cache just works.** Cache keys are absolute-path based, so
+  repeat org scans are incremental; only changed files pay the
+  tokenize/fingerprint cost again.
+- **`--since` / `--blame` require one git repository.** Both resolve a
+  single repo, so they error out (fail-fast, with a clear message) when
+  the directory roots live in *different* git repositories. Roots
+  inside one repository — `codetwin --since main ./internal ./cmd` —
+  keep working. Known limitation; per-repo provenance is future work.
+- **Behavior change vs. pre-cross-repo versions:** any invocation with
+  two or more directory roots now namespaces names (`codetwin ./internal
+  ./cmd` reports `internal:…` / `cmd:…`). Scripts that scan multiple
+  roots and parse names must account for the prefix; single-root
+  invocations are unaffected.
 
 ## Test code segregation
 

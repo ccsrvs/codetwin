@@ -1,6 +1,6 @@
 # codetwin roadmap — unique-niche bets
 
-_Last updated: 2026-07-02. Sources: planning conversation that shipped
+_Last updated: 2026-07-14 (bet #6 shipped). Sources: planning conversation that shipped
 commits `159a298`, `59fe97f`, `f53a739` on
 `claude/explore-unique-features-4rInJ`; detection-quality overhaul
 merged as PR #7 (`fix/matching-pipeline-review`)._
@@ -14,7 +14,7 @@ merged as PR #7 (`fix/matching-pipeline-review`)._
 | 3 | Cross-language as the headline | **Shipped** | `--cross-lang-only`, `lang_{a,b}` JSON |
 | 4 | Refactor patch emission | **Shipped (all 6 languages)** | `--suggest <pair-id>`, `--suggest-all`, `id` + `suggested_patch` in JSON |
 | 5 | Clone watchlist + drift alerts | **Shipped** | `--update-baseline`, `--baseline`, `drift` JSON array |
-| 6 | Cross-repo / org-level scanning | Not started | (existing CLI already accepts multiple roots; needs namespacing + per-repo cluster grouping) |
+| 6 | Cross-repo / org-level scanning | **Shipped** | automatic on ≥2 directory roots; `--cross-repo-only`, `repo_a`/`repo_b`/`member_repos`/`cross_repo` JSON, per-repo cluster grouping + `cross-repo` tag |
 | 7 | Behavioural / runtime equivalence | Flagged longshot | — |
 | — | Detection quality + report SNR (PR #7) | **Shipped** | `internal/bench` ground-truth benchmark, retuned scoring defaults, cluster-first report, `--flat` |
 
@@ -230,19 +230,54 @@ params mismatch errors, byte-determinism through the binary); self-host
 re-compare unchanged, zero drift).
 
 ### 6. Cross-repo / org-level scanning
-**Status: Not started.** The CLI already accepts multiple roots and the
-matrix operates on a flat snippet list — what's missing is repo-aware
-namespacing of snippet IDs and per-repo cluster grouping.
+**Status: Shipped (2026-07-14).**
 
 **Why nobody has it:** Existing tools are repo-scoped. Platform teams
 have no good way to find logic that should be a shared library across N
 service repos. Codetwin's cache makes incremental org-scale scanning
 viable.
 
-**Proposed surface:**
-- `codetwin --repos repos.txt` or `codetwin ../svc-a ../svc-b ../svc-c`.
-- Cluster output groups by repo to make "promote to library"
-  candidates obvious.
+**What landed:**
+- **Automatic on ≥2 directory roots** — `codetwin ../svc-a ../svc-b
+  ../svc-c` treats each root as a "repo"; no opt-in flag. (The
+  `--repos repos.txt` file form was dropped as redundant — shells
+  expand `$(cat repos.txt)` fine.) Single-root and file-argument
+  invocations are byte-identical to before; that compatibility
+  contract is pinned by subprocess tests.
+- **Repo labels & namespacing** — label = base name of the root's
+  absolute path; duplicate base names disambiguate by input order
+  (`api`, `api~2`). Snippet names become `repo:relpath:start-end Sym`
+  (root-relative path). Assigned post-scan in `cmd/codetwin/repos.go`,
+  so the cache stays repo-agnostic.
+- **Per-repo cluster grouping** — clusters spanning ≥2 repos get a
+  `cross-repo` header tag and members grouped under one
+  `repo — N snippets` line per repo; single-repo clusters render flat.
+- **JSON** — pairs and `partial_clones` gain `repo_a`/`repo_b`,
+  clusters gain `member_repos` + `cross_repo`; all omitempty.
+- **`--cross-repo-only`** (`report.Options.CrossRepoOnly`, mirroring
+  `--cross-lang-only`'s plumbing; the two compose) — keeps pairs/blocks
+  with two distinct repo labels and clusters spanning ≥2 repos; errors
+  out with <2 directory roots.
+- **Interactions** — per-repo test conventions still classify
+  (cross-repo test↔test pairs suppressed by default); `ignore_pairs`
+  endpoints match the UN-prefixed root-relative name; `--suggest` pair
+  IDs resolve in multi-root runs; absolute-path cache keys make org
+  rescans incremental; `--since`/`--blame` fail fast with a clear
+  error when roots live in different git repositories (documented
+  limitation — per-repo provenance is future work).
+
+**Verified:** `internal/report/crossrepo_test.go` +
+`cmd/codetwin/repos_test.go` (unit), `testdata/multirepo/svc-{a,b,c}`
+fixture, `cmd/codetwin/multirepo_subprocess_test.go` (13 subprocess
+cases incl. the roadmap's jq acceptance check and the single-root
+compatibility pins), `cmd/codetwin/multirepo_perf_test.go` (6 sibling
+repos: cold ~0.4s, cache-warm ~0.3s, identical output).
+
+**Behavior change:** multi-root invocations that predate this bet
+(e.g. `codetwin ./internal ./cmd`) now report namespaced names
+(`internal:…`, `cmd:…`) and repo JSON fields. Deliberate — the
+prefixes make multi-root reports unambiguous — and called out in the
+README's Cross-repo scanning section.
 
 ### 7. Behavioural / runtime equivalence (longshot, highest novelty)
 **Status: Flagged longshot.** Not on the next-quarter list.
@@ -393,26 +428,35 @@ body changes while its siblings don't. The next bet to consider is
 **6** (cross-repo / org-level scanning): surface "promote to library"
 candidates across N repos.
 
+Bet **6** (cross-repo / org-level scanning) shipped 2026-07-14: two or
+more directory roots automatically become "repos", cross-repo clusters
+are tagged and grouped per repo, and `--cross-repo-only` isolates the
+shared-library candidates. The next bet to consider is **5** (clone
+watchlist + drift alerts) — the last unstarted item on the
+next-quarter list.
+
 ## Coverage of shipped code
 
-After the PR #7 detection-quality overhaul (2026-07-02):
+After bet #6 (cross-repo scanning, 2026-07-14):
 
 | Package | Coverage |
 |---|---|
-| `internal/tokenizer` | **100.0%** |
 | `internal/refactor` | 99.1% |
 | `internal/baseline` | 94.8% _(added 2026-07-14 by bet #5)_ |
+
+| `internal/tokenizer` | 98.7% |
 | `internal/fingerprint` | 97.6% |
-| `internal/similarity` | 96.9% |
 | `internal/git` | 96.7% |
 | `internal/pathutil` | 96.4% |
-| `internal/report` | 95.7% |
-| `internal/scan` | 94.3% |
+| `internal/scan` | 95.8% |
+| `internal/similarity` | 94.7% |
+| `internal/report` | 94.4% |
 | `internal/splitter` | 94.2% |
+| `internal/cluster` | 93.9% |
 | `internal/config` | 93.9% |
-| `internal/cluster` | 93.2% |
 | `internal/cache` | 89.7% |
-| `cmd/codetwin` | 25.1% (`main()` body still un-unit-tested; covered by subprocess tests, which don't count toward `-cover`) |
+| `internal/blocks` | 85.9% |
+| `cmd/codetwin` | 28.7% (`main()` body still un-unit-tested; covered by subprocess tests, which don't count toward `-cover`) |
 
 (`internal/bench` reports no coverage — it is a test-only package; its
 `TestBench_GroundTruth` is the detection-quality gate described above.)
