@@ -32,7 +32,11 @@ const Filename = ".codetwin-cache.bin"
 
 // Version is bumped whenever the cached schema or tokenizer/splitter output
 // format changes. Old entries with a different version are dropped on Load.
-const Version uint32 = 2
+//
+// v3: added Chunk.LexTerms (raw-code lexical vocabulary for the
+// structural-twin label gate). Caches written by earlier versions lack
+// the field and are invalidated wholesale on Load.
+const Version uint32 = 3
 
 // Chunk mirrors enough of the tokenizer + fingerprint output to reconstruct
 // a snippet without rerunning either. Tokens are stored as raw strings;
@@ -50,6 +54,11 @@ type Chunk struct {
 	Hashes     []uint32
 	Positions  map[uint32][]int
 	K          int
+
+	// LexTerms mirrors scan.Snippet.LexTerms: the chunk's sorted
+	// raw-code vocabulary (tokenizer.LexicalTerms), persisted so cache
+	// hits skip the raw-code pass along with everything else.
+	LexTerms []string
 }
 
 // Entry is the cached output for one source file: every chunk plus the

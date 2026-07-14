@@ -137,6 +137,7 @@ codetwin --suggest <pair-id> ./src
 |---|---|---|
 | > 95% | Exact clone | Extract shared utility, delete one |
 | > 85% | Near clone | Virtually identical; treat as a clone unless intentional |
+| > 85% + lexical < 20% | Structural twin | Same shape, different content — likely parallel boilerplate, not copy-paste |
 | > 65% | Strong clone | Parameterize differing parts |
 | > 45% | Refactor target | Evaluate shared abstraction |
 | < 45% | Weak similarity | Probably coincidental |
@@ -146,6 +147,29 @@ snippets to span at least 10 non-blank lines. A shorter pair renders as
 a near clone even at a perfect score (the numeric score is unchanged —
 only the label demotes), because two tiny functions can share their
 entire token shape by API force alone.
+
+### Structural twins
+
+Normalization erases identifiers and string literals (`VAR`/`STR`) —
+that's what makes the score rename-invariant, and it's also why two
+table-driven tests with completely different test names, fields, and
+expected strings can score 100%: they really are token-clones, just not
+copy-paste. To tell the two apart, codetwin keeps a third, label-only
+**lexical** sub-score: Jaccard over each snippet's raw identifier and
+string-literal vocabulary (camelCase/snake_case split, lowercased,
+keywords and comments excluded). A pair in the exact/near bands
+(> 85%) whose lexical overlap is below 20% renders as **STRUCTURAL
+TWIN** (`"structural_twin"` in JSON, with the `lexical` sub-score
+exposed on the pair): same shape, different content — parallel
+boilerplate to leave alone or parameterize, not duplication to delete.
+
+The lexical score never feeds the numeric score, so rename detection is
+untouched: a typical rename keeps most of its vocabulary (helper calls,
+field names, string literals) and stays comfortably above the floor,
+which is pinned by the benchmark's renamed-clone fixtures. Pairs ≤ 85%
+are never modified, and pairs whose snippets carry fewer than 8 lexical
+terms are never demoted (too little vocabulary to judge content either
+way).
 
 Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF
 over token trigrams)` for same-language pairs. Cross-language pairs use

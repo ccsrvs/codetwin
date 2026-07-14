@@ -17,6 +17,7 @@ import (
 
 	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
@@ -50,6 +51,14 @@ const (
 	// pair must reach to appear in a default report.
 	defaultThreshold = 0.50
 
+	// twinMin is the combined score every structural-twin case must
+	// reach: the near-clone band boundary. Twins are real token-clones
+	// by construction — shape-identical after VAR/STR/NUM normalization
+	// — which is exactly what makes their label contract meaningful: a
+	// case below this band would never have carried a top-band label in
+	// the first place.
+	twinMin = 0.85
+
 	minLines = 3 // mirror the CLI default
 )
 
@@ -66,6 +75,14 @@ type benchCase struct {
 	// dampener (--min-confidence-lines 10) pushes them below the
 	// default report threshold.
 	shortNegative bool
+
+	// twin marks structural-twin pairs: shape-identical code with
+	// disjoint identifier/string vocabulary (table tests, per-field
+	// boilerplate). Their contract is that they score in the exact/near
+	// bands (> twinMin — they ARE token-clones) but render with the
+	// structural_twin label instead of exact/near clone, because the
+	// lexical sub-score exposes that no content was actually copied.
+	twin bool
 }
 
 // collectCases discovers labeled pairs: testdata/bench/{positive,negative}
@@ -120,6 +137,23 @@ func collectCases(t *testing.T) []benchCase {
 			dir:           filepath.Join(shortBase, e.Name()),
 			positive:      false,
 			shortNegative: true,
+		})
+	}
+	// Structural twins: token-clone pairs with disjoint vocabulary,
+	// labeled structural_twin rather than exact/near clone.
+	twinBase := filepath.Join(root, "bench", "twins")
+	twinEntries, err := os.ReadDir(twinBase)
+	if err != nil {
+		t.Fatalf("read %s: %v", twinBase, err)
+	}
+	for _, e := range twinEntries {
+		if !e.IsDir() {
+			continue
+		}
+		cases = append(cases, benchCase{
+			name: "twins/" + e.Name(),
+			dir:  filepath.Join(twinBase, e.Name()),
+			twin: true,
 		})
 	}
 	// Bench positives: crosslang-* pairs get the cross-language floor.
@@ -235,23 +269,25 @@ func TestBench_GroundTruth(t *testing.T) {
 	}
 
 	failures := 0
+	topBandLabels := make(map[string]string)
 	for _, c := range all {
 		// Case score: best cross-file pair, mirroring how the report
-		// would surface the case's duplication. Track the smaller
-		// snippet size of the best pair for the short-positive floor.
+		// would surface the case's duplication. Track the pair's two
+		// snippets for the short-positive floor and the label contract.
 		var best scored
-		bestMinLines := 0
+		var bestA, bestB scan.Snippet
 		for _, sa := range c.a {
 			va := vec(sa)
 			for _, sb := range c.b {
 				if s := pairScore(sa, sb, va, vec(sb)); s.combined > best.combined {
 					best = s
-					bestMinLines = sa.NonBlankLn
-					if sb.NonBlankLn < bestMinLines {
-						bestMinLines = sb.NonBlankLn
-					}
+					bestA, bestB = sa, sb
 				}
 			}
+		}
+		bestMinLines := bestA.NonBlankLn
+		if bestB.NonBlankLn < bestMinLines {
+			bestMinLines = bestB.NonBlankLn
 		}
 		minWant := c.minWant
 		if c.positive && minWant == positiveMin && bestMinLines < shortLines {
@@ -262,7 +298,40 @@ func TestBench_GroundTruth(t *testing.T) {
 			status = "FAIL(<" + fmtF(minWant) + ")"
 			failures++
 		}
+		// Label contract (R6): the report label is a function of the
+		// dampened score, the line counts (exact-clone evidence gate),
+		// and the lexical sub-score. Compute it exactly as the pipeline
+		// would so the assertions below pin real report behaviour.
+		label, lexical := labelForBest(best, bestA, bestB)
+		if c.positive && !c.twin && similarity.LengthDampen(
+			best.combined, bestA.NonBlankLn, bestB.NonBlankLn,
+			similarity.DefaultMinConfidenceLines) > twinMin {
+			// Rename-invariance guard: every positive in the exact/near
+			// bands must KEEP its exact/near label — systematic renames
+			// lower lexical overlap, but a typical rename shares most of
+			// its vocabulary (helper calls, field names, string
+			// literals) and must stay above the structural-twin floor.
+			topBandLabels[c.name] = label
+			if label != "exact_clone" && label != "near_clone" {
+				status = "FAIL(label " + label + ", want exact/near clone; lex=" + fmtF(lexical) + ")"
+				failures++
+			}
+		}
 		switch {
+		case c.twin:
+			// Twins must be real token-clones (the label contract is
+			// vacuous below the near band) AND render as structural
+			// twins: same shape, disjoint content.
+			switch {
+			case best.combined <= twinMin:
+				status = "FAIL(raw " + fmtF(best.combined) + " <= " + fmtF(twinMin) + ": case is not a token-clone, label contract is vacuous)"
+				failures++
+			case label != "structural_twin":
+				status = "FAIL(label " + label + ", want structural_twin; lex=" + fmtF(lexical) + ")"
+				failures++
+			default:
+				status = "ok (structural_twin, lex " + fmtF(lexical) + ")"
+			}
 		case c.shortNegative:
 			// Contract for short noise: the raw score is real report
 			// noise (it WOULD render at the default threshold — that's
@@ -284,10 +353,26 @@ func TestBench_GroundTruth(t *testing.T) {
 			status = "FAIL(>" + fmtF(negativeMax) + ")"
 			failures++
 		}
-		t.Logf("%-40s struct=%.2f sem=%.2f combined=%.2f %s",
-			c.name, best.structural, best.semantic, best.combined, status)
+		t.Logf("%-40s struct=%.2f sem=%.2f combined=%.2f lex=%.2f %s",
+			c.name, best.structural, best.semantic, best.combined, lexical, status)
 		if strings.HasPrefix(status, "FAIL") {
 			t.Fail()
+		}
+	}
+
+	// Rename-invariance is the product's core promise: the renamed
+	// positives score 1.0 by design, and the structural-twin band
+	// modifier must never demote them. Assert their presence in the
+	// exact/near bands explicitly so the in-loop guard can't go vacuous
+	// if a fixture edit drops them below 0.85.
+	for _, name := range []string{"positive/go-renamed", "positive/python-renamed", "positive/go-renamed-rich"} {
+		label, ok := topBandLabels[name]
+		if !ok {
+			t.Errorf("%s: expected the renamed positive to score above %.2f (rename invariance)", name, twinMin)
+			continue
+		}
+		if label != "exact_clone" && label != "near_clone" {
+			t.Errorf("%s: label = %q, want exact_clone or near_clone (renamed positives must not demote to structural_twin)", name, label)
 		}
 	}
 
@@ -342,6 +427,25 @@ func TestBench_GroundTruth(t *testing.T) {
 	if p95 > noiseP95Max {
 		t.Errorf("unrelated-pair p95 = %.2f, want <= %.2f — default scans will drown in noise", p95, noiseP95Max)
 	}
+}
+
+// labelForBest computes the report label the pipeline would render for
+// a case's best pair, mirroring BuildMatrix + report.JSONLabel: the
+// combined score is length-dampened, and the lexical Jaccard over the
+// two snippets' raw-code term sets feeds the structural-twin band
+// modifier. Returns the label and the lexical score.
+func labelForBest(s scored, a, b scan.Snippet) (string, float64) {
+	lex := similarity.LexicalJaccard(a.LexTerms, b.LexTerms)
+	computed := len(a.LexTerms) >= similarity.MinLexicalTerms &&
+		len(b.LexTerms) >= similarity.MinLexicalTerms
+	score := similarity.LengthDampen(
+		s.combined, a.NonBlankLn, b.NonBlankLn, similarity.DefaultMinConfidenceLines)
+	p := report.Pair{
+		Score:  score,
+		LinesA: a.NonBlankLn, LinesB: b.NonBlankLn,
+		Lexical: lex, LexicalComputed: computed,
+	}
+	return report.JSONLabel(p), lex
 }
 
 func fmtF(f float64) string {
