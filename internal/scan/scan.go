@@ -31,6 +31,12 @@ type Snippet struct {
 	Tokens     []string
 	Lines      []int // parallel to Tokens; 1-based source line of each token
 	Fps        fingerprint.PositionalSet
+
+	// IsTest marks snippets whose file path follows the language's
+	// test-file convention (see IsTestFile). Computed from the path as
+	// given by the caller (usually relative to the scan root) so
+	// unrelated directory names above the repo can't misclassify.
+	IsTest bool
 }
 
 // ProcessFiles runs the per-file split → tokenize → fingerprint pipeline
@@ -126,6 +132,7 @@ func ProcessFile(
 	absPath, _ := filepath.Abs(path)
 	contentHash := cache.HashContent(data)
 	key := cache.Key(absPath, contentHash, patternsHash)
+	isTest := IsTestFile(path)
 
 	if entry, ok := cacheState.Get(key); ok {
 		var out []Snippet
@@ -144,6 +151,7 @@ func ProcessFile(
 				Tokens:     c.Tokens,
 				Lines:      c.Lines,
 				Fps:        positionalFromCache(c),
+				IsTest:     isTest,
 			})
 		}
 		return out, ""
@@ -191,6 +199,7 @@ func ProcessFile(
 			Tokens:     tokens,
 			Lines:      lines,
 			Fps:        ps,
+			IsTest:     isTest,
 		})
 	}
 

@@ -52,6 +52,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Show everything | `codetwin --verbose --threshold 0.20 <path>` |
 | Inline code previews | `codetwin --preview --threshold 0.40 <path>` |
 | Filter noisy short-snippet matches | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
+| Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
 | Suggest a refactor (Go) | `codetwin --suggest <pair-id> <path>` |
@@ -78,6 +79,9 @@ codetwin --threshold 0.40 <TARGET_PATH>
                             multiplier ramps from 0.5× at 0 lines to 1.0× at N
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
+--include-tests         include test↔test pairs and test-only clusters; by default they
+                        are suppressed and replaced by a one-line summary
+                        (test↔production pairs and mixed clusters always render)
 --since string          PR-delta mode: keep only findings where ≥1 endpoint overlaps
                         lines changed since <ref> (e.g. main, HEAD~5, abc123)
 --blame                 annotate findings with git provenance (when introduced, by whom,
@@ -232,7 +236,8 @@ CLI flags always win over the `defaults` block.
     "preview_lines": 15,
     "sort": "size",
     "limit": 20,
-    "min_confidence_lines": 20
+    "min_confidence_lines": 20,
+    "include_tests": false
   },
   "ignore_paths": [
     "vendor/**",
@@ -333,6 +338,28 @@ boundaries — setting it dissolves clusters built on tiny-snippet noise,
 not just demoting individual pairs. Off by default. A typical starting
 value is `--min-confidence-lines 20`.
 
+### Test code segregation (default)
+
+Files matching each language's test convention (Go `*_test.go`; Python
+`test_*.py` / `*_test.py` / `tests|test/` dirs; JS/TS `*.spec.*` /
+`*.test.*` / `__tests__/`; Java `src/test/`; Rust `tests/`; Elixir
+`*_test.exs` / `test/`) are classified as test code by path. By default,
+test↔test pairs and clusters whose members are ALL test snippets are
+suppressed and summarized in one line each, e.g.
+`1,874 test↔test pairs suppressed (--include-tests to show)` — test
+scaffolding is forced into a common shape by the API under test, so
+those token-clones are rarely actionable. Test↔production pairs and
+mixed clusters always render.
+
+- `--include-tests` restores the full listing (and the exact
+  pre-segregation JSON schema — no `suppressed` object).
+- In default `--json` output the suppressed findings are omitted and a
+  top-level `"suppressed": {"test_test_pairs": N, "test_only_clusters": M}`
+  object is added.
+- Scores and clustering are unchanged; suppression is applied after the
+  threshold filter and before `--limit`.
+- Config equivalent: `"include_tests": true` under `defaults`.
+
 ### Clusters vs pairs
 
 - **Clusters** = families of related snippets grouped by DBSCAN. One cluster = one refactoring task.
@@ -417,7 +444,8 @@ codetwin --preview --threshold 0.40 ./testdata
 | No clusters formed | Lower `--eps` (e.g. `--eps 0.35`) or `--min-pts 2` |
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |
 | Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
-| Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
+| Tests/vendored code dominating results | Test↔test pairs are already suppressed by default; for vendored code add `ignore_paths` (e.g. `["vendor/**"]`) |
+| Expected a test↔test clone but it's missing | It's suppressed by default — add `--include-tests` |
 | One specific pair is a confirmed false positive | Add `ignore_pairs` (keeps both files scannable against everything else) |
 | 100% scores on tiny snippets that aren't real duplicates | Add `--min-confidence-lines 20` — short matches lose proportional score |
 | `--since/--blame requires the git binary on PATH` | Install git, or drop the flag |

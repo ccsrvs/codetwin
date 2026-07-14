@@ -220,7 +220,7 @@ func TestPrepare_SortBySize(t *testing.T) {
 		{NameA: "c", NameB: "d", Score: 0.5, LinesA: 50, LinesB: 30},
 		{NameA: "e", NameB: "f", Score: 0.7, LinesA: 20, LinesB: 20},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortSize, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortSize, Threshold: 0})
 	// Expect order by max(LinesA, LinesB) desc: 50, 20, 5
 	wantOrder := []string{"c", "e", "a"}
 	for i, w := range wantOrder {
@@ -236,7 +236,7 @@ func TestPrepare_SortBySizeAsc(t *testing.T) {
 		{NameA: "tiny", NameB: "y", Score: 0.5, LinesA: 3, LinesB: 3},
 		{NameA: "mid", NameB: "z", Score: 0.5, LinesA: 20, LinesB: 20},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortSizeAsc, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortSizeAsc, Threshold: 0})
 	wantOrder := []string{"tiny", "mid", "big"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -251,7 +251,7 @@ func TestPrepare_SortByName(t *testing.T) {
 		{NameA: "alpha", NameB: "y", Score: 0.5},
 		{NameA: "mu", NameB: "z", Score: 0.5},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
 	wantOrder := []string{"alpha", "mu", "zeta"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -266,7 +266,7 @@ func TestPrepare_SortByScoreAsc(t *testing.T) {
 		{NameA: "low", NameB: "y", Score: 0.3},
 		{NameA: "mid", NameB: "z", Score: 0.6},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortScoreAsc, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortScoreAsc, Threshold: 0})
 	wantOrder := []string{"low", "mid", "high"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -281,7 +281,7 @@ func TestPrepare_ClustersSortBySize(t *testing.T) {
 		{ID: 1, Members: []string{"c", "d", "e", "f"}, Score: 0.6},
 		{ID: 2, Members: []string{"g", "h", "i"}, Score: 0.7},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortSize})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortSize})
 	if len(out) != 3 {
 		t.Fatalf("expected 3 clusters, got %d", len(out))
 	}
@@ -300,7 +300,7 @@ func TestPrepare_ClustersSortByScore(t *testing.T) {
 		{ID: 1, Members: []string{"c", "d"}, Score: 0.9},
 		{ID: 2, Members: []string{"e", "f"}, Score: 0.7},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortScore})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortScore})
 	wantIDs := []int{1, 2, 0}
 	for i, id := range wantIDs {
 		if out[i].ID != id {
@@ -321,7 +321,7 @@ func TestPrepare_LimitClampsBothSections(t *testing.T) {
 		{ID: 1, Members: []string{"b"}, Score: 0.8},
 		{ID: 2, Members: []string{"c"}, Score: 0.7},
 	}
-	visP, visC := Prepare(pairs, clusters, Options{Sort: SortScore, Limit: 2, Threshold: 0})
+	visP, visC, _ := Prepare(pairs, clusters, Options{Sort: SortScore, Limit: 2, Threshold: 0})
 	if len(visP) != 2 {
 		t.Errorf("pairs: expected 2 after limit, got %d", len(visP))
 	}
@@ -332,7 +332,7 @@ func TestPrepare_LimitClampsBothSections(t *testing.T) {
 
 func TestPrepare_LimitDoesNotPadShortSection(t *testing.T) {
 	clusters := []Cluster{{ID: 0, Members: []string{"a"}, Score: 0.9}}
-	_, visC := Prepare(nil, clusters, Options{Limit: 5})
+	_, visC, _ := Prepare(nil, clusters, Options{Limit: 5})
 	if len(visC) != 1 {
 		t.Errorf("expected 1 cluster (no padding), got %d", len(visC))
 	}
@@ -346,7 +346,7 @@ func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
 		{NameA: "low1", Score: 0.3},
 		{NameA: "low2", Score: 0.2},
 	}
-	visP, _ := Prepare(pairs, nil, Options{Sort: SortScore, Threshold: 0.5, Limit: 3})
+	visP, _, _ := Prepare(pairs, nil, Options{Sort: SortScore, Threshold: 0.5, Limit: 3})
 	if len(visP) != 2 {
 		t.Errorf("expected 2 pairs after threshold+limit, got %d", len(visP))
 	}
@@ -441,7 +441,7 @@ func TestPrepare_SortByAgeNewestPairsFirst(t *testing.T) {
 		{NameA: "mid", NameB: "z", Score: 0.5,
 			ProvenanceA: &Provenance{FirstTime: t2}, ProvenanceB: &Provenance{FirstTime: t1}},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
 	wantOrder := []string{"newest", "mid", "old"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -459,7 +459,7 @@ func TestPrepare_SortByAgeAscOldestFirst(t *testing.T) {
 		{NameA: "older", NameB: "y", Score: 0.5,
 			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortAgeAsc, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortAgeAsc, Threshold: 0})
 	if out[0].NameA != "older" {
 		t.Errorf("expected older first, got %q", out[0].NameA)
 	}
@@ -472,7 +472,7 @@ func TestPrepare_SortByAgePairsWithoutProvenanceSortLast(t *testing.T) {
 		{NameA: "has-provenance", NameB: "y", Score: 0.5,
 			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
 	if out[0].NameA != "has-provenance" {
 		t.Errorf("expected provenance-bearing pair first, got %q", out[0].NameA)
 	}
@@ -488,7 +488,7 @@ func TestPrepare_CrossLangOnlyKeepsOnlyDifferentLangs(t *testing.T) {
 		{NameA: "cross3", NameB: "cross4", Score: 0.6, LangA: "TypeScript", LangB: "Python"},
 		{NameA: "same3", NameB: "same4", Score: 0.8, LangA: "Python", LangB: "Python"},
 	}
-	out, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	out, _, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
 	if len(out) != 2 {
 		t.Fatalf("expected 2 cross-language pairs, got %d", len(out))
 	}
@@ -508,7 +508,7 @@ func TestPrepare_CrossLangOnlyDropsPairsWithUnknownLang(t *testing.T) {
 		{NameA: "u2", NameB: "u3", Score: 0.8, LangA: "", LangB: ""},
 		{NameA: "g2", NameB: "p1", Score: 0.7, LangA: "Go", LangB: "Python"},
 	}
-	out, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	out, _, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
 	if len(out) != 1 {
 		t.Fatalf("expected 1 pair (only the fully-typed cross-lang one), got %d", len(out))
 	}
@@ -522,7 +522,7 @@ func TestPrepare_CrossLangOnlyOffKeepsAll(t *testing.T) {
 		{NameA: "same1", NameB: "same2", Score: 0.9, LangA: "Go", LangB: "Go"},
 		{NameA: "cross1", NameB: "cross2", Score: 0.7, LangA: "Go", LangB: "Python"},
 	}
-	out, _ := Prepare(pairs, nil, Options{Threshold: 0, Sort: SortScore})
+	out, _, _ := Prepare(pairs, nil, Options{Threshold: 0, Sort: SortScore})
 	if len(out) != 2 {
 		t.Fatalf("expected all 2 pairs when CrossLangOnly is off, got %d", len(out))
 	}
@@ -705,7 +705,7 @@ func TestPrepare_SortByName_PairsTieBreakOnNameB(t *testing.T) {
 		{NameA: "alpha", NameB: "beta", Score: 0.5},
 		{NameA: "alpha", NameB: "gamma", Score: 0.5},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
 	wantNameB := []string{"beta", "delta", "gamma"}
 	for i, w := range wantNameB {
 		if out[i].NameB != w {
@@ -721,7 +721,7 @@ func TestPrepare_ClustersSortByScoreAsc(t *testing.T) {
 		{ID: 1, Members: []string{"b"}, Score: 0.3},
 		{ID: 2, Members: []string{"c"}, Score: 0.6},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortScoreAsc})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortScoreAsc})
 	wantIDs := []int{1, 2, 0}
 	for i, id := range wantIDs {
 		if out[i].ID != id {
@@ -737,7 +737,7 @@ func TestPrepare_ClustersSortBySizeAsc(t *testing.T) {
 		{ID: 1, Members: []string{"d"}},
 		{ID: 2, Members: []string{"e", "f"}},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortSizeAsc})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortSizeAsc})
 	wantIDs := []int{1, 2, 0}
 	for i, id := range wantIDs {
 		if out[i].ID != id {
@@ -756,7 +756,7 @@ func TestPrepare_ClustersSortByName(t *testing.T) {
 		{ID: 2, Members: []string{"mu", "w"}},
 		{ID: 3, Members: nil}, // exercises firstMember's empty-slice branch
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortName})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortName})
 	// Empty-members cluster (firstMember == "") sorts first, then alphabetical.
 	wantIDs := []int{3, 1, 2, 0}
 	for i, id := range wantIDs {
@@ -791,7 +791,7 @@ func TestPrepare_LimitTriggersTopKHeap(t *testing.T) {
 		{NameA: "e", Score: 0.3},
 		{NameA: "f", Score: 0.7},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortScore, Limit: 2, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortScore, Limit: 2, Threshold: 0})
 	if len(out) != 2 {
 		t.Fatalf("limit=2 should yield 2 pairs, got %d", len(out))
 	}

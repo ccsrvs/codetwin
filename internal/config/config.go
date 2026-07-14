@@ -58,6 +58,11 @@ type Defaults struct {
 	Limit        *int     `json:"limit,omitempty"`
 
 	MinConfidenceLines *int `json:"min_confidence_lines,omitempty"`
+
+	// IncludeTests restores test↔test pairs and test-only clusters to
+	// the report (they are suppressed by default). Mirrors the
+	// --include-tests CLI flag.
+	IncludeTests *bool `json:"include_tests,omitempty"`
 }
 
 // Load reads .codetwin.json from dir and returns a parsed Config. When the
