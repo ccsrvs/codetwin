@@ -1189,3 +1189,35 @@ func TestSplit_PythonIndentedCommentBelowBodyIndent(t *testing.T) {
 		t.Errorf("outer chunk truncated at the low-indent comment:\n%s", chunks[0].Code)
 	}
 }
+
+func TestWholeFile_ProducesFallbackShape(t *testing.T) {
+	code := "line one\nline two\n\nline four"
+	c := WholeFile("src/mod.xyz", code)
+	if c.Symbol != "" {
+		t.Errorf("Symbol = %q, want empty", c.Symbol)
+	}
+	if c.StartLine != 1 || c.EndLine != 4 {
+		t.Errorf("lines = %d-%d, want 1-4", c.StartLine, c.EndLine)
+	}
+	if c.Code != code {
+		t.Errorf("Code must be the whole input")
+	}
+	// The whole-file shape renders Name() as just the path.
+	if got := c.Name(); got != "src/mod.xyz" {
+		t.Errorf("Name() = %q, want %q", got, "src/mod.xyz")
+	}
+}
+
+func TestSplit_FallbackUsesWholeFileShape(t *testing.T) {
+	// No recognizable definitions → Split must return the identical
+	// single chunk WholeFile produces.
+	code := "x = 1\ny = 2\n"
+	chunks := Split("plain.py", code, tokenizer.Python)
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 fallback chunk, got %d", len(chunks))
+	}
+	want := WholeFile("plain.py", code)
+	if chunks[0] != want {
+		t.Errorf("fallback chunk = %+v, want %+v", chunks[0], want)
+	}
+}

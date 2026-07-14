@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestProcessFile_GivenValidJSFile_When_Process_Then_ReturnsSnippetsWithExpec
 	path := writeFile(t, dir, "sum.js", "function sumArray(arr) {\n  let total = 0;\n  for (let i = 0; i < arr.length; i++) {\n    total += arr[i];\n  }\n  return total;\n}\n")
 
 	cacheState := cache.New()
-	snips, warning := ProcessFile(path, 1, nil, cacheState, "")
+	snips, warning := ProcessFile(path, 1, nil, cacheState, "", GranularityFunction)
 
 	if warning != "" {
 		t.Fatalf("unexpected warning: %s", warning)
@@ -53,7 +54,7 @@ func TestProcessFile_GivenValidJSFile_When_Process_Then_ReturnsSnippetsWithExpec
 
 func TestProcessFile_GivenUnreadablePath_When_Process_Then_ReturnsWarning(t *testing.T) {
 	cacheState := cache.New()
-	snips, warning := ProcessFile("/nonexistent/file.js", 1, nil, cacheState, "")
+	snips, warning := ProcessFile("/nonexistent/file.js", 1, nil, cacheState, "", GranularityFunction)
 
 	if len(snips) != 0 {
 		t.Errorf("expected no snippets on read error, got %d", len(snips))
@@ -69,7 +70,7 @@ func TestProcessFile_GivenChunkBelowMinLines_When_Process_Then_DoesNotReturnIt(t
 	path := writeFile(t, dir, "tiny.js", "function tiny(x) { return x; }\n")
 	cacheState := cache.New()
 
-	snips, warning := ProcessFile(path, 100, nil, cacheState, "")
+	snips, warning := ProcessFile(path, 100, nil, cacheState, "", GranularityFunction)
 
 	if warning != "" {
 		t.Fatalf("unexpected warning: %s", warning)
@@ -84,8 +85,8 @@ func TestProcessFile_GivenSecondCall_When_CacheWarm_Then_ReturnsEquivalentSnippe
 	path := writeFile(t, dir, "sum.js", "function sumArray(arr) {\n  let total = 0;\n  for (let i = 0; i < arr.length; i++) {\n    total += arr[i];\n  }\n  return total;\n}\n")
 	cacheState := cache.New()
 
-	first, _ := ProcessFile(path, 1, nil, cacheState, "")
-	second, _ := ProcessFile(path, 1, nil, cacheState, "")
+	first, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFunction)
+	second, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFunction)
 
 	if len(first) != len(second) {
 		t.Fatalf("snippet count diverged across calls: first=%d second=%d", len(first), len(second))
@@ -100,6 +101,93 @@ func TestProcessFile_GivenSecondCall_When_CacheWarm_Then_ReturnsEquivalentSnippe
 	}
 }
 
+// multiFuncJS holds two distinct function definitions, so function-level
+// granularity yields two snippets and file-level must collapse to one.
+const multiFuncJS = "function first(arr) {\n  let total = 0;\n  for (let i = 0; i < arr.length; i++) {\n    total += arr[i];\n  }\n  return total;\n}\n\nfunction second(arr) {\n  let prod = 1;\n  for (let i = 0; i < arr.length; i++) {\n    prod *= arr[i];\n  }\n  return prod;\n}\n"
+
+func TestParseGranularity_ValidAndInvalidValues(t *testing.T) {
+	if g, err := ParseGranularity("function"); err != nil || g != GranularityFunction {
+		t.Errorf(`ParseGranularity("function") = (%v, %v), want (GranularityFunction, nil)`, g, err)
+	}
+	if g, err := ParseGranularity("file"); err != nil || g != GranularityFile {
+		t.Errorf(`ParseGranularity("file") = (%v, %v), want (GranularityFile, nil)`, g, err)
+	}
+	for _, bad := range []string{"", "class", "File", "block"} {
+		if _, err := ParseGranularity(bad); err == nil {
+			t.Errorf("ParseGranularity(%q) should error", bad)
+		}
+	}
+}
+
+func TestProcessFile_GivenFileGranularity_When_Process_Then_YieldsOneWholeFileSnippet(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "two.js", multiFuncJS)
+	cacheState := cache.New()
+
+	// Sanity: function mode splits this file into two snippets.
+	fnSnips, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFunction)
+	if len(fnSnips) != 2 {
+		t.Fatalf("function mode: expected 2 snippets, got %d", len(fnSnips))
+	}
+
+	snips, warning := ProcessFile(path, 1, nil, cacheState, "", GranularityFile)
+	if warning != "" {
+		t.Fatalf("unexpected warning: %s", warning)
+	}
+	if len(snips) != 1 {
+		t.Fatalf("file mode: expected exactly 1 snippet, got %d", len(snips))
+	}
+	s := snips[0]
+	if s.Name != path {
+		t.Errorf("Name = %q, want just the path %q (whole-file fallback shape)", s.Name, path)
+	}
+	if s.StartLine != 1 {
+		t.Errorf("StartLine = %d, want 1", s.StartLine)
+	}
+	wantEnd := len(strings.Split(multiFuncJS, "\n"))
+	if s.EndLine != wantEnd {
+		t.Errorf("EndLine = %d, want %d (last line of the file)", s.EndLine, wantEnd)
+	}
+	if s.Code != multiFuncJS {
+		t.Errorf("Code should be the entire file content")
+	}
+	if s.NonBlankLn != 14 {
+		t.Errorf("NonBlankLn = %d, want 14", s.NonBlankLn)
+	}
+	if len(s.Tokens) == 0 || s.Fps.K == 0 {
+		t.Errorf("tokens/fingerprints not built: %d tokens, K=%d", len(s.Tokens), s.Fps.K)
+	}
+}
+
+func TestProcessFile_GivenModeSwitch_When_CacheWarm_Then_DoesNotServeOtherModesChunks(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "two.js", multiFuncJS)
+	cacheState := cache.New()
+
+	// Warm the cache in function mode, then read in file mode.
+	fnFirst, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFunction)
+	if len(fnFirst) != 2 {
+		t.Fatalf("function mode: expected 2 snippets, got %d", len(fnFirst))
+	}
+	fileSnips, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFile)
+	if len(fileSnips) != 1 {
+		t.Fatalf("file mode must not serve function-level cached chunks: got %d snippets", len(fileSnips))
+	}
+
+	// And the reverse: the file-mode entry must not leak back.
+	fnAgain, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFunction)
+	if len(fnAgain) != 2 {
+		t.Fatalf("function mode must not serve file-level cached chunks: got %d snippets", len(fnAgain))
+	}
+
+	// Both modes stay cacheable side by side: a warm file-mode read
+	// returns the same whole-file snippet.
+	fileAgain, _ := ProcessFile(path, 1, nil, cacheState, "", GranularityFile)
+	if len(fileAgain) != 1 || fileAgain[0].Name != fileSnips[0].Name {
+		t.Errorf("warm file-mode read diverged: %+v", fileAgain)
+	}
+}
+
 func TestProcessFiles_GivenMultipleFiles_When_Process_Then_ReturnsAllSnippets(t *testing.T) {
 	dir := t.TempDir()
 	body := "function fn(arr) {\n  let total = 0;\n  for (let i = 0; i < arr.length; i++) {\n    total += arr[i];\n  }\n  return total;\n}\n"
@@ -110,7 +198,7 @@ func TestProcessFiles_GivenMultipleFiles_When_Process_Then_ReturnsAllSnippets(t 
 	}
 	cacheState := cache.New()
 
-	snips, warnings := ProcessFiles(files, 1, nil, cacheState, "", nil)
+	snips, warnings := ProcessFiles(files, 1, nil, cacheState, "", GranularityFunction, nil)
 
 	if len(warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", warnings)
@@ -144,7 +232,7 @@ func TestProcessFiles_GivenOnFileDoneCallback_When_Process_Then_FiresOncePerFile
 	cacheState := cache.New()
 	var calls atomic.Int64
 
-	_, _ = ProcessFiles(files, 1, nil, cacheState, "", func() { calls.Add(1) })
+	_, _ = ProcessFiles(files, 1, nil, cacheState, "", GranularityFunction, func() { calls.Add(1) })
 
 	if got := calls.Load(); got != 4 {
 		t.Errorf("onFileDone fired %d times, want 4", got)
@@ -153,7 +241,7 @@ func TestProcessFiles_GivenOnFileDoneCallback_When_Process_Then_FiresOncePerFile
 
 func TestProcessFiles_GivenEmptyFileList_When_Process_Then_ReturnsNothing(t *testing.T) {
 	cacheState := cache.New()
-	snips, warnings := ProcessFiles(nil, 1, nil, cacheState, "", nil)
+	snips, warnings := ProcessFiles(nil, 1, nil, cacheState, "", GranularityFunction, nil)
 
 	if snips != nil {
 		t.Errorf("expected nil snippets, got %v", snips)

@@ -239,6 +239,7 @@ func main() {
 	}
 	snippets, fileWarnings := scan.ProcessFiles(
 		files, *minLines, stripPatterns, cacheState, patternsHash,
+		scan.GranularityFunction,
 		func() { done.Add(1) },
 	)
 	if progStop != nil {

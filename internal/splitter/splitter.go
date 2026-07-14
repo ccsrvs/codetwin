@@ -41,6 +41,16 @@ func (c Chunk) Name() string {
 	return fmt.Sprintf("%s:%d-%d", c.Path, c.StartLine, c.EndLine)
 }
 
+// WholeFile returns the single whole-file chunk for a source file: Symbol
+// empty and StartLine 1, so Name() renders as just the path. This is both
+// Split's no-definitions fallback shape and the unit emitted for every file
+// under file-level granularity (scan.GranularityFile), which bypasses the
+// per-definition splitters entirely.
+func WholeFile(path, code string) Chunk {
+	lines := strings.Split(code, "\n")
+	return Chunk{Path: path, StartLine: 1, EndLine: len(lines), Code: code}
+}
+
 // CountNonBlankLines reports how many newline-separated lines in code have
 // non-whitespace content. Used to gate display of tiny matches.
 func CountNonBlankLines(code string) int {
@@ -73,8 +83,7 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 		chunks = splitElixir(code)
 	}
 	if len(chunks) == 0 {
-		lines := strings.Split(code, "\n")
-		chunks = []Chunk{{StartLine: 1, EndLine: len(lines), Code: code}}
+		chunks = []Chunk{WholeFile(path, code)}
 	}
 	for i := range chunks {
 		chunks[i].Path = path

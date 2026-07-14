@@ -193,16 +193,28 @@ func PatternsHash(patterns []string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Key combines a file's absolute path, its content hash, and the active
-// ignore_patterns hash into a stable cache key. Path is included so two
-// files with identical content but different paths don't share an entry
-// (their chunk names differ).
-func Key(absPath, contentHash, patternsHash string) string {
+// Key combines a file's absolute path, its content hash, the active
+// ignore_patterns hash, and the chunking granularity into a stable cache
+// key. Path is included so two files with identical content but different
+// paths don't share an entry (their chunk names differ).
+//
+// Granularity is part of the key because entries store granularity-shaped
+// chunks: a function-level entry holds per-definition chunks, a file-level
+// entry holds one whole-file chunk, and serving one to the other mode
+// would silently change results. Function-level (or empty, its legacy
+// spelling) contributes nothing to the hash, so caches written before the
+// granularity dimension existed stay warm; any other granularity gets its
+// own key segment, letting both modes coexist in one cache file.
+func Key(absPath, contentHash, patternsHash, granularity string) string {
 	h := sha256.New()
 	h.Write([]byte(absPath))
 	h.Write([]byte{0})
 	h.Write([]byte(contentHash))
 	h.Write([]byte{0})
 	h.Write([]byte(patternsHash))
+	if granularity != "" && granularity != "function" {
+		h.Write([]byte{0})
+		h.Write([]byte(granularity))
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
