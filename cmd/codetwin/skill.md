@@ -71,6 +71,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Suggest for every visible pair (JSON) | `codetwin --suggest-all --json <path>` |
 | Extract a partial-clone block into a helper (Go/Python) | `codetwin --suggest <block-id> <path>` |
 | Preview partial-clone block ranges inline | `codetwin --preview <path>` |
+| Snapshot today's clone clusters (clone watchlist) | `codetwin --update-baseline .codetwin-baseline.json <path>` |
+| CI drift gate: exit 1 when clone families change | `codetwin --baseline .codetwin-baseline.json <path>` |
 
 ### All flags
 
@@ -113,6 +115,18 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         lines changed since <ref> (e.g. main, HEAD~5, abc123)
 --blame                 annotate findings with git provenance (when introduced, by whom,
                         last touched). Pairs --sort=age for "newest clones first".
+--update-baseline string  clone watchlist: after the scan, write a snapshot of the
+                        visible clusters to <file> and exit 0 (report still prints).
+                        Byte-deterministic — safe to commit and diff in review.
+--baseline string       compare this scan against the snapshot in <file>: drift events
+                        print to stderr as 'drift: <kind> cluster <n>: <detail>' and
+                        any drift exits 1 (CI gate); no drift exits 0 silently.
+                        Kinds: member-added | member-removed | member-changed |
+                        cluster-appeared | cluster-dissolved. Both runs must use the
+                        same threshold/eps/min-pts/granularity/include-tests (a
+                        mismatch is a clear error, not drift). With --json a `drift`
+                        array is added (omitted when empty). Mutually exclusive with
+                        --update-baseline.
 --suggest string        print a unified diff that adds a starter helper extracted from the
                         matching pair or partial-clone block (look up the 8-char ID in
                         --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir;
@@ -147,6 +161,40 @@ works the same in a non-git directory as it does in one.
 `codetwin --help` prints the same flag list with one-line descriptions.
 `codetwin --guide` walks through the score bands, structural/semantic
 sub-scores, and pairs vs clusters in more depth.
+
+### Clone watchlist (`--update-baseline` / `--baseline`)
+
+Track how clone families evolve between runs — a member drifting away
+usually means a bug was fixed in one copy but not its siblings.
+
+```bash
+# 1. Snapshot the current clusters (commit the file).
+codetwin --update-baseline .codetwin-baseline.json ./src
+
+# 2. Later (e.g. every CI build): compare. Exit 0 = no drift; exit 1 =
+#    drift, one stderr line per event:
+codetwin --baseline .codetwin-baseline.json ./src
+#   drift: member-added cluster 0: billing/tax.go computeVAT
+#   drift: member-changed cluster 2: api/parse.go ParseRecord
+
+# 3. Machine-readable drift (array omitted when empty):
+codetwin --baseline .codetwin-baseline.json --json ./src | jq '.drift[]?'
+
+# 4. Drift was intentional? Refresh and commit the snapshot.
+codetwin --update-baseline .codetwin-baseline.json ./src
+```
+
+Reading events: `member-added` = a new copy was pasted into a known
+family; `member-removed` = a copy was deleted/refactored away;
+`member-changed` = a member's body changed while still clustering —
+diff it against its siblings and decide whether the edit should
+propagate; `cluster-appeared` / `cluster-dissolved` = a whole family is
+new / gone. Member identity strips line ranges and scan-root prefixes,
+and body hashes use normalized tokens, so formatting, comments,
+renames, and edits elsewhere in the file never read as drift. Both runs
+must use the same threshold/eps/min-pts/granularity/include-tests —
+codetwin rejects mismatches (and old `schema_version`s) with a clear
+error before scanning.
 
 ### Refactor suggestions (`--suggest`)
 

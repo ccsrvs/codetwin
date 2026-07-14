@@ -1388,6 +1388,13 @@ FLAGS:
   --blame              annotate each finding with git provenance (when introduced,
                        by whom, last touched). Pairs --sort=age for "newest clones first".
                        Requires git on PATH and a git repository.
+  --update-baseline string  clone watchlist: after the scan, write a snapshot of the
+                       visible clusters to <file> and exit 0 (the report still prints)
+  --baseline string    compare this scan against the snapshot in <file>: drift events
+                       print to stderr ('drift: <kind> cluster <n>: <detail>'), any
+                       drift exits 1 (CI gate). Both runs must use the same threshold/
+                       eps/min-pts/granularity/include-tests. Mutually exclusive with
+                       --update-baseline.
   --skill              print the full skill guide and exit
   --guide              print the report interpretation guide and exit
   --version            print the codetwin version and exit

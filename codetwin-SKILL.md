@@ -5,8 +5,9 @@ description: >
   Use this skill whenever the user asks to find duplicate code, detect clones, identify refactoring
   opportunities, check for similar functions across files, or scan a codebase for copy-paste across
   Go, JavaScript, TypeScript, Python, Java, Rust, or Elixir. Also trigger when the user says things
-  like "find repeated code", "what can be refactored", "check for duplicates", or "scan my project
-  for similar functions".
+  like "find repeated code", "what can be refactored", "check for duplicates", "scan my project
+  for similar functions", or "watch/track clone drift" (baseline snapshots + CI drift gating via
+  --update-baseline / --baseline).
 ---
 
 # codetwin Skill
