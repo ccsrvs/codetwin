@@ -13,6 +13,7 @@ shown as a label and a number. Bands use strict `>` thresholds:
 |---|---|---|
 | EXACT CLONE | > 95% | Token-for-token equivalent (after the tokenizer's `VAR` / `STR` / `NUM` normalization). Almost certainly copy-paste. Extract a shared utility and delete one. Evidence-gated: both snippets must span ≥ 10 non-blank lines; a shorter pair renders as NEAR CLONE even at a perfect score, because tiny functions can share their whole token shape by API force alone. |
 | NEAR CLONE | > 85% | Virtually identical with one or two token-level edits (a swapped literal, a different default arg). Treat as a clone unless the difference is intentional. |
+| STRUCTURAL TWIN | > 85%, lexical < 20% | Same token shape, different content: the pair's raw identifier/string vocabulary barely overlaps, so this is likely parallel boilerplate (table tests, per-field validators, generated handlers) rather than copy-paste. See "Structural twins" below. |
 | STRONG CLONE | > 65% | Same shape and most of the same structure, with substantive divergences. Parameterize the differing parts. |
 | REFACTOR TARGET | > 45% | Same general approach to the same problem, with real differences in execution. Evaluate whether a shared abstraction reduces duplication; sometimes "no" is the right answer. |
 | WEAK SIMILARITY | ≤ 45% | Probably coincidental token overlap. Hidden by default; visible with `--verbose`. |
@@ -45,6 +46,47 @@ Reading the combinations:
 | structural high, semantic low | Rare. Short snippets where order matters but the token bag differs. |
 | structural low, semantic high | "Functionally similar but written differently" — same problem, different shape. Often the most interesting refactor target, less interesting as a literal clone. |
 | both moderate | Usually noise from shared idioms — test scaffolding, lifecycle methods. The default `--min-confidence-lines 10` dampener demotes the short ones; raise it to demote more. |
+
+## Structural twins
+
+The tokenizer's normalization (identifiers → `VAR`, strings → `STR`)
+is what makes the score rename-invariant — and it means identifiers
+and string literals contribute nothing to it. Two table-driven tests
+with entirely different test names, fields, and expected strings
+genuinely tokenize identically and score 100%.
+
+To separate that case from real copy-paste, pairs scoring above the
+near-clone band (> 85%) get a third, label-only sub-score: **lexical**,
+the Jaccard overlap of the two snippets' RAW-code vocabulary —
+identifier and string-literal words, split on camelCase/snake_case,
+lowercased, with keywords and comments excluded. When lexical falls
+below 20%, the pair renders as STRUCTURAL TWIN
+(`"structural_twin"` in JSON): same shape, different content. Twins
+are usually parallel boilerplate — leave them alone, or parameterize
+the shape if the family keeps growing; they are not "delete one copy"
+findings.
+
+What the lexical gate never does:
+
+- It never changes the numeric score, and it never touches pairs at or
+  below 85% — it only re-labels the top bands.
+- It never demotes renames. A typical rename keeps most vocabulary
+  (helper calls, field names, string literals), which keeps its lexical
+  overlap well above the floor; the benchmark's renamed-clone fixtures
+  pin this. A rename so total that *every* identifier and string
+  differs is lexically indistinguishable from parallel boilerplate —
+  codetwin sides with "twin" there, and the 100% score is still
+  reported either way.
+- It never judges pairs with fewer than 8 lexical terms per side
+  (Jaccard over a five-word vocabulary is a coin flip); those fall
+  through to the ordinary bands and the exact-clone length gate.
+
+The lexical percentage renders under each top-band pair next to
+`structural`/`semantic`, and appears as `lexical` on the pair in JSON
+(only where computed). Precedence with the short-snippet gate: the
+content check runs first — a short, content-divergent pair is a
+STRUCTURAL TWIN (the more specific finding), not a "near clone
+(short)".
 
 ## Clusters, relations, and pairs
 
@@ -131,6 +173,9 @@ threshold and before `--limit`.
 - Separately from the score, the EXACT CLONE **label** requires
   `min(LinesA, LinesB) ≥ 10`; shorter pairs demote one band to NEAR
   CLONE. Terminal and JSON labels always agree.
+- Also label-only: pairs above 85% whose lexical overlap is below 20%
+  render as STRUCTURAL TWIN (see "Structural twins" above). The
+  content check takes precedence over the length gate.
 - `--verbose` includes weak similarities in addition to the labelled
   tiers. For memory reasons pairs are only materialized down to
   `max(0.30, threshold − 0.20)`, so even `--verbose` bottoms out there.
@@ -147,8 +192,10 @@ The labels tell you what's *similar*, not what's *wrong*. Some 100%
 scores reflect intentional duplication that you should NOT refactor:
 
 - **Sibling test cases.** Two short tests of the same parser with
-  different inputs read as exact clones. Use `pytest.parametrize` or its
-  equivalent only if the cases are short and exhaustive.
+  different inputs read as clones (usually STRUCTURAL TWIN when their
+  vocabulary diverges enough for the lexical gate to see it). Use
+  `pytest.parametrize` or its equivalent only if the cases are short
+  and exhaustive.
 - **Adapter classes for parallel APIs.** Kafka and Rabbit message
   handlers with the same lifecycle but different broker semantics —
   whether to extract a base class depends on how often the parallel

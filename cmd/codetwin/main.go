@@ -707,12 +707,18 @@ type jsonSuppressed struct {
 }
 
 type jsonPair struct {
-	ID             string          `json:"id,omitempty"`
-	FileA          string          `json:"file_a"`
-	FileB          string          `json:"file_b"`
-	Score          float64         `json:"score"`
-	Structural     float64         `json:"structural"`
-	Semantic       float64         `json:"semantic"`
+	ID         string  `json:"id,omitempty"`
+	FileA      string  `json:"file_a"`
+	FileB      string  `json:"file_b"`
+	Score      float64 `json:"score"`
+	Structural float64 `json:"structural"`
+	Semantic   float64 `json:"semantic"`
+	// Lexical is present only on pairs where the lexical sub-score was
+	// computed (combined score above the near-clone band). A pointer so
+	// a measured 0.0 — fully disjoint vocabulary, the strongest
+	// structural-twin evidence — still serializes instead of being
+	// dropped by omitempty.
+	Lexical        *float64        `json:"lexical,omitempty"`
 	Label          string          `json:"label"`
 	LangA          string          `json:"lang_a,omitempty"`
 	LangB          string          `json:"lang_b,omitempty"`
@@ -801,6 +807,10 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 			LangA: p.LangA, LangB: p.LangB,
 			ProvenanceA: toJSONProvenance(p.ProvenanceA),
 			ProvenanceB: toJSONProvenance(p.ProvenanceB),
+		}
+		if p.LexicalComputed {
+			lex := p.Lexical
+			jp.Lexical = &lex
 		}
 		if suggestions != nil {
 			if patch, ok := suggestions[p.ID]; ok {
@@ -1258,6 +1268,12 @@ SCORING:
   The Exact clone label additionally requires both snippets to span at
   least 10 non-blank lines; shorter pairs render as Near clones even at
   a perfect score (the score itself is unchanged).
+
+  Pairs above 85%% whose raw identifier/string vocabulary barely
+  overlaps (lexical < 20%%) render as Structural twins instead: same
+  shape, different content — likely parallel boilerplate (table tests,
+  per-field validators) rather than copy-paste. Labels only; the
+  numeric score is never altered.
 
   Run 'codetwin --guide' for a full explanation of the score, the
   structural/semantic split, and how clusters differ from pairs.

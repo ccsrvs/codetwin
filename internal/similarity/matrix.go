@@ -139,17 +139,38 @@ func BuildMatrix(
 					if combined < floor {
 						continue
 					}
+					// Lexical sub-score, computed lazily: only the
+					// exact/near bands (> StructuralTwinMinScore) read
+					// it — the structural-twin label gate — so pairs
+					// below that band skip the term-set merge entirely.
+					// LexicalComputed keeps a measured 0.0 (fully
+					// disjoint vocabulary) distinguishable from "not
+					// computed". Snippets with fewer than
+					// MinLexicalTerms terms carry too little content
+					// evidence to judge either way, so they stay
+					// uncomputed rather than demoting on a noisy
+					// measurement.
+					var lexical float64
+					lexicalComputed := false
+					if combined > report.StructuralTwinMinScore &&
+						len(snippets[i].LexTerms) >= MinLexicalTerms &&
+						len(snippets[j].LexTerms) >= MinLexicalTerms {
+						lexical = LexicalJaccard(snippets[i].LexTerms, snippets[j].LexTerms)
+						lexicalComputed = true
+					}
 					local = append(local, report.Pair{
-						ID:         report.PairID(snippets[i].Name, snippets[j].Name),
-						NameA:      snippets[i].Name,
-						NameB:      snippets[j].Name,
-						Structural: structural,
-						Semantic:   semantic,
-						Score:      combined,
-						LinesA:     snippets[i].NonBlankLn,
-						LinesB:     snippets[j].NonBlankLn,
-						LangA:      string(snippets[i].Lang),
-						LangB:      string(snippets[j].Lang),
+						ID:              report.PairID(snippets[i].Name, snippets[j].Name),
+						NameA:           snippets[i].Name,
+						NameB:           snippets[j].Name,
+						Structural:      structural,
+						Semantic:        semantic,
+						Score:           combined,
+						LinesA:          snippets[i].NonBlankLn,
+						LinesB:          snippets[j].NonBlankLn,
+						LangA:           string(snippets[i].Lang),
+						LangB:           string(snippets[j].Lang),
+						Lexical:         lexical,
+						LexicalComputed: lexicalComputed,
 					})
 				}
 				// Flush progress in batches per row to avoid hammering the

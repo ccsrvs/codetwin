@@ -16,8 +16,10 @@ with the commands shown._
 > demoted by the evidence gate); materialized pairs 83% → ~4% of all
 > comparisons. `TestBench_GroundTruth` green throughout, with a new
 > `negative-short` bench category pinning the short-snippet contract.
-> R3 and R6 (scoring-model changes) and §5's granularity work remain
-> open.
+> **R6 is now implemented** as a label-only band modifier (structural
+> twins; lexical floor 0.20 pinned by a new `bench/twins` category and
+> renamed-positive guards — see the README's "Structural twins"
+> section). R3 and §5's granularity work remain open.
 
 ## Executive summary
 

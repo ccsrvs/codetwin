@@ -321,6 +321,7 @@ the matrix is computing. It's auto-suppressed when stderr isn't a TTY
 |---|---|---|
 | > 95% | Exact clone | Extract shared utility, delete one immediately. Label additionally requires both snippets ≥ 10 non-blank lines; shorter pairs render as near clones at the same score |
 | > 85% | Near clone | Virtually identical with one or two token edits; treat as a clone unless the difference is intentional |
+| > 85% + lexical < 20% | Structural twin (`structural_twin` in JSON) | Same token shape, but the raw identifier/string vocabulary barely overlaps — parallel boilerplate (table tests, per-field validators), not copy-paste. Leave alone, or parameterize the shape if the family keeps growing; do NOT treat as "delete one copy" |
 | > 65% | Strong clone | Parameterize the differing parts |
 | > 45% | Refactor target | Evaluate whether a shared abstraction reduces duplication |
 | < 45% | Weak similarity | Probably coincidental — review before acting |

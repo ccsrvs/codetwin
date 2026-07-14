@@ -427,12 +427,14 @@ func TestBench_GroundTruth(t *testing.T) {
 // modifier. Returns the label and the lexical score.
 func labelForBest(s scored, a, b scan.Snippet) (string, float64) {
 	lex := similarity.LexicalJaccard(a.LexTerms, b.LexTerms)
+	computed := len(a.LexTerms) >= similarity.MinLexicalTerms &&
+		len(b.LexTerms) >= similarity.MinLexicalTerms
 	score := similarity.LengthDampen(
 		s.combined, a.NonBlankLn, b.NonBlankLn, similarity.DefaultMinConfidenceLines)
 	p := report.Pair{
 		Score:  score,
 		LinesA: a.NonBlankLn, LinesB: b.NonBlankLn,
-		Lexical: lex, LexicalComputed: true,
+		Lexical: lex, LexicalComputed: computed,
 	}
 	return report.JSONLabel(p), lex
 }

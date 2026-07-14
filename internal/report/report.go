@@ -48,6 +48,19 @@ type Pair struct {
 	IsTestA    bool    // snippet A's file path follows its language's test convention
 	IsTestB    bool    // snippet B's file path follows its language's test convention
 
+	// Lexical is the Jaccard similarity of the two snippets' raw-code
+	// vocabulary (identifier + string-literal words; see
+	// tokenizer.LexicalTerms). It NEVER feeds the numeric Score — it
+	// only modulates the top label bands: a pair above
+	// StructuralTwinMinScore whose Lexical falls below
+	// StructuralTwinMaxLexical renders as a structural twin instead of
+	// an exact/near clone. LexicalComputed distinguishes a measured 0
+	// from "not computed" (BuildMatrix computes it lazily, only for
+	// pairs in the bands that read it); when false, Lexical is
+	// meaningless and the label logic ignores it.
+	Lexical         float64
+	LexicalComputed bool
+
 	// ProvenanceA / ProvenanceB carry git blame metadata for each
 	// endpoint, populated when --blame is on. Nil when blame wasn't
 	// computed for that snippet (no git, untracked file, blame off).
@@ -621,9 +634,16 @@ func printPairs(w io.Writer, pairs []Pair, opts Options) {
 		printProvenance(w, p.ProvenanceB, opts)
 		printPreview(w, p.NameB, opts)
 
-		fmt.Fprintf(w, "  %sstructural: %3.0f%%  semantic: %3.0f%%%s\n\n",
+		// The lexical sub-score renders only when it was computed
+		// (pairs above the near-clone band), so lower-band pair lines
+		// are byte-identical to the pre-lexical format.
+		lexical := ""
+		if p.LexicalComputed {
+			lexical = fmt.Sprintf("  lexical: %3.0f%%", p.Lexical*100)
+		}
+		fmt.Fprintf(w, "  %sstructural: %3.0f%%  semantic: %3.0f%%%s%s\n\n",
 			color(grey, opts),
-			p.Structural*100, p.Semantic*100,
+			p.Structural*100, p.Semantic*100, lexical,
 			color(reset, opts))
 	}
 }
@@ -723,16 +743,19 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 // standalone leftovers (a repo whose exact clones all live inside
 // clusters would otherwise report "Exact clones 0").
 func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, sup Suppressed, opts Options) {
-	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
+	exact, near, twins, strong, candidates, weak := 0, 0, 0, 0, 0, 0
 	for _, p := range allVisible {
 		// Bucket by the same gated classification the pair labels use,
 		// so "Exact clones N" never counts a pair that rendered as a
-		// near clone under the short-snippet evidence gate.
+		// near clone under the short-snippet evidence gate or as a
+		// structural twin under the lexical gate.
 		switch tierForPair(p).json {
 		case "exact_clone":
 			exact++
 		case "near_clone":
 			near++
+		case "structural_twin":
+			twins++
 		case "strong_clone":
 			strong++
 		case "refactor_candidate":
@@ -762,6 +785,11 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 		color(grey, opts), color(reset, opts), color(red, opts), exact, color(reset, opts))
 	fmt.Fprintf(w, "  %sNear clones%s       %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(red, opts), near, color(reset, opts))
+	if twins > 0 {
+		fmt.Fprintf(w, "  %sStructural twins%s  %s%d%s %s(same shape, different content)%s\n",
+			color(grey, opts), color(reset, opts), color(purple, opts), twins, color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
 	fmt.Fprintf(w, "  %sStrong clones%s     %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(orange, opts), strong, color(reset, opts))
 	fmt.Fprintf(w, "  %sRefactor targets%s  %s%d%s\n",
@@ -840,6 +868,33 @@ var tiers = []tier{
 	{-1, "[WEAK SIMILARITY ]", grey, "weak_similarity"},
 }
 
+// structuralTwinTier is a band MODIFIER, not a score band: pairs in the
+// exact/near bands (score > StructuralTwinMinScore) whose lexical
+// overlap falls below StructuralTwinMaxLexical render with this tier
+// instead. Same shape, different content — likely parallel boilerplate
+// (table tests, per-field validators, generated handlers) rather than
+// copy-paste. It never appears via tierFor (a plain score lookup);
+// only tierForPair can select it.
+var structuralTwinTier = tier{-1, "[STRUCTURAL TWIN ]", purple, "structural_twin"}
+
+// StructuralTwinMinScore is the combined-score floor above which the
+// lexical sub-score is consulted at all: only the exact/near bands
+// (> 0.85) claim "this was copied", so only they need the content
+// check. Pairs at or below this score are never modified.
+const StructuralTwinMinScore = 0.85
+
+// StructuralTwinMaxLexical is the lexical floor for the top bands: a
+// pair above StructuralTwinMinScore whose lexical Jaccard is below
+// this renders as STRUCTURAL TWIN. Tuned against internal/bench: the
+// twins fixtures (disjoint vocabulary by construction) measure
+// 0.00–0.07, while the renamed positives — systematic renames that
+// keep the vocabulary a real rename keeps (helper calls, field names,
+// string literals) — measure 0.29–0.60. 0.20 splits the two
+// populations with margin on both sides; rename-invariance
+// (go-renamed, python-renamed scoring 1.0 AND labeling exact) is
+// pinned by TestBench_GroundTruth.
+const StructuralTwinMaxLexical = 0.20
+
 // ExactCloneMinLines is the evidence floor for the top report band: a
 // pair whose smaller snippet has fewer than this many non-blank lines
 // never renders as an exact clone, regardless of score. Short snippets
@@ -859,11 +914,26 @@ func tierFor(score float64) tier {
 	return tiers[len(tiers)-1]
 }
 
-// tierForPair classifies a pair by score, then evidence-gates the top
-// band per ExactCloneMinLines. Pairs with unknown line counts (0) fail
-// the gate too — no evidence, no top band.
+// tierForPair classifies a pair by score, then applies the two
+// evidence gates that can move a top-band label. Precedence: the
+// content check (structural twin) runs BEFORE the length gate, because
+// it makes the stronger, more specific claim — a content-divergent
+// pair isn't a slightly-less-certain copy-paste finding, it's a
+// different kind of finding entirely (parallel boilerplate), whereas
+// the length gate merely tempers the confidence of a copy-paste claim.
+// A short, content-divergent pair is therefore a STRUCTURAL TWIN, not
+// a "near clone (short)".
+//
+// The length gate: the exact-clone band additionally requires
+// min(lines) >= ExactCloneMinLines; shorter pairs demote one band.
+// Pairs with unknown line counts (0) fail the gate too — no evidence,
+// no top band. Neither gate ever changes the numeric score.
 func tierForPair(p Pair) tier {
 	t := tierFor(p.Score)
+	if p.Score > StructuralTwinMinScore && p.LexicalComputed &&
+		p.Lexical < StructuralTwinMaxLexical {
+		return structuralTwinTier
+	}
 	if t.json == tiers[0].json && minPairLines(p) < ExactCloneMinLines {
 		return tiers[1]
 	}
