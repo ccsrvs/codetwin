@@ -330,20 +330,11 @@ func synthesizeElixir(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 func exRebodyAsHelper(aCode string) string {
 	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
 
-	headerIdx := -1
-	headerIndent := ""
-	for i, l := range lines {
-		t := strings.TrimSpace(l)
-		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
-			continue
-		}
-		headerIdx = i
-		headerIndent = leadingWhitespace(l)
-		break
-	}
+	headerIdx := significantLineIndex(lines, "#", "@")
 	if headerIdx < 0 {
 		return strings.Join(lines, "\n") + "\n"
 	}
+	headerIndent := leadingWhitespace(lines[headerIdx])
 	var body []string
 	for _, l := range lines[headerIdx+1:] {
 		body = append(body, strings.TrimPrefix(l, headerIndent))
@@ -381,11 +372,7 @@ func exHelperHeader(aCode, helperName string) (string, bool) {
 	default:
 		return "", false
 	}
-	nameEnd := identLen(rest)
-	if nameEnd == 0 {
-		return "", false
-	}
-	return keyword + helperName + rest[nameEnd:], true
+	return replaceIdentAfter(keyword, rest, helperName)
 }
 
 // firstSignificantLine returns the trimmed text of code's first line
@@ -395,14 +382,26 @@ func exHelperHeader(aCode, helperName string) (string, bool) {
 // significant line of a chunk. ok=false when every line is blank or
 // skipped.
 func firstSignificantLine(code string, skipPrefixes ...string) (string, bool) {
-	for _, l := range strings.Split(code, "\n") {
+	lines := strings.Split(code, "\n")
+	i := significantLineIndex(lines, skipPrefixes...)
+	if i < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(lines[i]), true
+}
+
+// significantLineIndex is firstSignificantLine over pre-split lines,
+// returning the line's index (-1 when every line is blank or skipped)
+// for the callers that also need its position or original indent.
+func significantLineIndex(lines []string, skipPrefixes ...string) int {
+	for i, l := range lines {
 		t := strings.TrimSpace(l)
 		if t == "" || hasAnyPrefix(t, skipPrefixes) {
 			continue
 		}
-		return t, true
+		return i
 	}
-	return "", false
+	return -1
 }
 
 func hasAnyPrefix(s string, prefixes []string) bool {
@@ -425,6 +424,19 @@ func identLen(s string) int {
 	return n
 }
 
+// replaceIdentAfter swaps the identifier at the start of rest for
+// helperName, emitting prefix + helperName + the remainder of rest —
+// the "rename the definition" step shared by the Elixir, Rust, and JS
+// header rewriters. ok=false when rest doesn't start with an
+// identifier.
+func replaceIdentAfter(prefix, rest, helperName string) (string, bool) {
+	nameEnd := identLen(rest)
+	if nameEnd == 0 {
+		return "", false
+	}
+	return prefix + helperName + rest[nameEnd:], true
+}
+
 // rsHelperHeader rewrites the first recognisable Rust definition
 // header of aCode to use helperName. Skips blank lines, line comments
 // (`//`), block comment fragments (`/*`, `*`), and attributes (`#[...]`)
@@ -442,12 +454,7 @@ func rsHelperHeader(aCode, helperName string) (string, bool) {
 	if fnIdx < 0 {
 		return "", false
 	}
-	afterFn := t[fnIdx+len("fn "):]
-	nameEnd := identLen(afterFn)
-	if nameEnd == 0 {
-		return "", false
-	}
-	return t[:fnIdx] + "fn " + helperName + afterFn[nameEnd:], true
+	return replaceIdentAfter(t[:fnIdx]+"fn ", t[fnIdx+len("fn "):], helperName)
 }
 
 // rustSkipPrefixes are the trimmed-line prefixes (comments, attributes)
@@ -519,13 +526,8 @@ func braceRebody(aCode string, skipPrefixes ...string) string {
 	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
 
 	headerIndent := ""
-	for _, l := range lines {
-		t := strings.TrimSpace(l)
-		if t == "" || hasAnyPrefix(t, skipPrefixes) {
-			continue
-		}
-		headerIndent = leadingWhitespace(l)
-		break
+	if i := significantLineIndex(lines, skipPrefixes...); i >= 0 {
+		headerIndent = leadingWhitespace(lines[i])
 	}
 
 	openIdx := -1
@@ -765,12 +767,7 @@ func jsRewriteFunctionHeader(line, helperName string) (string, bool) {
 	if !strings.HasPrefix(rest, "function ") {
 		return "", false
 	}
-	afterKeyword := rest[len("function "):]
-	nameEnd := identLen(afterKeyword)
-	if nameEnd == 0 {
-		return "", false
-	}
-	return prefix + "function " + helperName + afterKeyword[nameEnd:], true
+	return replaceIdentAfter(prefix+"function ", rest[len("function "):], helperName)
 }
 
 // javaHelperHeader builds the helper's method-header line by finding
@@ -853,16 +850,11 @@ func pythonRebodyAsHelper(aCode string) string {
 	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
 
 	defIdx := -1
-	for i, l := range lines {
-		t := strings.TrimSpace(l)
-		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
-			continue
-		}
+	if i := significantLineIndex(lines, "#", "@"); i >= 0 {
+		t := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(t, "def ") || strings.HasPrefix(t, "async def ") {
 			defIdx = i
-			break
 		}
-		break
 	}
 	if defIdx < 0 || defIdx == len(lines)-1 {
 		return ""

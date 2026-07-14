@@ -112,17 +112,10 @@ func rangesOverlap(aStart, aEnd, bStart, bEnd int) bool {
 // same DiffMap.Touches gate pairs go through, but over the block's
 // real line ranges rather than the enclosing chunks'.
 func filterBlocksBySince(bcs []report.BlockClone, repoRoot string, diff git.DiffMap) ([]report.BlockClone, int) {
-	kept := make([]report.BlockClone, 0, len(bcs))
-	dropped := 0
-	for _, b := range bcs {
-		if diff.Touches(repoRoot, b.PathA, b.AStartLine, b.AEndLine) ||
-			diff.Touches(repoRoot, b.PathB, b.BStartLine, b.BEndLine) {
-			kept = append(kept, b)
-			continue
-		}
-		dropped++
-	}
-	return kept, dropped
+	return keepTouching(bcs, func(b report.BlockClone) bool {
+		return diff.Touches(repoRoot, b.PathA, b.AStartLine, b.AEndLine) ||
+			diff.Touches(repoRoot, b.PathB, b.BStartLine, b.BEndLine)
+	})
 }
 
 // addBlockPreviews inserts a Preview for each side of every visible
