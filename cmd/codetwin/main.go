@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
@@ -71,18 +72,20 @@ func main() {
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
 	minLines := flag.Int("min-lines", 3, "skip files with fewer than N non-blank lines")
-	eps := flag.Float64("eps", 0.45, "DBSCAN epsilon: max distance for two snippets to be neighbours")
+	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
 	sortMode := flag.String("sort", "score", "result ordering: score | score-asc | size | size-asc | name | age | age-asc (age modes require --blame)")
 	limit := flag.Int("limit", 0, "show only the top N pairs and N clusters (0 = no limit)")
-	minConfLines := flag.Int("min-confidence-lines", 0, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
+	minConfLines := flag.Int("min-confidence-lines", similarity.DefaultMinConfidenceLines, "dampen pair scores when min(LinesA, LinesB) < N (0 = off); ramps from 0.5× at 0 lines to 1.0× at N")
+	minBlockLines := flag.Int("min-block-lines", blocks.DefaultMinBlockLines, "report sub-function partial clones (shared blocks inside below-threshold pairs) spanning at least N non-blank lines on both sides; 0 disables block detection")
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
+	includeTests := flag.Bool("include-tests", false, "include test↔test pairs and test-only clusters in the report; by default they are suppressed and replaced by a one-line summary")
 	flat := flag.Bool("flat", false, "list every pair individually; by default pairs whose endpoints share a cluster are collapsed into the cluster")
 	since := flag.String("since", "", "PR-delta mode: keep only pairs where at least one snippet overlaps lines changed since <ref> (any committish; e.g. main, HEAD~5, abc123)")
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
@@ -136,7 +139,8 @@ func main() {
 		applied := flagsExplicitlySet()
 		applyConfigDefaults(cfg.Defaults, applied,
 			threshold, plain, jsonOut, verbose, minLines, eps, minPts,
-			preview, previewLines, sortMode, limit, minConfLines)
+			preview, previewLines, sortMode, limit, minConfLines, includeTests,
+			minBlockLines)
 	}
 
 	ignoreMatcher, err := compileIgnoreMatcher(cfg)
@@ -310,15 +314,21 @@ func main() {
 		matrixProgWg.Add(1)
 		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
-	matrix, pairs := similarity.BuildMatrix(
-		snippets, vectors, *minConfLines,
+	matrix, pairs, blockCands := similarity.BuildMatrix(
+		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
 	)
 	if matrixProgStop != nil {
 		close(matrixProgStop)
 		matrixProgWg.Wait()
 	}
-	debugf("similarity.BuildMatrix: %d pairs above noise floor", len(pairs))
+	debugf("similarity.BuildMatrix: %d pairs above materialization floor (%.2f), %d block candidates in gray band",
+		len(pairs), similarity.MaterializationFloor(*threshold), len(blockCands))
+
+	// Tag each pair endpoint with its snippet's test-file classification
+	// so report.Prepare can segregate test↔test findings by default.
+	// Metadata only — no score or matrix changes.
+	markTestPairs(pairs, snippets)
 
 	if pairIgnoreMatcher != nil {
 		var ignored int
@@ -326,10 +336,22 @@ func main() {
 		debugf("ignore_pairs: dropped %d pairs", ignored)
 	}
 
+	// Block-level partial clones (review §5.3): a second detection
+	// channel over the gray-band candidates — pairs too diluted to
+	// render at function level that may still hide a copied block.
+	var partialClones []report.BlockClone
+	if *minBlockLines > 0 && len(blockCands) > 0 {
+		partialClones = detectBlockClones(blockCands, snippets, *minBlockLines, pairIgnoreMatcher)
+		debugf("blocks: %d partial clones from %d candidates", len(partialClones), len(blockCands))
+	}
+
 	if *since != "" {
 		var dropped int
 		pairs, dropped = filterPairsBySince(pairs, snippets, gitRepo.Root, sinceDiff)
 		debugf("--since: dropped %d pairs not overlapping diff", dropped)
+		var blocksDropped int
+		partialClones, blocksDropped = filterBlocksBySince(partialClones, gitRepo.Root, sinceDiff)
+		debugf("--since: dropped %d partial clones not overlapping diff", blocksDropped)
 	}
 
 	if *blame {
@@ -343,30 +365,13 @@ func main() {
 	debugf("DBSCAN: %d clusters", clusterResult.NumClusters)
 	groups := cluster.Groups(clusterResult)
 
-	clusters := make([]report.Cluster, 0, len(groups))
-	for id, members := range groups {
-		names := make([]string, len(members))
-		for k, idx := range members {
-			names[k] = snippets[idx].Name
-		}
-		// Average internal pair score: mean of matrix[a][b] for every distinct
-		// member pair. Single-member clusters (which DBSCAN won't produce, but
-		// guard anyway) get a score of 0.
-		var sum float64
-		var nPairs int
-		for k := 0; k < len(members); k++ {
-			for l := k + 1; l < len(members); l++ {
-				sum += matrix[members[k]][members[l]]
-				nPairs++
-			}
-		}
-		avg := 0.0
-		if nPairs > 0 {
-			avg = sum / float64(nPairs)
-		}
-		clusters = append(clusters, report.Cluster{ID: id, Members: names, Score: avg})
+	snippetNames := make([]string, len(snippets))
+	for i, s := range snippets {
+		snippetNames[i] = s.Name
 	}
-	debugf("clusters built: %d", len(clusters))
+	clusters := buildReportClusters(groups, matrix, snippetNames, *threshold)
+	markTestOnlyClusters(clusters, snippets)
+	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
 	if *since != "" {
 		before := len(clusters)
@@ -381,6 +386,7 @@ func main() {
 		Sort:          report.SortMode(*sortMode),
 		Limit:         *limit,
 		CrossLangOnly: *crossLangOnly,
+		IncludeTests:  *includeTests,
 		Flat:          *flat,
 	}
 
@@ -388,14 +394,23 @@ func main() {
 	// previews scoped to just the snippets that will actually render.
 	// On a big repo this avoids an O(shown²) MatchRange storm over
 	// thousands of snippets when --limit means we'll only show a handful.
-	visiblePairs, visibleClusters := report.Prepare(pairs, clusters, opts)
-	debugf("prepared: %d visible pairs, %d visible clusters",
-		len(visiblePairs), len(visibleClusters))
+	visiblePairs, visibleClusters, suppressed := report.Prepare(pairs, clusters, opts)
+	visibleBlocks, suppressedBlocks := report.PrepareBlocks(partialClones, opts)
+	suppressed.TestTestBlocks = suppressedBlocks
+	// Render re-runs Prepare on the already-filtered slices, which counts
+	// zero suppressions — carry the real counts through Options.
+	opts.Suppressed = suppressed
+	opts.PartialClones = visibleBlocks
+	debugf("prepared: %d visible pairs, %d visible clusters, %d partial clones (%d test↔test pairs, %d test-only clusters, %d test↔test blocks suppressed)",
+		len(visiblePairs), len(visibleClusters), len(visibleBlocks),
+		suppressed.TestTestPairs, suppressed.TestOnlyClusters, suppressed.TestTestBlocks)
 
 	// --suggest <pair-id> short-circuits the rest of the report. We
 	// look up across all materialized pairs (not just visiblePairs) so
 	// the user can target a sub-threshold pair without having to
-	// re-tune --threshold.
+	// re-tune --threshold. Materialization reaches down to
+	// similarity.MaterializationFloor(threshold) — a 0.20 band below
+	// the threshold (never below 0.30).
 	if *suggest != "" {
 		if showProgress {
 			fmt.Fprint(os.Stderr, "\r\033[K")
@@ -426,7 +441,7 @@ func main() {
 			suggestions = buildSuggestionMap(visiblePairs, snippets)
 			debugf("--suggest-all: built %d suggestions", len(suggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, opts.Previews, suggestions)
+		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, suppressed)
 		debugf("done (json)")
 		return
 	}
@@ -511,6 +526,92 @@ func buildPreviews(
 		}
 	}
 	return previews
+}
+
+// ── Cluster building ──────────────────────────────────────────────────────────
+
+// clusterStats returns the average and minimum internal pair score over
+// all distinct member pairs, read from the similarity matrix. Groups
+// with fewer than two members (which DBSCAN won't produce, but guard
+// anyway) yield (0, 0).
+func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
+	if len(members) < 2 {
+		return 0, 0
+	}
+	var sum float64
+	var nPairs int
+	min = 1.0
+	for k := 0; k < len(members); k++ {
+		for l := k + 1; l < len(members); l++ {
+			s := matrix[members[k]][members[l]]
+			sum += s
+			if s < min {
+				min = s
+			}
+			nPairs++
+		}
+	}
+	return sum / float64(nPairs), min
+}
+
+// buildReportClusters converts DBSCAN member groups into report.Clusters
+// carrying both the average internal pair score (Score) and the minimum
+// (MinScore, "cohesion"), computed from the in-memory similarity matrix.
+//
+// DBSCAN links transitively: with eps 0.35 any chain of pairs scoring
+// ≥ 0.65 merges into one cluster even when its endpoints barely resemble
+// each other. The report frames each cluster as one refactoring task, so
+// low-cohesion chains are actively misleading. When a cluster's minimum
+// internal score falls below the report threshold, its members are
+// re-linked single-linkage at pair score ≥ threshold and each connected
+// component becomes its own cluster; components of size 1 have no
+// threshold-strength partner and drop out as noise. Split clusters get
+// their avg/min recomputed over just their own members.
+//
+// IDs are assigned deterministically by first member name, so cluster
+// numbering is stable across runs regardless of map iteration order.
+func buildReportClusters(
+	groups map[int][]int,
+	matrix [][]float64,
+	names []string,
+	threshold float64,
+) []report.Cluster {
+	memberLists := make([][]int, 0, len(groups))
+	for _, members := range groups {
+		_, min := clusterStats(members, matrix)
+		if min >= threshold {
+			memberLists = append(memberLists, members)
+			continue
+		}
+		link := func(a, b int) bool { return matrix[a][b] >= threshold }
+		for _, comp := range cluster.Components(members, link) {
+			if len(comp) < 2 {
+				continue // singleton at the stricter bound → noise
+			}
+			memberLists = append(memberLists, comp)
+		}
+	}
+
+	clusters := make([]report.Cluster, 0, len(memberLists))
+	for _, members := range memberLists {
+		avg, min := clusterStats(members, matrix)
+		memberNames := make([]string, len(members))
+		for k, idx := range members {
+			memberNames[k] = names[idx]
+		}
+		clusters = append(clusters, report.Cluster{
+			Members: memberNames, Score: avg, MinScore: min,
+		})
+	}
+	// Deterministic renumbering: order by first member name. Clusters are
+	// disjoint, so first members are unique and the order is total.
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].Members[0] < clusters[j].Members[0]
+	})
+	for i := range clusters {
+		clusters[i].ID = i
+	}
+	return clusters
 }
 
 // ── Refactor suggestions (--suggest / --suggest-all) ─────────────────────────
@@ -609,15 +710,39 @@ type jsonOutput struct {
 	Pairs    []jsonPair             `json:"pairs"`
 	Clusters []jsonCluster          `json:"clusters"`
 	Previews map[string]jsonPreview `json:"previews,omitempty"`
+
+	// PartialClones lists sub-function block-level findings (review
+	// §5.3). Omitted when block detection found nothing or was
+	// disabled with --min-block-lines 0.
+	PartialClones []jsonBlockClone `json:"partial_clones,omitempty"`
+
+	// Suppressed summarizes findings dropped by the default test-code
+	// segregation. Omitted entirely when nothing was suppressed — in
+	// particular with --include-tests, so that flag preserves the exact
+	// pre-segregation JSON schema for CI consumers.
+	Suppressed *jsonSuppressed `json:"suppressed,omitempty"`
+}
+
+// jsonSuppressed mirrors report.Suppressed in the JSON schema.
+type jsonSuppressed struct {
+	TestTestPairs    int `json:"test_test_pairs,omitempty"`
+	TestOnlyClusters int `json:"test_only_clusters,omitempty"`
+	TestTestBlocks   int `json:"test_test_blocks,omitempty"`
 }
 
 type jsonPair struct {
-	ID             string          `json:"id,omitempty"`
-	FileA          string          `json:"file_a"`
-	FileB          string          `json:"file_b"`
-	Score          float64         `json:"score"`
-	Structural     float64         `json:"structural"`
-	Semantic       float64         `json:"semantic"`
+	ID         string  `json:"id,omitempty"`
+	FileA      string  `json:"file_a"`
+	FileB      string  `json:"file_b"`
+	Score      float64 `json:"score"`
+	Structural float64 `json:"structural"`
+	Semantic   float64 `json:"semantic"`
+	// Lexical is present only on pairs where the lexical sub-score was
+	// computed (combined score above the near-clone band). A pointer so
+	// a measured 0.0 — fully disjoint vocabulary, the strongest
+	// structural-twin evidence — still serializes instead of being
+	// dropped by omitempty.
+	Lexical        *float64        `json:"lexical,omitempty"`
 	Label          string          `json:"label"`
 	LangA          string          `json:"lang_a,omitempty"`
 	LangB          string          `json:"lang_b,omitempty"`
@@ -666,6 +791,10 @@ type jsonCluster struct {
 	ID      int      `json:"id"`
 	Members []string `json:"members"`
 	Score   float64  `json:"score"`
+	// MinScore is the cluster's cohesion: the minimum internal pair
+	// score over all distinct member pairs. A MinScore far below Score
+	// flags a transitively chained family.
+	MinScore float64 `json:"min_score"`
 }
 
 type jsonPreview struct {
@@ -677,9 +806,17 @@ type jsonPreview struct {
 // pairs and clusters as JSON. Sort and limit are applied upstream via
 // report.Prepare so JSON consumers see the same set of findings as the
 // terminal renderer. When suggestions is non-nil, each pair's
-// suggested_patch field is populated by ID lookup.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[string]report.Preview, suggestions map[string]jsonPatch) {
-	out := jsonOutput{}
+// suggested_patch field is populated by ID lookup. Non-zero suppressed
+// counts add a top-level `suppressed` summary object.
+func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions map[string]jsonPatch, suppressed report.Suppressed) {
+	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones)}
+	if suppressed.TestTestPairs > 0 || suppressed.TestOnlyClusters > 0 || suppressed.TestTestBlocks > 0 {
+		out.Suppressed = &jsonSuppressed{
+			TestTestPairs:    suppressed.TestTestPairs,
+			TestOnlyClusters: suppressed.TestOnlyClusters,
+			TestTestBlocks:   suppressed.TestTestBlocks,
+		}
+	}
 	if len(previews) > 0 {
 		out.Previews = make(map[string]jsonPreview, len(previews))
 		for k, v := range previews {
@@ -691,10 +828,14 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 			ID:    p.ID,
 			FileA: p.NameA, FileB: p.NameB,
 			Score: p.Score, Structural: p.Structural, Semantic: p.Semantic,
-			Label: report.JSONLabel(p.Score),
+			Label: report.JSONLabel(p),
 			LangA: p.LangA, LangB: p.LangB,
 			ProvenanceA: toJSONProvenance(p.ProvenanceA),
 			ProvenanceB: toJSONProvenance(p.ProvenanceB),
+		}
+		if p.LexicalComputed {
+			lex := p.Lexical
+			jp.Lexical = &lex
 		}
 		if suggestions != nil {
 			if patch, ok := suggestions[p.ID]; ok {
@@ -704,7 +845,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 		out.Pairs = append(out.Pairs, jp)
 	}
 	for _, c := range clusters {
-		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score})
+		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score, MinScore: c.MinScore})
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -820,7 +961,7 @@ func applyConfigDefaults(
 	threshold *float64, plain *bool, jsonOut *bool, verbose *bool,
 	minLines *int, eps *float64, minPts *int,
 	preview *bool, previewLines *int, sortMode *string, limit *int,
-	minConfLines *int,
+	minConfLines *int, includeTests *bool, minBlockLines *int,
 ) {
 	if d.Threshold != nil && !explicit["threshold"] {
 		*threshold = *d.Threshold
@@ -857,6 +998,12 @@ func applyConfigDefaults(
 	}
 	if d.MinConfidenceLines != nil && !explicit["min-confidence-lines"] {
 		*minConfLines = *d.MinConfidenceLines
+	}
+	if d.IncludeTests != nil && !explicit["include-tests"] {
+		*includeTests = *d.IncludeTests
+	}
+	if d.MinBlockLines != nil && !explicit["min-block-lines"] {
+		*minBlockLines = *d.MinBlockLines
 	}
 }
 
@@ -946,6 +1093,42 @@ func attachProvenance(pairs []report.Pair, provs map[string]*report.Provenance) 
 		if p, ok := provs[pairs[i].NameB]; ok {
 			pairs[i].ProvenanceB = p
 		}
+	}
+}
+
+// markTestPairs sets each pair's IsTestA/IsTestB from the endpoint
+// snippets' test-file classification (scan.IsTestFile on the scanned
+// path). Presentation metadata only: report.Prepare uses the flags to
+// suppress test↔test pairs by default; scores are untouched.
+func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
+	isTest := make(map[string]bool, len(snippets))
+	for _, s := range snippets {
+		isTest[s.Name] = s.IsTest
+	}
+	for i := range pairs {
+		pairs[i].IsTestA = isTest[pairs[i].NameA]
+		pairs[i].IsTestB = isTest[pairs[i].NameB]
+	}
+}
+
+// markTestOnlyClusters sets Cluster.TestOnly on clusters whose every
+// member is a test snippet. Runs after buildReportClusters so the flag
+// reflects the final member lists (low-cohesion splitting may have
+// regrouped members). Same presentation-only contract as markTestPairs.
+func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
+	isTest := make(map[string]bool, len(snippets))
+	for _, s := range snippets {
+		isTest[s.Name] = s.IsTest
+	}
+	for i := range clusters {
+		allTest := len(clusters[i].Members) > 0
+		for _, m := range clusters[i].Members {
+			if !isTest[m] {
+				allTest = false
+				break
+			}
+		}
+		clusters[i].TestOnly = allTest
 	}
 }
 
@@ -1065,7 +1248,8 @@ FLAGS:
   --json               output as JSON
   --verbose            show all pairs including weak similarities
   --min-lines int      skip files with fewer than N non-blank lines (default 3)
-  --eps float          DBSCAN epsilon distance (default 0.45)
+  --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
+                       the 'strong clone' band)
   --min-pts int        DBSCAN min cluster size (default 2)
   --preview            show a short code excerpt for each finding
   --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)
@@ -1074,13 +1258,20 @@ FLAGS:
   --limit int          show only the top N pairs and N clusters (0 = no limit)
   --flat               list every pair individually; by default pairs inside a
                        cluster render once as the cluster (families first)
-  --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off)
+  --min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N
+                       (default 10; 0 = off)
+  --min-block-lines int  report sub-function PARTIAL CLONES: shared blocks of at
+                       least N non-blank lines (both sides) hiding inside pairs
+                       below the report threshold (default 8; 0 = off)
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
   --debug              print phase checkpoints with elapsed time to stderr
   --cross-lang-only    report only pairs whose two snippets are in different languages
                        (e.g. duplicate logic across Go service + TS dashboard)
+  --include-tests      include test↔test pairs and test-only clusters; by default
+                       they are suppressed and replaced by a one-line summary
+                       (test↔production pairs and mixed clusters always render)
   --since string       PR-delta mode: keep only findings where ≥1 endpoint overlaps
                        lines changed since <ref> (e.g. main, HEAD~5, abc123).
                        Requires git on PATH and a git repository.
@@ -1104,6 +1295,16 @@ SCORING:
   > 65%%  Strong clone      — parameterize differing parts
   > 45%%  Refactor target   — evaluate shared abstraction
   < 45%%  Weak similarity   — probably coincidental
+
+  The Exact clone label additionally requires both snippets to span at
+  least 10 non-blank lines; shorter pairs render as Near clones even at
+  a perfect score (the score itself is unchanged).
+
+  Pairs above 85%% whose raw identifier/string vocabulary barely
+  overlaps (lexical < 20%%) render as Structural twins instead: same
+  shape, different content — likely parallel boilerplate (table tests,
+  per-field validators) rather than copy-paste. Labels only; the
+  numeric score is never altered.
 
   Run 'codetwin --guide' for a full explanation of the score, the
   structural/semantic split, and how clusters differ from pairs.

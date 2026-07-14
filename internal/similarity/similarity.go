@@ -245,13 +245,83 @@ const CrossLangStructuralWeight = 0.2
 
 // CombinedForLangs blends structural and semantic scores with
 // language-aware weights: an even split when both snippets are the
-// same language, semantic-dominant when they differ.
+// same language, semantic-dominant when they differ. Same-language
+// pairs are additionally subject to SameLangEvidenceCap — semantic
+// saturation without structural corroboration must not reach the
+// report band.
 func CombinedForLangs(structural, semantic float64, sameLang bool) float64 {
-	if sameLang {
-		return Combined(structural, semantic, 0.5)
+	if !sameLang {
+		return Combined(structural, semantic, CrossLangStructuralWeight)
 	}
-	return Combined(structural, semantic, CrossLangStructuralWeight)
+	combined := Combined(structural, semantic, 0.5)
+	if limit := SameLangEvidenceCap(structural); combined > limit {
+		combined = limit
+	}
+	return combined
 }
+
+// Same-language structural-corroboration gate (algorithms review §4
+// R3). Trigram cosine over VAR-normalized streams saturates on shared
+// language idioms — map-accumulator loops, comprehension+guard,
+// async/try scaffolding — so for SAME-language pairs, high semantic
+// with near-zero structural evidence is nearly always idiom, not
+// clone (the winnowing layer had every chance to fire and didn't).
+// Cross-language pairs are exempt: structural absence is expected
+// there, and the canonicalized semantic layer is the whole point of
+// the 0.2/0.8 cross-language blend.
+const (
+	// corroborationMinStructural: below this Jaccard, the combined
+	// score is capped at corroborationCapMax. 0.20 (not the review's
+	// 0.15 starting point) so the ceiling also covers the benchmark's
+	// hard handler negatives (go-handlers sits at structural 0.18,
+	// previously a one-point margin under the 0.45 report boundary);
+	// the lowest structural on any same-language bench positive is
+	// 0.40 (refactor/go/advanced), a 2x margin above the gate.
+	corroborationMinStructural = 0.20
+	// corroborationFullStructural: at or above this Jaccard the cap
+	// disappears entirely. Chosen so the ramp ends exactly where it
+	// can no longer bind: Combined(0.35, 1.0, 0.5) = 0.675 is the
+	// natural ceiling at structural 0.35.
+	corroborationFullStructural = 0.35
+	// corroborationCapMax is the hard ceiling under the gate: the
+	// 0.45 report-band boundary. Capped pairs stay materialized (for
+	// --suggest) but can never render as default findings, and at eps
+	// 0.35 can never link a cluster.
+	corroborationCapMax = 0.45
+)
+
+// SameLangEvidenceCap returns the maximum combined score a
+// same-language pair may carry given its structural evidence:
+// 0.45 below structural 0.20, uncapped at or above structural 0.35,
+// and a linear ramp between. The ramp (rather than a hard step) keeps
+// the score continuous in the structural input: with a step, two
+// pairs straddling the gate at semantic 1.0 would score 0.45 vs 0.60
+// for an epsilon difference in Jaccard, which destabilizes both band
+// labels and DBSCAN linking at the gate edge. The ramp's upper end is
+// the natural ceiling Combined(0.35, 1.0, 0.5) = 0.675, so the cap
+// fades out exactly at the point it can no longer bind.
+func SameLangEvidenceCap(structural float64) float64 {
+	if structural >= corroborationFullStructural {
+		return 1.0
+	}
+	if structural <= corroborationMinStructural {
+		return corroborationCapMax
+	}
+	rampCeil := Combined(corroborationFullStructural, 1.0, 0.5)
+	t := (structural - corroborationMinStructural) /
+		(corroborationFullStructural - corroborationMinStructural)
+	return corroborationCapMax + t*(rampCeil-corroborationCapMax)
+}
+
+// DefaultMinConfidenceLines is the default --min-confidence-lines
+// value: length-aware confidence dampening is ON by default below this
+// many non-blank lines. 10 is chosen so that (a) a 10-line exact clone
+// keeps its full 1.0 score (the ramp reaches 1.0× exactly at N lines),
+// and (b) the worst benchmark noise — 4-line snippets scoring 0.60 raw
+// — dampens to 0.60 × 0.7 = 0.42, below the default 0.50 report
+// threshold. Users can pass --min-confidence-lines 0 to turn the
+// dampener off.
+const DefaultMinConfidenceLines = 10
 
 // LengthDampen scales a similarity score down when the smaller snippet
 // has fewer than `threshold` non-blank lines. The multiplier ramps

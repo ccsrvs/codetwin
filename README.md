@@ -20,6 +20,12 @@ What sets codetwin apart from other clone detectors:
   pair, with a comment block listing every divergence. Go and Python in v1;
   pairs in other languages report a structured `note` so a follow-up emitter
   has a clear contract.
+- **Sub-function partial clones** — a copied block hiding inside two
+  otherwise-unrelated functions is invisible to whole-function scoring
+  (dilution grows quadratically with host size); the block channel finds it
+  anyway and reports it with exact line ranges in a dedicated
+  `PARTIAL CLONES` section. See
+  [Partial clones (block level)](#partial-clones-block-level).
 
 The git-aware features (`--since`, `--blame`, `--sort age`) require git on
 `PATH` and a git repository in the working directory; without them codetwin
@@ -110,18 +116,20 @@ codetwin --suggest <pair-id> ./src
 | `--json` | false | JSON output |
 | `--verbose` | false | Show all pairs including weak |
 | `--min-lines` | `3` | Skip chunks shorter than N non-blank lines |
-| `--eps` | `0.45` | DBSCAN epsilon (cluster density threshold) |
+| `--eps` | `0.35` | DBSCAN epsilon (cluster density threshold). The default links pairs scoring ≥ 0.65 — the "strong clone" band |
 | `--min-pts` | `2` | DBSCAN minimum cluster size |
 | `--preview` | false | Show line-numbered code excerpts under each finding |
 | `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
 | `--sort` | `score` | Result ordering: `score`, `score-asc`, `size`, `size-asc`, `name` |
 | `--limit` | `0` | Cap pairs and clusters at N items each (0 = no limit) |
-| `--min-confidence-lines` | `0` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). See [Scoring](#scoring). |
+| `--min-confidence-lines` | `10` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). On by default. See [Scoring](#scoring). |
+| `--min-block-lines` | `8` | Report sub-function partial clones spanning at least N matched lines on both sides (0 = off). See [Partial clones](#partial-clones-block-level). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |
+| `--include-tests` | false | Include test↔test pairs and test-only clusters; by default they are suppressed and summarized in one line. See [Test code segregation](#test-code-segregation). |
 | `--flat` | false | List every pair individually; by default intra-cluster pairs collapse into their cluster and cross-cluster pairs aggregate into relation lines |
 | `--since` | `""` | PR-delta mode: keep only findings overlapping lines changed since `<ref>` (requires git) |
 | `--blame` | false | Annotate findings with git provenance (introduced, by whom, last touched) (requires git) |
@@ -136,9 +144,39 @@ codetwin --suggest <pair-id> ./src
 |---|---|---|
 | > 95% | Exact clone | Extract shared utility, delete one |
 | > 85% | Near clone | Virtually identical; treat as a clone unless intentional |
+| > 85% + lexical < 20% | Structural twin | Same shape, different content — likely parallel boilerplate, not copy-paste |
 | > 65% | Strong clone | Parameterize differing parts |
 | > 45% | Refactor target | Evaluate shared abstraction |
 | < 45% | Weak similarity | Probably coincidental |
+
+The "Exact clone" label is additionally evidence-gated: it requires both
+snippets to span at least 10 non-blank lines. A shorter pair renders as
+a near clone even at a perfect score (the numeric score is unchanged —
+only the label demotes), because two tiny functions can share their
+entire token shape by API force alone.
+
+### Structural twins
+
+Normalization erases identifiers and string literals (`VAR`/`STR`) —
+that's what makes the score rename-invariant, and it's also why two
+table-driven tests with completely different test names, fields, and
+expected strings can score 100%: they really are token-clones, just not
+copy-paste. To tell the two apart, codetwin keeps a third, label-only
+**lexical** sub-score: Jaccard over each snippet's raw identifier and
+string-literal vocabulary (camelCase/snake_case split, lowercased,
+keywords and comments excluded). A pair in the exact/near bands
+(> 85%) whose lexical overlap is below 20% renders as **STRUCTURAL
+TWIN** (`"structural_twin"` in JSON, with the `lexical` sub-score
+exposed on the pair): same shape, different content — parallel
+boilerplate to leave alone or parameterize, not duplication to delete.
+
+The lexical score never feeds the numeric score, so rename detection is
+untouched: a typical rename keeps most of its vocabulary (helper calls,
+field names, string literals) and stays comfortably above the floor,
+which is pinned by the benchmark's renamed-clone fixtures. Pairs ≤ 85%
+are never modified, and pairs whose snippets carry fewer than 8 lexical
+terms are never demoted (too little vocabulary to judge content either
+way).
 
 Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF
 over token trigrams)` for same-language pairs. Cross-language pairs use
@@ -150,21 +188,123 @@ For a longer walk-through of what the score means, what the
 `structural`/`semantic` sub-scores below each pair tell you, and how
 pairs differ from clusters, run `codetwin --guide`.
 
+**Same-language pairs additionally require structural corroboration.**
+Trigram cosine saturates on shared language idioms — two unrelated
+map-building loops, two comprehension-plus-guard functions, two
+async/try-catch wrappers — because normalization erases the
+identifiers that distinguish them. For a same-language pair the
+winnowing layer had every chance to fire, so near-zero structural
+evidence means idiom, not clone: when structural is below 0.20 the
+combined score is capped at 0.45 (just under the report band), with
+the cap ramping out linearly by structural 0.35, where it can no
+longer bind. Cross-language pairs are exempt — structural absence is
+expected there, which is the whole point of the 0.2/0.8 blend.
+
 ### Short-snippet confidence
 
 Two 5-line snippets that share their entire token shape and two 25-line
-snippets that do the same both score 100%, but the first is much weaker
-evidence — short snippets are forced into a shared shape by their API
-surface (e.g. test scaffolding that has to call one function and assert
-on the result). `--min-confidence-lines N` opts into a length-aware
-dampener: the combined score is multiplied by `0.5 + 0.5 · min(LinesA, LinesB) / N`
-(capped at 1.0), so matches under N non-blank lines lose proportional
-score. The dampener is applied once at the scoring layer, so it also
-affects DBSCAN cluster boundaries — short-snippet matches that drop
-below the eps threshold don't cluster. A common starting point is
-`--min-confidence-lines 20` — enough to push test boilerplate out of
-the "exact clone" bucket while leaving real multi-line refactor
-targets unaffected.
+snippets that do the same both score identically, but the first is much
+weaker evidence — short snippets are forced into a shared shape by
+their API surface (e.g. test scaffolding that has to call one function
+and assert on the result). `--min-confidence-lines N` is a length-aware
+dampener, **on by default at N = 10**: the combined score is multiplied
+by `0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0), so matches
+under N non-blank lines lose proportional score. At the default, a
+10-line exact clone keeps its full 100% score, while a 4-line
+shape-coincidence scoring 60% raw dampens to 42% and drops below the
+default threshold. The dampener is applied once at the scoring layer,
+so it also affects DBSCAN cluster boundaries — short-snippet matches
+that drop below the eps threshold don't cluster. Raise it (e.g.
+`--min-confidence-lines 20`) to push more test boilerplate out of the
+report, or pass `--min-confidence-lines 0` to turn it off and restore
+raw scores.
+
+## Partial clones (block level)
+
+Whole-function scoring has a structural blind spot: a verbatim 15-line
+block pasted into two ~45-line functions with unrelated surrounding
+code scores ~0.37 combined — Jaccard is union-normalized, so shared
+content is diluted quadratically as the host functions grow. The block
+channel closes that hole. For every same-language pair that shares
+fingerprints but lands *below* the report threshold (the "gray band"),
+codetwin walks the shared fingerprint positions, extends them to
+maximal exactly-matching token runs, chains runs across small gaps
+(so one edited line inside a copied block doesn't split the finding),
+and verifies each candidate with exact token comparison.
+
+Verified blocks render in their own section with real line ranges and
+the enclosing function of each side:
+
+```
+ PARTIAL CLONES
+
+  [PARTIAL CLONE   ]  92% contained · 15 lines
+    orders.go:120-134 ⊂ ProcessOrders
+    invoices.go:88-102 ⊂ SummarizeInvoices
+```
+
+"92% contained" means 92% of the smaller side's block tokens are
+exactly matched (after normalization, so systematic renames still
+count) on the other side. Partial clones have no combined score and
+`--threshold` never filters them — containment plus the line floor is
+their quality bar. `--limit` applies, and in JSON they appear as a
+top-level `partial_clones` array.
+
+Two floors keep boilerplate out: containment must reach 0.85 (err-check
+chains and logging runs interleaved with divergent code fall below),
+and at least `--min-block-lines` (default 8) source lines must carry
+matched tokens on *both* sides — lines merely spanned (e.g. by a
+multi-line string literal) don't count. Raise the floor to focus on
+bigger extractions, or pass `--min-block-lines 0` to disable the
+channel entirely. Test↔test partial clones follow the same
+[test code segregation](#test-code-segregation) as pairs.
+
+## Test code segregation
+
+Test scaffolding dominates clone reports: test functions are short,
+forced into a common shape by the API under test, and differ mostly in
+identifiers and string literals — exactly the token classes the
+normalizer erases. On a self-scan of this repository, 98% of all
+reported pairs had at least one `_test.go` endpoint. They are genuine
+token-clones, but they are rarely actionable findings.
+
+By default codetwin therefore classifies each file by its language's
+test-file convention and:
+
+- **keeps test↔production pairs** (copy-paste between prod and tests is
+  a real finding) and **mixed clusters** (some test, some prod members);
+- **suppresses test↔test pairs** and **clusters whose members are all
+  test snippets**, replacing them with one summary line each:
+
+```
+  1,874 test↔test pairs suppressed (--include-tests to show)
+  64 test-only clusters suppressed (--include-tests to show)
+```
+
+In `--json` mode the suppressed findings are omitted from `pairs` /
+`clusters` and a `"suppressed": {"test_test_pairs": N,
+"test_only_clusters": M}` object is added. `--include-tests` (or
+`"include_tests": true` under `defaults` in `.codetwin.json`) restores
+the previous behaviour exactly — full pair list, no `suppressed`
+object — so existing CI contracts stay stable.
+
+Classification is by path only (no file contents are read):
+
+| Language | Test convention |
+|---|---|
+| Go | `*_test.go` |
+| Python | `test_*.py`, `*_test.py`, or a `tests/` / `test/` directory component |
+| JS / TS | `*.spec.*`, `*.test.*`, or a `__tests__/` directory component |
+| Java | a `src/test/` path component sequence |
+| Rust | a `tests/` directory component |
+| Elixir | `*_test.exs`, or a `test/` directory component |
+
+This is presentation-layer only: scores, the similarity matrix, and
+clustering are unchanged, and suppression happens after threshold
+filtering (the summary counts only findings that would have rendered)
+and before `--limit` (the limit applies to what remains). Unlike adding
+`**/*_test.go` to `ignore_paths`, segregation keeps test files in the
+scan, so cross-boundary test↔production findings still surface.
 
 ## Sorting
 
@@ -199,7 +339,8 @@ individual false-positive pairs. CLI flags always win over config defaults.
     "preview_lines": 15,
     "sort": "size",
     "limit": 20,
-    "min_confidence_lines": 20
+    "min_confidence_lines": 20,
+    "include_tests": false
   },
   "ignore_paths": [
     "vendor/**",
@@ -342,7 +483,12 @@ with different control flow patterns).
 **Cluster** (`internal/cluster`)
 DBSCAN over the combined similarity matrix. Rather than reporting O(n²) pairs,
 it groups families of similar snippets into clusters. Each cluster is one
-refactoring task. Noise points (unique snippets) are omitted.
+refactoring task. Noise points (unique snippets) are omitted. DBSCAN links
+transitively, so each cluster header reports both the average internal pair
+score and its **cohesion** (the weakest internal pair — `min_score` in JSON);
+clusters whose cohesion falls below `--threshold` are re-linked single-linkage
+at threshold strength and split into tighter families (members left without a
+threshold-strength partner drop out as noise).
 
 **Report** (`internal/report`)
 Renders results to stdout with ANSI colour-coded labels and cluster membership.
@@ -426,7 +572,7 @@ go test -run TestNormalize # single test by name
 
  SIMILARITY PAIRS
 
-  [EXACT CLONE     ]  100%
+  [STRONG CLONE    ]   85%
     src/utils/sum.go:3-9 SumSlice
          3 │ func SumSlice(nums []int) int {
          4 │     total := 0
@@ -454,11 +600,18 @@ go test -run TestNormalize # single test by name
  SUMMARY
 ────────────────────────────────────────────────────────────
   Pairs shown       1
-  Exact clones      1
-  Strong clones     0
+  Exact clones      0
+  Strong clones     1
   Refactor targets  0
   Clusters found    1
 ```
+
+The two functions are token-identical (structural and semantic both
+100%), but at 7 non-blank lines each the default short-snippet dampener
+(`--min-confidence-lines 10`) scales the combined score to 85%. Run
+with `--min-confidence-lines 0` to see the raw 100% — it would render
+as a NEAR CLONE, since the EXACT CLONE label needs ≥ 10 non-blank
+lines on both sides.
 
 ## Recipes
 
@@ -469,8 +622,11 @@ codetwin --sort size --limit 5 --preview ./src
 # Triage borderline cases — pairs that ALMOST cleared the threshold
 codetwin --sort score-asc --threshold 0.40 ./src
 
-# Suppress noisy short-snippet matches (test boilerplate, tiny wrappers)
+# Suppress MORE short-snippet noise than the default dampener (N=10) does
 codetwin --min-confidence-lines 20 --threshold 0.50 ./src
+
+# See raw, undampened scores (short-snippet dampening off)
+codetwin --min-confidence-lines 0 ./src
 
 # Strict CI gate — fail if any exact clones exist
 codetwin --json --threshold 0.85 ./src | jq '.pairs | length' \

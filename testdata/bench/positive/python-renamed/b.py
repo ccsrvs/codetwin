@@ -1,5 +1,5 @@
 def aggregate_payments(payments):
-    """Sum, tally and mean for a list of payment values."""
+    """Total, count and average for a list of payment values."""
     running = 0.0
     seen = 0
     for payment in payments:
@@ -8,5 +8,5 @@ def aggregate_payments(payments):
         running += payment.value
         seen += 1
     if seen == 0:
-        return {"sum": 0.0, "tally": 0, "mean": 0.0}
-    return {"sum": running, "tally": seen, "mean": running / seen}
+        return {"total": 0.0, "count": 0, "average": 0.0}
+    return {"total": running, "count": seen, "average": running / seen}

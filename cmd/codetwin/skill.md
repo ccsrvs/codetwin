@@ -17,7 +17,11 @@ codetwin operates in five internal stages — all handled automatically:
 4. **TF-IDF vectors** — semantic (cosine) similarity across the full corpus
 5. **DBSCAN clustering** — groups related findings into one refactoring opportunity each
 
-Final score = `0.5 × structural + 0.5 × semantic`
+Final score = `0.5 × structural + 0.5 × semantic` (same language;
+cross-language pairs use 0.2/0.8). Same-language pairs with structural
+< 0.20 are capped at 0.45 — high semantic alone is shared idiom, not
+clone — so semantic-only findings you see at default settings are
+always cross-language.
 
 ## Step 1 — Locate or build the binary
 
@@ -51,7 +55,11 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Machine-readable | `codetwin --json --threshold 0.40 <path>` |
 | Show everything | `codetwin --verbose --threshold 0.20 <path>` |
 | Inline code previews | `codetwin --preview --threshold 0.40 <path>` |
-| Filter noisy short-snippet matches | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
+| Filter MORE short-snippet noise than the default (N=10) | `codetwin --min-confidence-lines 20 --threshold 0.50 <path>` |
+| Raw scores, short-snippet dampening off | `codetwin --min-confidence-lines 0 <path>` |
+| Only bigger sub-function partial clones (default N=8) | `codetwin --min-block-lines 15 <path>` |
+| Function-level findings only, block channel off | `codetwin --min-block-lines 0 <path>` |
+| Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
 | Suggest a refactor (Go) | `codetwin --suggest <pair-id> <path>` |
@@ -65,7 +73,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --json                  JSON output
 --verbose               show all pairs including weak similarities
 --min-lines int         skip chunks shorter than N non-blank lines (default 3)
---eps float             DBSCAN epsilon — cluster density (default 0.45)
+--eps float             DBSCAN epsilon — cluster density (default 0.35;
+                        links pairs scoring ≥ 0.65, the "strong clone" band)
 --min-pts int           DBSCAN min cluster size (default 2)
 --preview               show a short code excerpt for each finding
 --preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
@@ -74,10 +83,20 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --limit int             show only the top N pairs and N clusters (0 = no limit)
 --flat                  list every pair individually; default report is cluster-first
                         (intra-cluster pairs collapse into the cluster)
---min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N (0 = off);
-                            multiplier ramps from 0.5× at 0 lines to 1.0× at N
+--min-confidence-lines int  dampen pair scores when min(LinesA, LinesB) < N
+                            (default 10; 0 = off); multiplier ramps from 0.5×
+                            at 0 lines to 1.0× at N
+--min-block-lines int   report sub-function PARTIAL CLONES — shared blocks of
+                        at least N matched lines (both sides) hiding inside
+                        pairs below the report threshold (default 8; 0 = off).
+                        Findings carry a containment %, not a combined score;
+                        --threshold never filters them, --limit does. JSON:
+                        top-level partial_clones array.
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
+--include-tests         include test↔test pairs and test-only clusters; by default they
+                        are suppressed and replaced by a one-line summary
+                        (test↔production pairs and mixed clusters always render)
 --since string          PR-delta mode: keep only findings where ≥1 endpoint overlaps
                         lines changed since <ref> (e.g. main, HEAD~5, abc123)
 --blame                 annotate findings with git provenance (when introduced, by whom,
@@ -109,6 +128,7 @@ works the same in a non-git directory as it does in one.
 | Show the freshest clones (newest endpoint first) | `codetwin --blame --sort age --limit 10 <path>` |
 | Annotate every match with origin metadata | `codetwin --blame --preview <path>` |
 | Triage who introduced this clone | `codetwin --blame --json <path> \| jq '.pairs[] \| {a:.file_a,b:.file_b,intro_a:.provenance_a.first_date,intro_b:.provenance_b.first_date}'` |
+| List sub-function partial clones with line ranges | `codetwin --json <path> \| jq '.partial_clones[]? \| {a:"\(.file_a):\(.start_line_a)-\(.end_line_a)", b:"\(.file_b):\(.start_line_b)-\(.end_line_b)", containment}'` |
 
 `codetwin --help` prints the same flag list with one-line descriptions.
 `codetwin --guide` walks through the score bands, structural/semantic
@@ -232,7 +252,9 @@ CLI flags always win over the `defaults` block.
     "preview_lines": 15,
     "sort": "size",
     "limit": 20,
-    "min_confidence_lines": 20
+    "min_confidence_lines": 20,
+    "min_block_lines": 8,
+    "include_tests": false
   },
   "ignore_paths": [
     "vendor/**",
@@ -311,8 +333,9 @@ the matrix is computing. It's auto-suppressed when stderr isn't a TTY
 
 | Score | Label | What to do |
 |---|---|---|
-| > 95% | Exact clone | Extract shared utility, delete one immediately |
+| > 95% | Exact clone | Extract shared utility, delete one immediately. Label additionally requires both snippets ≥ 10 non-blank lines; shorter pairs render as near clones at the same score |
 | > 85% | Near clone | Virtually identical with one or two token edits; treat as a clone unless the difference is intentional |
+| > 85% + lexical < 20% | Structural twin (`structural_twin` in JSON) | Same token shape, but the raw identifier/string vocabulary barely overlaps — parallel boilerplate (table tests, per-field validators), not copy-paste. Leave alone, or parameterize the shape if the family keeps growing; do NOT treat as "delete one copy" |
 | > 65% | Strong clone | Parameterize the differing parts |
 | > 45% | Refactor target | Evaluate whether a shared abstraction reduces duplication |
 | < 45% | Weak similarity | Probably coincidental — review before acting |
@@ -323,21 +346,52 @@ and how pairs differ from clusters, run `codetwin --guide`.
 ### Short-snippet confidence
 
 Two 5-line snippets with identical token shape and two 25-line snippets
-with identical token shape both score 100%, but the first is much weaker
-evidence — short snippets are forced into shared shapes by their API
-surface (test scaffolding, trivial wrappers). `--min-confidence-lines N`
-opts into a length-aware dampener: the combined score is scaled by
-`0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0). The dampener is
-applied once at the scoring layer, so it also affects DBSCAN cluster
-boundaries — setting it dissolves clusters built on tiny-snippet noise,
-not just demoting individual pairs. Off by default. A typical starting
-value is `--min-confidence-lines 20`.
+with identical token shape score the same raw score, but the first is
+much weaker evidence — short snippets are forced into shared shapes by
+their API surface (test scaffolding, trivial wrappers).
+`--min-confidence-lines N` is a length-aware dampener, **on by default
+at N = 10**: the combined score is scaled by
+`0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0). A 10-line exact
+clone keeps its full score; a 4-line shape-coincidence at 60% raw drops
+to 42% and out of the default report. The dampener is applied once at
+the scoring layer, so it also affects DBSCAN cluster boundaries — it
+dissolves clusters built on tiny-snippet noise, not just demoting
+individual pairs. Raise it (`--min-confidence-lines 20`) for noisier
+codebases; pass `--min-confidence-lines 0` for raw scores.
+
+### Test code segregation (default)
+
+Files matching each language's test convention (Go `*_test.go`; Python
+`test_*.py` / `*_test.py` / `tests|test/` dirs; JS/TS `*.spec.*` /
+`*.test.*` / `__tests__/`; Java `src/test/`; Rust `tests/`; Elixir
+`*_test.exs` / `test/`) are classified as test code by path. By default,
+test↔test pairs and clusters whose members are ALL test snippets are
+suppressed and summarized in one line each, e.g.
+`1,874 test↔test pairs suppressed (--include-tests to show)` — test
+scaffolding is forced into a common shape by the API under test, so
+those token-clones are rarely actionable. Test↔production pairs and
+mixed clusters always render.
+
+- `--include-tests` restores the full listing (and the exact
+  pre-segregation JSON schema — no `suppressed` object).
+- In default `--json` output the suppressed findings are omitted and a
+  top-level `"suppressed": {"test_test_pairs": N, "test_only_clusters": M}`
+  object is added.
+- Scores and clustering are unchanged; suppression is applied after the
+  threshold filter and before `--limit`.
+- Config equivalent: `"include_tests": true` under `defaults`.
 
 ### Clusters vs pairs
 
 - **Clusters** = families of related snippets grouped by DBSCAN. One cluster = one refactoring task.
 - **Pairs** = individual high-similarity findings not part of a larger cluster.
 - Always address clusters first — they represent the highest-value consolidation opportunities.
+- Each cluster header shows **avg similarity** and **cohesion** (the weakest
+  internal pair; `min_score` in JSON). DBSCAN links transitively, so a big
+  avg-vs-cohesion gap means the family was chained together rather than
+  uniformly similar. Clusters whose cohesion falls below `--threshold` are
+  automatically re-linked at threshold strength and split into tighter
+  families; members without a threshold-strength partner drop out as noise.
 
 ### Cross-language clusters
 
@@ -386,10 +440,12 @@ go test ./...
 ```bash
 codetwin --preview --threshold 0.40 ./testdata
 
-# Expected output (chunk-level — note "path:start-end Symbol" naming):
-#  SIMILARITY PAIRS
-#
-#   [EXACT CLONE     ]  100%
+# Expected output (chunk-level — note "path:start-end Symbol" naming).
+# The two sum functions are 7-line token-identical clones: the default
+# short-snippet dampener scales their raw 100% to 85% (min lines 7 of
+# the default N=10), so they render as a strong-clone cluster:
+#  REFACTORING CLUSTERS
+#   Cluster 1 — 2 snippets · avg similarity  85%
 #     testdata/sum_a.js:1-7 sumArray
 #          1 │ function sumArray(arr) {
 #          2 │   let total = 0;
@@ -402,10 +458,9 @@ codetwin --preview --threshold 0.40 ./testdata
 #          1 │ function addNumbers(nums) {
 #          ...
 #
-#  REFACTORING CLUSTERS
-#   Cluster 1 — 2 snippets:
-#     testdata/sum_a.js:1-7 sumArray
-#     testdata/sum_b.js:1-7 addNumbers
+# With --min-confidence-lines 0 the raw score returns: the pair shows
+# 100%, labeled NEAR CLONE (not EXACT CLONE — the top label needs both
+# snippets to span ≥ 10 non-blank lines).
 ```
 
 ## Troubleshooting
@@ -414,12 +469,14 @@ codetwin --preview --threshold 0.40 ./testdata
 |---|---|
 | `not enough parseable files` | Target has < 2 files with supported extensions |
 | All scores near 0% | Files may be too short — lower `--min-lines` |
-| No clusters formed | Lower `--eps` (e.g. `--eps 0.35`) or `--min-pts 2` |
+| No clusters formed | Raise `--eps` (e.g. `--eps 0.45` links pairs ≥ 0.55) — looser linking admits weaker pairs |
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |
 | Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
-| Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |
+| Tests/vendored code dominating results | Test↔test pairs are already suppressed by default; for vendored code add `ignore_paths` (e.g. `["vendor/**"]`) |
+| Expected a test↔test clone but it's missing | It's suppressed by default — add `--include-tests` |
 | One specific pair is a confirmed false positive | Add `ignore_pairs` (keeps both files scannable against everything else) |
-| 100% scores on tiny snippets that aren't real duplicates | Add `--min-confidence-lines 20` — short matches lose proportional score |
+| Tiny snippets still scoring too high despite the default dampener | Raise `--min-confidence-lines` (e.g. 20) — short matches lose proportional score |
+| A known-real short clone is missing from the report | Lower or disable the dampener: `--min-confidence-lines 0` shows raw scores |
 | `--since/--blame requires the git binary on PATH` | Install git, or drop the flag |
 | `--since/--blame requires running inside a git repository` | `cd` into the repo, or run `git init` if the directory should be one |
 | `--since <ref>` returns nothing | Confirm the ref exists (`git rev-parse <ref>`) and that the diff is non-empty (`git diff --stat <ref>`) |

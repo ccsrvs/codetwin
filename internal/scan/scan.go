@@ -31,6 +31,19 @@ type Snippet struct {
 	Tokens     []string
 	Lines      []int // parallel to Tokens; 1-based source line of each token
 	Fps        fingerprint.PositionalSet
+
+	// LexTerms is the sorted, deduplicated vocabulary of the chunk's
+	// RAW code (identifier + string-literal words, camel/snake split,
+	// lowercased, keywords skipped) — see tokenizer.LexicalTerms. Used
+	// only by the report's structural-twin label gate; never part of
+	// the numeric score.
+	LexTerms []string
+
+	// IsTest marks snippets whose file path follows the language's
+	// test-file convention (see IsTestFile). Computed from the path as
+	// given by the caller (usually relative to the scan root) so
+	// unrelated directory names above the repo can't misclassify.
+	IsTest bool
 }
 
 // ProcessFiles runs the per-file split → tokenize → fingerprint pipeline
@@ -126,6 +139,7 @@ func ProcessFile(
 	absPath, _ := filepath.Abs(path)
 	contentHash := cache.HashContent(data)
 	key := cache.Key(absPath, contentHash, patternsHash)
+	isTest := IsTestFile(path)
 
 	if entry, ok := cacheState.Get(key); ok {
 		var out []Snippet
@@ -144,6 +158,8 @@ func ProcessFile(
 				Tokens:     c.Tokens,
 				Lines:      c.Lines,
 				Fps:        positionalFromCache(c),
+				LexTerms:   c.LexTerms,
+				IsTest:     isTest,
 			})
 		}
 		return out, ""
@@ -161,6 +177,7 @@ func ProcessFile(
 		}
 		nonBlank := splitter.CountNonBlankLines(ch.Code)
 		ps := fingerprint.GeneratePositional(tokens, fingerprint.DefaultK, fingerprint.DefaultW)
+		lexTerms := tokenizer.LexicalTerms(ch.Code, lang)
 		name := ch.Name()
 
 		entryChunks = append(entryChunks, cache.Chunk{
@@ -175,6 +192,7 @@ func ProcessFile(
 			Hashes:     fingerprint.Hashes(ps.Set),
 			Positions:  ps.Positions,
 			K:          ps.K,
+			LexTerms:   lexTerms,
 		})
 
 		if nonBlank < minLines {
@@ -191,6 +209,8 @@ func ProcessFile(
 			Tokens:     tokens,
 			Lines:      lines,
 			Fps:        ps,
+			LexTerms:   lexTerms,
+			IsTest:     isTest,
 		})
 	}
 

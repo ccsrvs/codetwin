@@ -182,8 +182,8 @@ func TestRender_SummaryReflectsThreshold(t *testing.T) {
 	// threshold filters it out — otherwise "Refactor targets" claims
 	// findings the user can't see.
 	pairs := []Pair{
-		{NameA: "high_a", NameB: "high_b", Score: 0.97, Structural: 0.97, Semantic: 0.97},
-		{NameA: "mid_a", NameB: "mid_b", Score: 0.50, Structural: 0.5, Semantic: 0.5},
+		{NameA: "high_a", NameB: "high_b", Score: 0.97, Structural: 0.97, Semantic: 0.97, LinesA: 30, LinesB: 30},
+		{NameA: "mid_a", NameB: "mid_b", Score: 0.50, Structural: 0.5, Semantic: 0.5, LinesA: 30, LinesB: 30},
 	}
 	var buf strings.Builder
 	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.60})
@@ -220,7 +220,7 @@ func TestPrepare_SortBySize(t *testing.T) {
 		{NameA: "c", NameB: "d", Score: 0.5, LinesA: 50, LinesB: 30},
 		{NameA: "e", NameB: "f", Score: 0.7, LinesA: 20, LinesB: 20},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortSize, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortSize, Threshold: 0})
 	// Expect order by max(LinesA, LinesB) desc: 50, 20, 5
 	wantOrder := []string{"c", "e", "a"}
 	for i, w := range wantOrder {
@@ -236,7 +236,7 @@ func TestPrepare_SortBySizeAsc(t *testing.T) {
 		{NameA: "tiny", NameB: "y", Score: 0.5, LinesA: 3, LinesB: 3},
 		{NameA: "mid", NameB: "z", Score: 0.5, LinesA: 20, LinesB: 20},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortSizeAsc, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortSizeAsc, Threshold: 0})
 	wantOrder := []string{"tiny", "mid", "big"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -251,7 +251,7 @@ func TestPrepare_SortByName(t *testing.T) {
 		{NameA: "alpha", NameB: "y", Score: 0.5},
 		{NameA: "mu", NameB: "z", Score: 0.5},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
 	wantOrder := []string{"alpha", "mu", "zeta"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -266,7 +266,7 @@ func TestPrepare_SortByScoreAsc(t *testing.T) {
 		{NameA: "low", NameB: "y", Score: 0.3},
 		{NameA: "mid", NameB: "z", Score: 0.6},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortScoreAsc, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortScoreAsc, Threshold: 0})
 	wantOrder := []string{"low", "mid", "high"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -281,7 +281,7 @@ func TestPrepare_ClustersSortBySize(t *testing.T) {
 		{ID: 1, Members: []string{"c", "d", "e", "f"}, Score: 0.6},
 		{ID: 2, Members: []string{"g", "h", "i"}, Score: 0.7},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortSize})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortSize})
 	if len(out) != 3 {
 		t.Fatalf("expected 3 clusters, got %d", len(out))
 	}
@@ -300,7 +300,7 @@ func TestPrepare_ClustersSortByScore(t *testing.T) {
 		{ID: 1, Members: []string{"c", "d"}, Score: 0.9},
 		{ID: 2, Members: []string{"e", "f"}, Score: 0.7},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortScore})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortScore})
 	wantIDs := []int{1, 2, 0}
 	for i, id := range wantIDs {
 		if out[i].ID != id {
@@ -321,7 +321,7 @@ func TestPrepare_LimitClampsBothSections(t *testing.T) {
 		{ID: 1, Members: []string{"b"}, Score: 0.8},
 		{ID: 2, Members: []string{"c"}, Score: 0.7},
 	}
-	visP, visC := Prepare(pairs, clusters, Options{Sort: SortScore, Limit: 2, Threshold: 0})
+	visP, visC, _ := Prepare(pairs, clusters, Options{Sort: SortScore, Limit: 2, Threshold: 0})
 	if len(visP) != 2 {
 		t.Errorf("pairs: expected 2 after limit, got %d", len(visP))
 	}
@@ -332,7 +332,7 @@ func TestPrepare_LimitClampsBothSections(t *testing.T) {
 
 func TestPrepare_LimitDoesNotPadShortSection(t *testing.T) {
 	clusters := []Cluster{{ID: 0, Members: []string{"a"}, Score: 0.9}}
-	_, visC := Prepare(nil, clusters, Options{Limit: 5})
+	_, visC, _ := Prepare(nil, clusters, Options{Limit: 5})
 	if len(visC) != 1 {
 		t.Errorf("expected 1 cluster (no padding), got %d", len(visC))
 	}
@@ -346,7 +346,7 @@ func TestPrepare_LimitAppliesAfterThresholdFilter(t *testing.T) {
 		{NameA: "low1", Score: 0.3},
 		{NameA: "low2", Score: 0.2},
 	}
-	visP, _ := Prepare(pairs, nil, Options{Sort: SortScore, Threshold: 0.5, Limit: 3})
+	visP, _, _ := Prepare(pairs, nil, Options{Sort: SortScore, Threshold: 0.5, Limit: 3})
 	if len(visP) != 2 {
 		t.Errorf("expected 2 pairs after threshold+limit, got %d", len(visP))
 	}
@@ -441,7 +441,7 @@ func TestPrepare_SortByAgeNewestPairsFirst(t *testing.T) {
 		{NameA: "mid", NameB: "z", Score: 0.5,
 			ProvenanceA: &Provenance{FirstTime: t2}, ProvenanceB: &Provenance{FirstTime: t1}},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
 	wantOrder := []string{"newest", "mid", "old"}
 	for i, w := range wantOrder {
 		if out[i].NameA != w {
@@ -459,7 +459,7 @@ func TestPrepare_SortByAgeAscOldestFirst(t *testing.T) {
 		{NameA: "older", NameB: "y", Score: 0.5,
 			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortAgeAsc, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortAgeAsc, Threshold: 0})
 	if out[0].NameA != "older" {
 		t.Errorf("expected older first, got %q", out[0].NameA)
 	}
@@ -472,7 +472,7 @@ func TestPrepare_SortByAgePairsWithoutProvenanceSortLast(t *testing.T) {
 		{NameA: "has-provenance", NameB: "y", Score: 0.5,
 			ProvenanceA: &Provenance{FirstTime: t1}, ProvenanceB: &Provenance{FirstTime: t1}},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortAge, Threshold: 0})
 	if out[0].NameA != "has-provenance" {
 		t.Errorf("expected provenance-bearing pair first, got %q", out[0].NameA)
 	}
@@ -488,7 +488,7 @@ func TestPrepare_CrossLangOnlyKeepsOnlyDifferentLangs(t *testing.T) {
 		{NameA: "cross3", NameB: "cross4", Score: 0.6, LangA: "TypeScript", LangB: "Python"},
 		{NameA: "same3", NameB: "same4", Score: 0.8, LangA: "Python", LangB: "Python"},
 	}
-	out, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	out, _, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
 	if len(out) != 2 {
 		t.Fatalf("expected 2 cross-language pairs, got %d", len(out))
 	}
@@ -508,7 +508,7 @@ func TestPrepare_CrossLangOnlyDropsPairsWithUnknownLang(t *testing.T) {
 		{NameA: "u2", NameB: "u3", Score: 0.8, LangA: "", LangB: ""},
 		{NameA: "g2", NameB: "p1", Score: 0.7, LangA: "Go", LangB: "Python"},
 	}
-	out, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
+	out, _, _ := Prepare(pairs, nil, Options{CrossLangOnly: true, Threshold: 0, Sort: SortScore})
 	if len(out) != 1 {
 		t.Fatalf("expected 1 pair (only the fully-typed cross-lang one), got %d", len(out))
 	}
@@ -522,7 +522,7 @@ func TestPrepare_CrossLangOnlyOffKeepsAll(t *testing.T) {
 		{NameA: "same1", NameB: "same2", Score: 0.9, LangA: "Go", LangB: "Go"},
 		{NameA: "cross1", NameB: "cross2", Score: 0.7, LangA: "Go", LangB: "Python"},
 	}
-	out, _ := Prepare(pairs, nil, Options{Threshold: 0, Sort: SortScore})
+	out, _, _ := Prepare(pairs, nil, Options{Threshold: 0, Sort: SortScore})
 	if len(out) != 2 {
 		t.Fatalf("expected all 2 pairs when CrossLangOnly is off, got %d", len(out))
 	}
@@ -544,9 +544,35 @@ func TestJSONLabel_BoundariesAreStrict(t *testing.T) {
 		{0.30, "weak_similarity"},
 	}
 	for _, c := range cases {
-		if got := JSONLabel(c.score); got != c.want {
-			t.Errorf("JSONLabel(%.2f) = %q; want %q", c.score, got, c.want)
+		// Lines well above ExactCloneMinLines so the evidence gate
+		// doesn't interfere with the pure score-boundary contract.
+		p := Pair{Score: c.score, LinesA: 30, LinesB: 30}
+		if got := JSONLabel(p); got != c.want {
+			t.Errorf("JSONLabel(score=%.2f) = %q; want %q", c.score, got, c.want)
 		}
+	}
+}
+
+func TestJSONLabel_ShortPairNeverExactClone(t *testing.T) {
+	cases := []struct {
+		name           string
+		linesA, linesB int
+		want           string
+	}{
+		{"both short", 4, 4, "near_clone"},
+		{"smaller side short", 4, 40, "near_clone"},
+		{"unknown lines fail the gate", 0, 0, "near_clone"},
+		{"exactly at the floor keeps the top band", ExactCloneMinLines, 30, "exact_clone"},
+		{"both long keep the top band", 30, 30, "exact_clone"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := Pair{Score: 1.0, LinesA: c.linesA, LinesB: c.linesB}
+			if got := JSONLabel(p); got != c.want {
+				t.Errorf("JSONLabel(score=1.0, lines=%d/%d) = %q; want %q",
+					c.linesA, c.linesB, got, c.want)
+			}
+		})
 	}
 }
 
@@ -562,11 +588,47 @@ func TestRender_LabelsByScore(t *testing.T) {
 	}
 	for _, c := range cases {
 		var buf strings.Builder
-		pairs := []Pair{{NameA: "a", NameB: "b", Score: c.score, Structural: c.score, Semantic: c.score}}
+		pairs := []Pair{{NameA: "a", NameB: "b", Score: c.score, Structural: c.score, Semantic: c.score,
+			LinesA: 30, LinesB: 30}}
 		Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30})
 		if !strings.Contains(buf.String(), c.want) {
 			t.Errorf("score %.2f: expected label containing %q, got: %s", c.score, c.want, buf.String())
 		}
+	}
+}
+
+func TestRender_ShortExactScorePairDemotedToNearClone(t *testing.T) {
+	// Evidence gate: a perfect score on a pair whose smaller snippet is
+	// under ExactCloneMinLines non-blank lines must not render as an
+	// exact clone. The score itself stays 100% — only the label demotes
+	// one band. The summary buckets must agree with the label.
+	var buf strings.Builder
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 1.0, Structural: 1.0, Semantic: 1.0,
+		LinesA: 4, LinesB: 4}}
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30})
+	out := buf.String()
+	if strings.Contains(out, "EXACT CLONE") {
+		t.Errorf("4-line pair must not render as EXACT CLONE:\n%s", out)
+	}
+	if !strings.Contains(out, "NEAR CLONE") {
+		t.Errorf("4-line perfect-score pair should demote to NEAR CLONE:\n%s", out)
+	}
+	if !strings.Contains(out, "100%") {
+		t.Errorf("demotion must not change the numeric score:\n%s", out)
+	}
+	if !strings.Contains(out, "Exact clones      0") {
+		t.Errorf("summary should count the demoted pair outside the exact bucket:\n%s", out)
+	}
+}
+
+func TestRender_LongExactScorePairKeepsExactClone(t *testing.T) {
+	var buf strings.Builder
+	pairs := []Pair{{NameA: "a", NameB: "b", Score: 1.0, Structural: 1.0, Semantic: 1.0,
+		LinesA: ExactCloneMinLines, LinesB: 25}}
+	Render(&buf, pairs, nil, Options{Plain: true, Threshold: 0.30})
+	if !strings.Contains(buf.String(), "EXACT CLONE") {
+		t.Errorf("pair at the %d-line evidence floor should keep EXACT CLONE:\n%s",
+			ExactCloneMinLines, buf.String())
 	}
 }
 
@@ -705,7 +767,7 @@ func TestPrepare_SortByName_PairsTieBreakOnNameB(t *testing.T) {
 		{NameA: "alpha", NameB: "beta", Score: 0.5},
 		{NameA: "alpha", NameB: "gamma", Score: 0.5},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortName, Threshold: 0})
 	wantNameB := []string{"beta", "delta", "gamma"}
 	for i, w := range wantNameB {
 		if out[i].NameB != w {
@@ -721,7 +783,7 @@ func TestPrepare_ClustersSortByScoreAsc(t *testing.T) {
 		{ID: 1, Members: []string{"b"}, Score: 0.3},
 		{ID: 2, Members: []string{"c"}, Score: 0.6},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortScoreAsc})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortScoreAsc})
 	wantIDs := []int{1, 2, 0}
 	for i, id := range wantIDs {
 		if out[i].ID != id {
@@ -737,7 +799,7 @@ func TestPrepare_ClustersSortBySizeAsc(t *testing.T) {
 		{ID: 1, Members: []string{"d"}},
 		{ID: 2, Members: []string{"e", "f"}},
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortSizeAsc})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortSizeAsc})
 	wantIDs := []int{1, 2, 0}
 	for i, id := range wantIDs {
 		if out[i].ID != id {
@@ -756,7 +818,7 @@ func TestPrepare_ClustersSortByName(t *testing.T) {
 		{ID: 2, Members: []string{"mu", "w"}},
 		{ID: 3, Members: nil}, // exercises firstMember's empty-slice branch
 	}
-	_, out := Prepare(nil, clusters, Options{Sort: SortName})
+	_, out, _ := Prepare(nil, clusters, Options{Sort: SortName})
 	// Empty-members cluster (firstMember == "") sorts first, then alphabetical.
 	wantIDs := []int{3, 1, 2, 0}
 	for i, id := range wantIDs {
@@ -791,7 +853,7 @@ func TestPrepare_LimitTriggersTopKHeap(t *testing.T) {
 		{NameA: "e", Score: 0.3},
 		{NameA: "f", Score: 0.7},
 	}
-	out, _ := Prepare(pairs, nil, Options{Sort: SortScore, Limit: 2, Threshold: 0})
+	out, _, _ := Prepare(pairs, nil, Options{Sort: SortScore, Limit: 2, Threshold: 0})
 	if len(out) != 2 {
 		t.Fatalf("limit=2 should yield 2 pairs, got %d", len(out))
 	}
@@ -984,6 +1046,28 @@ func TestRender_ClusterAvgScoreShown(t *testing.T) {
 	if !strings.Contains(buf.String(), "avg similarity  97%") {
 		t.Errorf("cluster line should include avg similarity:\n%s", buf.String())
 	}
+	// MinScore unset (zero) → no cohesion segment on the header.
+	if strings.Contains(buf.String(), "cohesion") {
+		t.Errorf("cluster with no computed MinScore should not render cohesion:\n%s", buf.String())
+	}
+}
+
+func TestRender_ClusterCohesionShown(t *testing.T) {
+	var buf strings.Builder
+	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go", "c.go"}, Score: 0.80, MinScore: 0.55}}
+	pairs := []Pair{
+		{NameA: "a.go", NameB: "b.go", Score: 0.95},
+		{NameA: "a.go", NameB: "c.go", Score: 0.90},
+		{NameA: "b.go", NameB: "c.go", Score: 0.55},
+	}
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50})
+	out := buf.String()
+	if !strings.Contains(out, "avg similarity  80%") {
+		t.Errorf("cluster line should include avg similarity:\n%s", out)
+	}
+	if !strings.Contains(out, "cohesion  55%") {
+		t.Errorf("cluster line should include cohesion (min internal pair score):\n%s", out)
+	}
 }
 
 func TestRender_OnlyClustersNoStandalonePairs_StillReports(t *testing.T) {
@@ -1007,9 +1091,9 @@ func TestRender_SummaryTiersIncludeCollapsedPairs(t *testing.T) {
 	// must still classify them even though the pairs section collapses
 	// them into the cluster.
 	pairs := []Pair{
-		{NameA: "a.go", NameB: "b.go", Score: 0.99},
-		{NameA: "a.go", NameB: "c.go", Score: 0.98},
-		{NameA: "b.go", NameB: "c.go", Score: 0.97},
+		{NameA: "a.go", NameB: "b.go", Score: 0.99, LinesA: 30, LinesB: 30},
+		{NameA: "a.go", NameB: "c.go", Score: 0.98, LinesA: 30, LinesB: 30},
+		{NameA: "b.go", NameB: "c.go", Score: 0.97, LinesA: 30, LinesB: 30},
 	}
 	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go", "c.go"}, Score: 0.98}}
 	var buf strings.Builder

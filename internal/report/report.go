@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,21 @@ type Pair struct {
 	LinesB     int     // non-blank line count of snippet B's chunk
 	LangA      string  // detected language of snippet A (e.g. "Go", "Python"); empty when unknown
 	LangB      string  // detected language of snippet B; empty when unknown
+	IsTestA    bool    // snippet A's file path follows its language's test convention
+	IsTestB    bool    // snippet B's file path follows its language's test convention
+
+	// Lexical is the Jaccard similarity of the two snippets' raw-code
+	// vocabulary (identifier + string-literal words; see
+	// tokenizer.LexicalTerms). It NEVER feeds the numeric Score — it
+	// only modulates the top label bands: a pair above
+	// StructuralTwinMinScore whose Lexical falls below
+	// StructuralTwinMaxLexical renders as a structural twin instead of
+	// an exact/near clone. LexicalComputed distinguishes a measured 0
+	// from "not computed" (BuildMatrix computes it lazily, only for
+	// pairs in the bands that read it); when false, Lexical is
+	// meaningless and the label logic ignores it.
+	Lexical         float64
+	LexicalComputed bool
 
 	// ProvenanceA / ProvenanceB carry git blame metadata for each
 	// endpoint, populated when --blame is on. Nil when blame wasn't
@@ -68,6 +84,70 @@ type Cluster struct {
 	ID      int
 	Members []string
 	Score   float64 // average internal pair score across the cluster's members
+
+	// MinScore is the cluster's cohesion: the minimum internal pair
+	// score over all distinct member pairs. DBSCAN links transitively,
+	// so a chained family can contain endpoints that barely resemble
+	// each other — a low MinScore relative to Score is the tell. Zero
+	// when never computed (e.g. clusters built outside main.go).
+	MinScore float64
+
+	// TestOnly marks clusters whose every member is a test snippet.
+	// Such clusters are suppressed by default (Options.IncludeTests
+	// restores them); mixed test/production clusters always render.
+	TestOnly bool
+}
+
+// Suppressed counts findings dropped by the default test-code
+// segregation: test↔test pairs, clusters whose members are all test
+// snippets, and test↔test partial clones. Counted after threshold
+// filtering, so the numbers describe findings that would otherwise
+// have rendered.
+type Suppressed struct {
+	TestTestPairs    int
+	TestOnlyClusters int
+	TestTestBlocks   int
+}
+
+// BlockClone is one sub-function partial-clone finding (review §5.3):
+// a shared block of code detected inside two functions whose overall
+// pair score sat below the report threshold. Unlike a Pair it carries
+// real line ranges — the block, not the enclosing chunk — and its
+// quality bar is Containment (the fraction of the smaller side's block
+// tokens exactly matched on the other side), not the combined score,
+// so Options.Threshold never filters it.
+type BlockClone struct {
+	// ID is a stable, order-invariant 8-char digest of the two range
+	// names ("file:start-end"), following the Pair ID convention.
+	ID string
+
+	FileA                string // display path of side A's file (as scanned)
+	SymbolA              string // enclosing chunk's symbol, may be empty
+	AStartLine, AEndLine int    // 1-based line range of the block in file A
+
+	FileB                string
+	SymbolB              string
+	BStartLine, BEndLine int
+
+	Containment    float64
+	LinesA, LinesB int // non-blank lines of the block on each side
+
+	IsTestA, IsTestB bool
+
+	// PathA / PathB are the absolute paths of the two files, carried
+	// for --since diff filtering. Never rendered.
+	PathA, PathB string
+}
+
+// RangeNameA returns side A's "file:start-end" range name, the unit
+// the BlockClone ID is derived from.
+func (b BlockClone) RangeNameA() string {
+	return fmt.Sprintf("%s:%d-%d", b.FileA, b.AStartLine, b.AEndLine)
+}
+
+// RangeNameB is RangeNameA for side B.
+func (b BlockClone) RangeNameB() string {
+	return fmt.Sprintf("%s:%d-%d", b.FileB, b.BStartLine, b.BEndLine)
 }
 
 // Preview is a code excerpt to display under a pair or cluster member.
@@ -169,6 +249,20 @@ type Options struct {
 	Limit         int      // cap pairs and clusters at N items each (0 = no limit)
 	CrossLangOnly bool     // keep only pairs whose two snippets have different, known languages
 
+	// IncludeTests keeps test↔test pairs and test-only clusters in the
+	// report. By default (false) they are suppressed and replaced by a
+	// one-line summary — test scaffolding is forced into a common shape
+	// by the API under test, so test↔test token-clones are rarely
+	// actionable. test↔production pairs and mixed clusters always render.
+	IncludeTests bool
+
+	// Suppressed carries counts from an upstream Prepare call. Callers
+	// that Prepare before Render (to build previews, say) should copy
+	// the returned counts here so Render's summary can report them —
+	// Render's own internal Prepare sees already-filtered data and
+	// would otherwise count zero.
+	Suppressed Suppressed
+
 	// Flat lists every pair individually, the pre-cluster-first
 	// behaviour. By default the terminal report is cluster-first: a
 	// clone family of n members implies n·(n-1)/2 pairs, so families
@@ -179,6 +273,12 @@ type Options struct {
 	// Previews, when non-nil, maps a snippet name to a code excerpt with its
 	// originating start line. Entries with empty Text are skipped.
 	Previews map[string]Preview
+
+	// PartialClones are the block-level findings to render in the
+	// PARTIAL CLONES section, already prepared via PrepareBlocks
+	// (test-suppressed, sorted, limited). Options.Threshold does not
+	// apply to them — containment is their quality bar.
+	PartialClones []BlockClone
 }
 
 // ANSI color codes
@@ -196,8 +296,9 @@ const (
 )
 
 // Prepare applies the report pipeline to raw pairs+clusters: filter by
-// Options.Threshold (unless Verbose), then sort by Options.Sort, then cap
-// each section to Options.Limit.
+// Options.Threshold (unless Verbose), suppress test↔test pairs and
+// test-only clusters (unless Options.IncludeTests), then sort by
+// Options.Sort, then cap each section to Options.Limit.
 //
 // Order matters for performance on big repos. Filtering before sorting
 // drops millions of below-threshold pairs before they pay the n-log-n
@@ -205,11 +306,16 @@ const (
 // full sort entirely — turning 20s of sorting on 11M pairs into a single
 // O(n log k) pass.
 //
+// Test suppression runs after the threshold/cross-lang checks so the
+// returned Suppressed counts describe only findings that would have
+// rendered, and before the limit so --limit applies to what remains.
+//
 // Both Render and JSON consumers call Prepare so the two output formats
 // always reflect the same set of findings.
-func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster) {
+func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster, Suppressed) {
+	var sup Suppressed
 	visiblePairs := pairs
-	if !opts.Verbose || opts.CrossLangOnly {
+	if !opts.Verbose || opts.CrossLangOnly || !opts.IncludeTests {
 		visiblePairs = make([]Pair, 0, len(pairs))
 		for _, p := range pairs {
 			if !opts.Verbose && p.Score < opts.Threshold {
@@ -218,13 +324,73 @@ func Prepare(pairs []Pair, clusters []Cluster, opts Options) ([]Pair, []Cluster)
 			if opts.CrossLangOnly && (p.LangA == "" || p.LangB == "" || p.LangA == p.LangB) {
 				continue
 			}
+			if !opts.IncludeTests && p.IsTestA && p.IsTestB {
+				sup.TestTestPairs++
+				continue
+			}
 			visiblePairs = append(visiblePairs, p)
 		}
 	}
 
+	visibleClusters := clusters
+	if !opts.IncludeTests {
+		visibleClusters = make([]Cluster, 0, len(clusters))
+		for _, c := range clusters {
+			if c.TestOnly {
+				sup.TestOnlyClusters++
+				continue
+			}
+			visibleClusters = append(visibleClusters, c)
+		}
+	}
+
 	visiblePairs = sortAndLimit(visiblePairs, pairLessFunc(opts.Sort), opts.Limit)
-	visibleClusters := sortAndLimit(clusters, clusterLessFunc(opts.Sort), opts.Limit)
-	return visiblePairs, visibleClusters
+	visibleClusters = sortAndLimit(visibleClusters, clusterLessFunc(opts.Sort), opts.Limit)
+	return visiblePairs, visibleClusters, sup
+}
+
+// PrepareBlocks applies the report pipeline to block-clone findings:
+// suppress test↔test blocks (unless Options.IncludeTests), order by
+// containment (descending; ties by size then range names so output is
+// deterministic), then cap at Options.Limit. Options.Threshold is
+// deliberately NOT applied — a block finding's quality bar is its
+// containment, which the detector already enforced. Returns the
+// visible blocks and the count suppressed by test segregation.
+func PrepareBlocks(blocks []BlockClone, opts Options) ([]BlockClone, int) {
+	suppressed := 0
+	visible := make([]BlockClone, 0, len(blocks))
+	for _, b := range blocks {
+		if !opts.IncludeTests && b.IsTestA && b.IsTestB {
+			suppressed++
+			continue
+		}
+		visible = append(visible, b)
+	}
+	visible = sortAndLimit(visible, blockLess, opts.Limit)
+	return visible, suppressed
+}
+
+// blockLess orders block clones best-first: higher containment, then
+// bigger block (min-side non-blank lines), then range names.
+func blockLess(a, b BlockClone) bool {
+	if a.Containment != b.Containment {
+		return a.Containment > b.Containment
+	}
+	am, bm := minInt(a.LinesA, a.LinesB), minInt(b.LinesA, b.LinesB)
+	if am != bm {
+		return am > bm
+	}
+	if ra, rb := a.RangeNameA(), b.RangeNameA(); ra != rb {
+		return ra < rb
+	}
+	return a.RangeNameB() < b.RangeNameB()
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // sortAndLimit returns up to `limit` items in the order defined by `less`
@@ -295,20 +461,29 @@ func (h *topKHeap[T]) Pop() any {
 // n·(n-1)/2 pairs, and listing them individually buries everything else.
 // Options.Flat restores the flat everything-is-a-pair listing.
 func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
-	visiblePairs, visibleClusters := Prepare(pairs, clusters, opts)
+	visiblePairs, visibleClusters, sup := Prepare(pairs, clusters, opts)
+	// Callers that prepared upstream pass their counts via opts; our own
+	// Prepare call re-counts anything still present, so the sum is right
+	// whether the input was raw or already prepared.
+	sup.TestTestPairs += opts.Suppressed.TestTestPairs
+	sup.TestOnlyClusters += opts.Suppressed.TestOnlyClusters
+	sup.TestTestBlocks += opts.Suppressed.TestTestBlocks
 
 	printHeader(w, opts)
 
-	if len(visiblePairs) == 0 && len(visibleClusters) == 0 {
-		fmt.Fprintf(w, "\n%s  No similarities found above threshold %.0f%%%s\n\n",
+	if len(visiblePairs) == 0 && len(visibleClusters) == 0 && len(opts.PartialClones) == 0 {
+		fmt.Fprintf(w, "\n%s  No similarities found above threshold %.0f%%%s\n",
 			color(green, opts), opts.Threshold*100, color(reset, opts))
+		printSuppressed(w, sup, opts)
+		fmt.Fprintln(w)
 		return
 	}
 
 	if opts.Flat {
 		printPairs(w, visiblePairs, opts)
 		printClusters(w, visibleClusters, opts)
-		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, opts)
+		printPartialClones(w, opts.PartialClones, opts)
+		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, sup, opts)
 		return
 	}
 
@@ -318,11 +493,12 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 	if len(shownPairs) > 0 {
 		printPairs(w, shownPairs, opts)
 	}
+	printPartialClones(w, opts.PartialClones, opts)
 	crossCollapsed := 0
 	for _, r := range relations {
 		crossCollapsed += r.Count
 	}
-	printSummary(w, shownPairs, visiblePairs, visibleClusters, collapsed, crossCollapsed, opts)
+	printSummary(w, shownPairs, visiblePairs, visibleClusters, collapsed, crossCollapsed, sup, opts)
 }
 
 // ClusterRelation aggregates the pairs whose endpoints sit in two
@@ -534,7 +710,7 @@ func printPairs(w io.Writer, pairs []Pair, opts Options) {
 		color(bold, opts), color(white, opts), color(reset, opts))
 
 	for _, p := range pairs {
-		label, clr := classify(p.Score)
+		label, clr := classifyPair(p)
 
 		fmt.Fprintf(w, "  %s%s%s  %s%3.0f%%%s\n",
 			color(clr, opts), color(bold, opts), label,
@@ -554,9 +730,16 @@ func printPairs(w io.Writer, pairs []Pair, opts Options) {
 		printProvenance(w, p.ProvenanceB, opts)
 		printPreview(w, p.NameB, opts)
 
-		fmt.Fprintf(w, "  %sstructural: %3.0f%%  semantic: %3.0f%%%s\n\n",
+		// The lexical sub-score renders only when it was computed
+		// (pairs above the near-clone band), so lower-band pair lines
+		// are byte-identical to the pre-lexical format.
+		lexical := ""
+		if p.LexicalComputed {
+			lexical = fmt.Sprintf("  lexical: %3.0f%%", p.Lexical*100)
+		}
+		fmt.Fprintf(w, "  %sstructural: %3.0f%%  semantic: %3.0f%%%s%s\n\n",
 			color(grey, opts),
-			p.Structural*100, p.Semantic*100,
+			p.Structural*100, p.Semantic*100, lexical,
 			color(reset, opts))
 	}
 }
@@ -614,6 +797,38 @@ func printPreview(w io.Writer, name string, opts Options) {
 	}
 }
 
+// printPartialClones renders the block-level findings section. Each
+// finding shows the containment score, the block's line ranges in both
+// files, and (when known) the enclosing function of each side.
+func printPartialClones(w io.Writer, blocks []BlockClone, opts Options) {
+	if len(blocks) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "%s%s PARTIAL CLONES%s\n\n",
+		color(bold, opts), color(white, opts), color(reset, opts))
+	for _, b := range blocks {
+		fmt.Fprintf(w, "  %s%s[PARTIAL CLONE   ]%s  %s%3.0f%% contained%s · %d lines\n",
+			color(orange, opts), color(bold, opts), color(reset, opts),
+			color(orange, opts), b.Containment*100, color(reset, opts),
+			minInt(b.LinesA, b.LinesB))
+		printBlockSide(w, b.RangeNameA(), b.SymbolA, opts)
+		printBlockSide(w, b.RangeNameB(), b.SymbolB, opts)
+		fmt.Fprintln(w)
+	}
+}
+
+// printBlockSide renders one side of a partial clone as
+// "file:start-end ⊂ EnclosingFunc" (the ⊂ suffix only when the
+// enclosing chunk has a symbol).
+func printBlockSide(w io.Writer, rangeName, symbol string, opts Options) {
+	container := ""
+	if symbol != "" {
+		container = fmt.Sprintf(" %s⊂ %s%s", color(grey, opts), symbol, color(reset, opts))
+	}
+	fmt.Fprintf(w, "  %s  %s%s%s%s\n",
+		color(grey, opts), color(cyan, opts), rangeName, color(reset, opts), container)
+}
+
 func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 	if len(clusters) == 0 {
 		return
@@ -625,9 +840,18 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 	for _, c := range clusters {
 		if c.Score > 0 {
 			_, clr := classify(c.Score)
-			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s\n",
+			// Cohesion (the weakest internal pair) renders alongside the
+			// average when it was computed — the gap between the two is
+			// how you spot a transitively chained family.
+			cohesion := ""
+			if c.MinScore > 0 {
+				_, minClr := classify(c.MinScore)
+				cohesion = fmt.Sprintf(" · %scohesion %3.0f%%%s",
+					color(minClr, opts), c.MinScore*100, color(reset, opts))
+			}
+			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s%s\n",
 				color(green, opts), c.ID+1, color(reset, opts), len(c.Members),
-				color(clr, opts), c.Score*100, color(reset, opts))
+				color(clr, opts), c.Score*100, color(reset, opts), cohesion)
 		} else {
 			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets\n",
 				color(green, opts), c.ID+1, color(reset, opts), len(c.Members))
@@ -646,17 +870,23 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 // allVisible so "Exact clones" describes the scan, not just the
 // standalone leftovers (a repo whose exact clones all live inside
 // clusters would otherwise report "Exact clones 0").
-func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, opts Options) {
-	exact, near, strong, candidates, weak := 0, 0, 0, 0, 0
+func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, sup Suppressed, opts Options) {
+	exact, near, twins, strong, candidates, weak := 0, 0, 0, 0, 0, 0
 	for _, p := range allVisible {
-		switch {
-		case p.Score > 0.95:
+		// Bucket by the same gated classification the pair labels use,
+		// so "Exact clones N" never counts a pair that rendered as a
+		// near clone under the short-snippet evidence gate or as a
+		// structural twin under the lexical gate.
+		switch tierForPair(p).json {
+		case "exact_clone":
 			exact++
-		case p.Score > 0.85:
+		case "near_clone":
 			near++
-		case p.Score > 0.65:
+		case "structural_twin":
+			twins++
+		case "strong_clone":
 			strong++
-		case p.Score > 0.45:
+		case "refactor_candidate":
 			candidates++
 		default:
 			weak++
@@ -683,6 +913,11 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 		color(grey, opts), color(reset, opts), color(red, opts), exact, color(reset, opts))
 	fmt.Fprintf(w, "  %sNear clones%s       %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(red, opts), near, color(reset, opts))
+	if twins > 0 {
+		fmt.Fprintf(w, "  %sStructural twins%s  %s%d%s %s(same shape, different content)%s\n",
+			color(grey, opts), color(reset, opts), color(purple, opts), twins, color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
 	fmt.Fprintf(w, "  %sStrong clones%s     %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(orange, opts), strong, color(reset, opts))
 	fmt.Fprintf(w, "  %sRefactor targets%s  %s%d%s\n",
@@ -691,8 +926,66 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 		fmt.Fprintf(w, "  %sWeak similarities%s %s%d%s\n",
 			color(grey, opts), color(reset, opts), color(grey, opts), weak, color(reset, opts))
 	}
-	fmt.Fprintf(w, "  %sClusters found%s    %s%d%s\n\n",
+	fmt.Fprintf(w, "  %sClusters found%s    %s%d%s\n",
 		color(grey, opts), color(reset, opts), color(green, opts), len(clusters), color(reset, opts))
+	if len(opts.PartialClones) > 0 {
+		fmt.Fprintf(w, "  %sPartial clones%s    %s%d%s %s(sub-function blocks; see PARTIAL CLONES)%s\n",
+			color(grey, opts), color(reset, opts), color(orange, opts), len(opts.PartialClones), color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
+	printSuppressed(w, sup, opts)
+	fmt.Fprintln(w)
+}
+
+// printSuppressed emits one summary line per suppressed-finding class
+// (test↔test pairs, test-only clusters). No-op when nothing was
+// suppressed, so reports without test code look exactly as before.
+func printSuppressed(w io.Writer, sup Suppressed, opts Options) {
+	if sup.TestTestPairs > 0 {
+		fmt.Fprintf(w, "  %s%s test↔test %s suppressed (--include-tests to show)%s\n",
+			color(grey, opts), groupDigits(sup.TestTestPairs),
+			plural(sup.TestTestPairs, "pair", "pairs"), color(reset, opts))
+	}
+	if sup.TestOnlyClusters > 0 {
+		fmt.Fprintf(w, "  %s%s test-only %s suppressed (--include-tests to show)%s\n",
+			color(grey, opts), groupDigits(sup.TestOnlyClusters),
+			plural(sup.TestOnlyClusters, "cluster", "clusters"), color(reset, opts))
+	}
+	if sup.TestTestBlocks > 0 {
+		fmt.Fprintf(w, "  %s%s test↔test partial %s suppressed (--include-tests to show)%s\n",
+			color(grey, opts), groupDigits(sup.TestTestBlocks),
+			plural(sup.TestTestBlocks, "clone", "clones"), color(reset, opts))
+	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// groupDigits renders n with comma thousands separators ("1819" → "1,819").
+func groupDigits(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var sb strings.Builder
+	if neg {
+		sb.WriteByte('-')
+	}
+	pre := len(s) % 3
+	if pre == 0 {
+		pre = 3
+	}
+	sb.WriteString(s[:pre])
+	for i := pre; i < len(s); i += 3 {
+		sb.WriteByte(',')
+		sb.WriteString(s[i : i+3])
+	}
+	return sb.String()
 }
 
 // tier groups the per-band facts (boundary, terminal label, color, JSON
@@ -713,6 +1006,43 @@ var tiers = []tier{
 	{-1, "[WEAK SIMILARITY ]", grey, "weak_similarity"},
 }
 
+// structuralTwinTier is a band MODIFIER, not a score band: pairs in the
+// exact/near bands (score > StructuralTwinMinScore) whose lexical
+// overlap falls below StructuralTwinMaxLexical render with this tier
+// instead. Same shape, different content — likely parallel boilerplate
+// (table tests, per-field validators, generated handlers) rather than
+// copy-paste. It never appears via tierFor (a plain score lookup);
+// only tierForPair can select it.
+var structuralTwinTier = tier{-1, "[STRUCTURAL TWIN ]", purple, "structural_twin"}
+
+// StructuralTwinMinScore is the combined-score floor above which the
+// lexical sub-score is consulted at all: only the exact/near bands
+// (> 0.85) claim "this was copied", so only they need the content
+// check. Pairs at or below this score are never modified.
+const StructuralTwinMinScore = 0.85
+
+// StructuralTwinMaxLexical is the lexical floor for the top bands: a
+// pair above StructuralTwinMinScore whose lexical Jaccard is below
+// this renders as STRUCTURAL TWIN. Tuned against internal/bench: the
+// twins fixtures (disjoint vocabulary by construction) measure
+// 0.00–0.07, while the renamed positives — systematic renames that
+// keep the vocabulary a real rename keeps (helper calls, field names,
+// string literals) — measure 0.29–0.60. 0.20 splits the two
+// populations with margin on both sides; rename-invariance
+// (go-renamed, python-renamed scoring 1.0 AND labeling exact) is
+// pinned by TestBench_GroundTruth.
+const StructuralTwinMaxLexical = 0.20
+
+// ExactCloneMinLines is the evidence floor for the top report band: a
+// pair whose smaller snippet has fewer than this many non-blank lines
+// never renders as an exact clone, regardless of score. Short snippets
+// can hit a perfect score by sharing nothing but API-forced shape
+// (test scaffolding, tiny wrappers), so a "100% exact clone" label on a
+// 4-line pair overstates the evidence. Such pairs demote one band and
+// render as near clones — only the label moves; the numeric score is
+// untouched.
+const ExactCloneMinLines = 10
+
 func tierFor(score float64) tier {
 	for _, t := range tiers {
 		if score > t.above {
@@ -722,13 +1052,56 @@ func tierFor(score float64) tier {
 	return tiers[len(tiers)-1]
 }
 
+// tierForPair classifies a pair by score, then applies the two
+// evidence gates that can move a top-band label. Precedence: the
+// content check (structural twin) runs BEFORE the length gate, because
+// it makes the stronger, more specific claim — a content-divergent
+// pair isn't a slightly-less-certain copy-paste finding, it's a
+// different kind of finding entirely (parallel boilerplate), whereas
+// the length gate merely tempers the confidence of a copy-paste claim.
+// A short, content-divergent pair is therefore a STRUCTURAL TWIN, not
+// a "near clone (short)".
+//
+// The length gate: the exact-clone band additionally requires
+// min(lines) >= ExactCloneMinLines; shorter pairs demote one band.
+// Pairs with unknown line counts (0) fail the gate too — no evidence,
+// no top band. Neither gate ever changes the numeric score.
+func tierForPair(p Pair) tier {
+	t := tierFor(p.Score)
+	if p.Score > StructuralTwinMinScore && p.LexicalComputed &&
+		p.Lexical < StructuralTwinMaxLexical {
+		return structuralTwinTier
+	}
+	if t.json == tiers[0].json && minPairLines(p) < ExactCloneMinLines {
+		return tiers[1]
+	}
+	return t
+}
+
+func minPairLines(p Pair) int {
+	if p.LinesA < p.LinesB {
+		return p.LinesA
+	}
+	return p.LinesB
+}
+
+// classify is the score-only band lookup, used where no per-pair line
+// evidence exists (cluster scores, cluster relations). Pair labels go
+// through classifyPair so the exact-clone gate applies.
 func classify(score float64) (string, string) {
 	t := tierFor(score)
 	return t.label, t.color
 }
 
-// JSONLabel returns the snake-case classification name used in JSON output.
-func JSONLabel(score float64) string { return tierFor(score).json }
+func classifyPair(p Pair) (string, string) {
+	t := tierForPair(p)
+	return t.label, t.color
+}
+
+// JSONLabel returns the snake-case classification name used in JSON
+// output for a pair. It applies the same exact-clone evidence gate as
+// the terminal label, so the two surfaces always agree.
+func JSONLabel(p Pair) string { return tierForPair(p).json }
 
 func color(code string, opts Options) string {
 	if opts.Plain {
