@@ -75,16 +75,26 @@ func TestSuggest_JavaSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 	}
 	var doc struct {
 		Pairs []struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
 		} `json:"pairs"`
 	}
 	if err := json.Unmarshal(jsonOut, &doc); err != nil {
 		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
 	}
-	if len(doc.Pairs) == 0 || doc.Pairs[0].ID == "" {
-		t.Fatalf("expected at least one pair with an id, got:\n%s", jsonOut)
+	// Pick the METHOD pair — since §5.2 the fixture also produces a
+	// class↔class pair (the A/B class spans), which --suggest rejects
+	// by design.
+	var pairID string
+	for _, p := range doc.Pairs {
+		if p.ID != "" && strings.Contains(p.FileA, "priceWithTax") {
+			pairID = p.ID
+			break
+		}
 	}
-	pairID := doc.Pairs[0].ID
+	if pairID == "" {
+		t.Fatalf("expected a priceWithTax method pair with an id, got:\n%s", jsonOut)
+	}
 
 	cmd := exec.Command(bin,
 		"--no-cache", "--no-progress",
@@ -110,9 +120,9 @@ func TestSuggest_JavaSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 }
 
 // TestSuggestAll_JavaSimple_PopulatesSuggestedPatch: --suggest-all
-// --json should embed a non-empty unified_diff on every visible pair.
-// We assert the pair[0]'s suggested_patch surfaces the helper name and
-// that the diff is non-empty (rejection would set Note instead).
+// --json should populate suggested_patch on every visible pair: a real
+// unified_diff on the method pair, and (since §5.2) a class-level
+// rejection note on the A/B class-span pair.
 func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	bin := subprocessBin(t)
 	fixtureDir := "../../testdata/refactor/java/simple"
@@ -128,6 +138,7 @@ func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	var doc struct {
 		Pairs []struct {
 			ID             string `json:"id"`
+			FileA          string `json:"file_a"`
 			SuggestedPatch *struct {
 				UnifiedDiff string `json:"unified_diff"`
 				HelperName  string `json:"helper_name"`
@@ -141,16 +152,33 @@ func TestSuggestAll_JavaSimple_PopulatesSuggestedPatch(t *testing.T) {
 	if len(doc.Pairs) == 0 {
 		t.Fatalf("expected at least one pair, got none")
 	}
-	p := doc.Pairs[0]
-	if p.SuggestedPatch == nil {
-		t.Fatal("suggested_patch field missing on pair")
+	methodSeen, classSeen := false, false
+	for _, p := range doc.Pairs {
+		if p.SuggestedPatch == nil {
+			t.Errorf("suggested_patch field missing on pair %s", p.FileA)
+			continue
+		}
+		if strings.Contains(p.FileA, "priceWithTax") {
+			methodSeen = true
+			if p.SuggestedPatch.UnifiedDiff == "" {
+				t.Errorf("unified_diff empty (note=%q)", p.SuggestedPatch.Note)
+			}
+			if !strings.HasPrefix(p.SuggestedPatch.HelperName, "extracted_priceWithTaxA_") {
+				t.Errorf("helper_name = %q, want extracted_priceWithTaxA_… prefix",
+					p.SuggestedPatch.HelperName)
+			}
+		} else {
+			classSeen = true
+			if !strings.Contains(p.SuggestedPatch.Note, "class-level pair") {
+				t.Errorf("class pair note = %q, want class-level rejection", p.SuggestedPatch.Note)
+			}
+		}
 	}
-	if p.SuggestedPatch.UnifiedDiff == "" {
-		t.Errorf("unified_diff empty (note=%q)", p.SuggestedPatch.Note)
+	if !methodSeen {
+		t.Error("expected the priceWithTax method pair in --suggest-all output")
 	}
-	if !strings.HasPrefix(p.SuggestedPatch.HelperName, "extracted_priceWithTaxA_") {
-		t.Errorf("helper_name = %q, want extracted_priceWithTaxA_… prefix",
-			p.SuggestedPatch.HelperName)
+	if !classSeen {
+		t.Error("expected the A/B class-span pair in --suggest-all output")
 	}
 }
 
@@ -674,16 +702,27 @@ func TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
 	}
 	var doc struct {
 		Pairs []struct {
-			ID string `json:"id"`
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
 		} `json:"pairs"`
 	}
 	if err := json.Unmarshal(jsonOut, &doc); err != nil {
 		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
 	}
-	if len(doc.Pairs) == 0 {
-		t.Fatalf("expected the reject-throw fixture to surface a pair: %s", jsonOut)
+	// Pick the METHOD pair — the §5.2 class↔class pair also surfaces
+	// here, but the control-flow-asymmetry note under test lives on
+	// the method pair (the class pair gets the generic class-level
+	// rejection).
+	var pairID string
+	for _, p := range doc.Pairs {
+		if p.ID != "" && strings.Contains(p.FileA, "process") {
+			pairID = p.ID
+			break
+		}
 	}
-	pairID := doc.Pairs[0].ID
+	if pairID == "" {
+		t.Fatalf("expected the reject-throw fixture to surface the process method pair: %s", jsonOut)
+	}
 
 	cmd := exec.Command(bin,
 		"--no-cache", "--no-progress",

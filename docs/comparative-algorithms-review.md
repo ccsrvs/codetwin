@@ -43,7 +43,8 @@ with the commands shown._
 > like pairs. The review's dilution demo (verbatim 15-line block in
 > ~45-line hosts, pair score 0.37) now surfaces as `100% contained`.
 > Self-scan: 12 genuine partial clones by default, byte-identical
-> across runs. §5.1/§5.2 granularity modes remain open.
+> across runs. §5.2 class-level granularity is implemented (see the
+> status note under §5.2); §5.1 file-level mode remains open.
 
 ## Executive summary
 
@@ -330,6 +331,18 @@ function-level pairs — but it's cheap enough to bundle with any other
 granularity work.
 
 ### 5.2 Class/type level — small (1–2 weeks)
+
+> **Implementation status (2026-07-14):** implemented test-first for
+> Python/Java/JS — class-span chunks (`splitter.KindClass`) are emitted
+> in addition to method chunks, and the dilution concern below is
+> addressed by a chunk-kind gate in `BuildMatrix` (class chunks only
+> score against other class chunks; mixed-kind pairs are skipped like
+> nested same-file pairs), pinned by the `bench/classes` category
+> (positive `python-class-clone` / `java-class-clone`, negative
+> `js-class-vs-loose-funcs`). Follow-ups: Go struct+methodset and
+> Elixir `defmodule` symbol-grouping (span-based chunks don't apply —
+> methods live outside the type block), and JS class *expressions*
+> (`const A = class {}`), which are not span-chunked.
 
 Java/JS splitters deliberately reject class headers so methods
 dominate; Python and Go have no class/struct chunks at all. Emitting a

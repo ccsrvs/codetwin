@@ -62,9 +62,18 @@ func loadSnippetFromFile(t *testing.T, path, prefer string, pick func(splitter.C
 	}
 	code := string(data)
 	lang := tokenizer.Detect(path, code)
-	chunks := splitter.Split(path, code, lang)
+	all := splitter.Split(path, code, lang)
+	// Extraction targets functions/methods; drop the class-span chunks
+	// (§5.2) so `prefer`/longest-chunk selection can't land on a whole
+	// class (Synthesize would reject it anyway).
+	var chunks []splitter.Chunk
+	for _, c := range all {
+		if c.Kind != splitter.KindClass {
+			chunks = append(chunks, c)
+		}
+	}
 	if len(chunks) == 0 {
-		t.Fatalf("no chunks from %s", path)
+		t.Fatalf("no function-level chunks from %s", path)
 	}
 	var ch splitter.Chunk
 	picked := false

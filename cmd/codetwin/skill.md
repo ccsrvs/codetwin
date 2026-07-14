@@ -8,9 +8,13 @@ codebase. Reports pairs and clusters with optional line-numbered code previews.
 codetwin operates in five internal stages — all handled automatically:
 
 1. **Chunk** — split each file into per-definition chunks (Python `def`,
-   Go `func`, JS `function`/`class`/arrow, Rust `fn`). A 500-line module
-   with one duplicated 20-line helper scores high on the helper rather
-   than getting washed out by 480 lines of unrelated code.
+   Go `func`, JS `function`/arrow/class method, Rust `fn`, Java method,
+   Elixir `def`). A 500-line module with one duplicated 20-line helper
+   scores high on the helper rather than getting washed out by 480
+   lines of unrelated code. Python/Java/JS classes ALSO become
+   class-span chunks, compared only against other classes — a copied,
+   renamed class with reordered methods surfaces as one class↔class
+   finding (named with the class symbol) on top of its method pairs.
 2. **Tokenize & normalize** — strip comments, imports, replace literals/
    identifiers with canonical tokens
 3. **Winnowing fingerprints** — structural (Jaccard) similarity via k-gram hashing

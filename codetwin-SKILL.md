@@ -13,7 +13,8 @@ description: >
 
 `codetwin` is a CLI that finds duplicate and structurally similar code across
 Go, JavaScript/TypeScript, Python, Java, Rust, and Elixir. Function-level
-chunks, structural (Winnowing/Jaccard) + semantic (TF-IDF/cosine) scoring,
+chunks (plus class-span chunks for Python/Java/JS, matched class↔class only),
+structural (Winnowing/Jaccard) + semantic (TF-IDF/cosine) scoring,
 DBSCAN clusters.
 
 ## How to use this skill

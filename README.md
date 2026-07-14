@@ -259,6 +259,40 @@ bigger extractions, or pass `--min-block-lines 0` to disable the
 channel entirely. Test↔test partial clones follow the same
 [test code segregation](#test-code-segregation) as pairs.
 
+## Class-level matching
+
+For the class-based languages the splitter emits **class-span chunks in
+addition to** the method chunks inside them:
+
+- **Python** — `class Foo:` blocks (indent-terminated, exactly like
+  `def` chunks; decorated classes include their decorator block).
+- **Java** — class / interface / enum / record bodies, including nested
+  types (each nested type gets its own span).
+- **JS / TS** — `class Foo { ... }` declarations. Class *expressions*
+  (`const A = class { ... }`) are not span-chunked (their methods still
+  are).
+
+This catches the case method-level granularity underreports: a whole
+class copied and renamed with its methods slightly reordered surfaces
+as one strong class↔class finding instead of a scatter of method pairs.
+
+**Noise control.** Class chunks are whole-container spans, which is
+exactly the "washed out by unrelated code" dilution the splitter exists
+to avoid — so class chunks are only ever scored against **other class
+chunks**. A big class weakly resembling a small function across files
+is container-vs-part noise, not a clone; those mixed-kind comparisons
+are skipped entirely (matrix cell stays 0, nothing materializes, no
+cluster or block-candidate edges). Same-file class-vs-own-method
+overlap was already suppressed by the nested-chunk filter. Class↔class
+pairs participate in clusters and the block channel like any other
+same-kind pair.
+
+Go and Rust have no class-span equivalent: Go methods live *outside*
+the type block, so "class-level" there means struct+methodset symbol
+grouping — a possible follow-up, tracked in
+`docs/comparative-algorithms-review.md` §5.2, as is Elixir `defmodule`
+grouping.
+
 ## Test code segregation
 
 Test scaffolding dominates clone reports: test functions are short,
@@ -460,12 +494,15 @@ can show absolute file line numbers and the match-range slicer can find the
 duplicated lines.
 
 **Splitter** (`internal/splitter`)
-Breaks each file into per-definition chunks: every Python `def`, Go `func`,
-JS / TS / JSX / TSX `function` / `const arrow` / `class`, Rust `fn`, and Java
-method. Each chunk is then compared independently. A 500-line module with
-one duplicated 20-line helper now scores high on that helper instead of being
-washed out by 480 lines of unrelated code. Elixir falls back to whole-file
-chunks (it needs a language-specific splitter; PRs welcome).
+Breaks each file into per-definition chunks: every Python `def`, Go `func`
+(including closures/goroutines/defers), JS / TS / JSX / TSX `function` /
+`const arrow` / class method, Rust `fn`, Java method/constructor, and
+Elixir `def`/`defp`. Each chunk is then compared independently. A 500-line
+module with one duplicated 20-line helper now scores high on that helper
+instead of being washed out by 480 lines of unrelated code. For the
+class-based languages (Python, Java, JS/TS) the splitter ALSO emits one
+class-span chunk per `class`/`interface`/`enum`/`record` declaration,
+tagged with a distinct chunk kind — see "Class-level matching" below.
 
 **Fingerprint** (`internal/fingerprint`)
 Implements the Winnowing algorithm. Slides a window over k-gram hashes and

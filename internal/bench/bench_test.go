@@ -280,6 +280,11 @@ func TestBench_GroundTruth(t *testing.T) {
 		for _, sa := range c.a {
 			va := vec(sa)
 			for _, sb := range c.b {
+				// Mirror BuildMatrix's kind gate: class chunks only
+				// score against other class chunks (§5.2).
+				if !similarity.ComparableKinds(sa, sb) {
+					continue
+				}
 				if s := pairScore(sa, sb, va, vec(sb)); s.combined > best.combined {
 					best = s
 					bestA, bestB = sa, sb
@@ -409,6 +414,12 @@ func TestBench_GroundTruth(t *testing.T) {
 		for j := i + 1; j < len(pool); j++ {
 			if pool[i].caseIdx == pool[j].caseIdx ||
 				sameLogic(all[pool[i].caseIdx].benchCase, all[pool[j].caseIdx].benchCase) {
+				continue
+			}
+			// Mixed-kind pairs never materialize in a real scan
+			// (BuildMatrix's §5.2 kind gate), so they don't belong in
+			// the report-noise proxy either.
+			if !similarity.ComparableKinds(pool[i].s, pool[j].s) {
 				continue
 			}
 			s := pairScore(pool[i].s, pool[j].s, pool[i].v, pool[j].v).combined

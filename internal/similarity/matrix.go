@@ -138,6 +138,14 @@ func BuildMatrix(
 						batchProgress++
 						continue
 					}
+					// Suppress mixed-kind comparisons: class-span chunks
+					// only score against other class chunks (see
+					// ComparableKinds). Leaving the matrix at 0 keeps
+					// DBSCAN and the block-candidate channel class-pure.
+					if !ComparableKinds(snippets[i], snippets[j]) {
+						batchProgress++
+						continue
+					}
 
 					var structural float64
 					if _, ok := cands[j]; ok {
