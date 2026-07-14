@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -685,9 +686,19 @@ func synthesizeJavaScript(a, b scan.Snippet, pairID string, al Alignment) Sugges
 // jsHelperHeader rewrites the first recognisable JS/TS definition
 // header of aCode to use helperName. Supported forms:
 //   - `function name(...)`, `async function name(...)`, optionally
-//     prefixed with `export` / `export default`.
+//     prefixed with `export` / `export default`;
+//   - arrow / function-expression assignments (jsRewriteArrowOrFuncExpr);
+//   - class-method headers (jsRewriteClassMethod).
 //
-// Subsequent cycles add arrow-assignment and class-method forms.
+// TypeScript syntax is carried verbatim, never stripped: parameter and
+// return-type annotations (`function f(x: number): Widget {`, arrow
+// `(x: string): Foo =>`) and generics (`function f<T extends Base>`)
+// all pass through, so the starter stays usable in .ts files — and
+// plain-JS pairs never contain them, so plain-JS output is unchanged.
+// The only thing dropped is a class method's access modifier
+// (public/private/protected/readonly), which is invalid on a free
+// function. Interface declarations and type aliases are out of scope —
+// the splitter never chunks them as functions in the first place.
 // Returns ok=false when no recognisable form is found.
 func jsHelperHeader(aCode, helperName string) (string, bool) {
 	for _, l := range strings.Split(aCode, "\n") {
@@ -714,11 +725,14 @@ func jsHelperHeader(aCode, helperName string) (string, bool) {
 }
 
 // jsRewriteClassMethod handles ES6+ class-method headers — a bare
-// `name(params) {` line, optionally prefixed with `async`, `static`, or
-// both. The method is normalised into a free-function declaration so
-// the helper can drop into module scope. `static` is preserved because
-// it reads naturally on the helper if a human chooses to lift it back
-// inside a class.
+// `name(params) {` line, optionally prefixed with `async`, `static`,
+// TypeScript access modifiers, or a combination. The method is
+// normalised into a free-function declaration so the helper can drop
+// into module scope. `static` is preserved because it reads naturally
+// on the helper if a human chooses to lift it back inside a class.
+// TS access modifiers (`public`/`private`/`protected`/`readonly`) are
+// dropped — they're invalid on a free function — while parameter and
+// return-type annotations after the name pass through verbatim.
 //
 // Control-flow keywords like `if`, `while`, `for`, `switch`, `catch`,
 // `return` happen to share the `keyword(...)` shape with method
@@ -734,6 +748,14 @@ func jsRewriteClassMethod(line, helperName string) (string, bool) {
 		case strings.HasPrefix(rest, "static "):
 			prefix += "static "
 			rest = rest[len("static "):]
+		case strings.HasPrefix(rest, "public "):
+			rest = rest[len("public "):]
+		case strings.HasPrefix(rest, "private "):
+			rest = rest[len("private "):]
+		case strings.HasPrefix(rest, "protected "):
+			rest = rest[len("protected "):]
+		case strings.HasPrefix(rest, "readonly "):
+			rest = rest[len("readonly "):]
 		default:
 			goto done
 		}
@@ -823,9 +845,12 @@ var jsClassMethodReservedNames = map[string]bool{
 //   - `const|let|var name = async function(params) {…}`
 //
 // Each is normalised into a free-function header: `[export ]function
-// extracted_h(params) {`. Arrow shorthands without parens around a
-// single parameter and without a `{}` body are deliberately not
-// matched — they require body lifting that v1 doesn't tackle.
+// extracted_h(params) {`. A TypeScript return-type annotation between
+// the parameter list and the arrow (`(x: string): Foo => {`) is carried
+// verbatim onto the free-function header (`function extracted_h(x:
+// string): Foo {`). Arrow shorthands without parens around a single
+// parameter and without a `{}` body are deliberately not matched —
+// they require body lifting that v1 doesn't tackle.
 func jsRewriteArrowOrFuncExpr(line, helperName string) (string, bool) {
 	rest := line
 	exportPrefix := ""
@@ -890,6 +915,15 @@ func jsRewriteArrowOrFuncExpr(line, helperName string) (string, bool) {
 	}
 	params := rest[:closeParen+1]
 	tail := strings.TrimLeft(rest[closeParen+1:], " \t")
+	retAnn := ""
+	if strings.HasPrefix(tail, ":") {
+		arrowIdx := strings.Index(tail, "=>")
+		if arrowIdx < 0 {
+			return "", false
+		}
+		retAnn = strings.TrimRight(tail[:arrowIdx], " \t")
+		tail = tail[arrowIdx:]
+	}
 	if !strings.HasPrefix(tail, "=>") {
 		return "", false
 	}
@@ -898,7 +932,7 @@ func jsRewriteArrowOrFuncExpr(line, helperName string) (string, bool) {
 	if strings.HasPrefix(afterArrow, "{") {
 		headerSuffix = " {"
 	}
-	return exportPrefix + asyncPrefix + "function " + helperName + params + headerSuffix, true
+	return exportPrefix + asyncPrefix + "function " + helperName + params + retAnn + headerSuffix, true
 }
 
 // jsRewriteFunctionHeader handles `function name(...)` / `async
@@ -1019,38 +1053,62 @@ func javaRebodyAsHelper(aCode string) string {
 	return strings.Join(body, "\n") + "\n"
 }
 
-// pythonHelperHeader builds the helper's `def` line by finding the
-// first non-blank/non-comment/non-decorator line of snippet A,
+// pythonHelperHeader builds the helper's `def` signature by finding
+// the first non-blank/non-comment/non-decorator line of snippet A,
 // stripping its leading whitespace, and replacing the function name
 // with helperName. Preserves `async def`. Returns ok=false when no
 // recognisable def line is found.
 //
-// TODO: multi-line `def name(\n    a, b,\n):` signatures aren't
-// exercised by v1 fixtures; revisit when one shows up. The single-line
-// case is enough for the simple/medium/advanced tiers.
+// Multi-line signatures (Black-formatted `def name(\n    a, b,\n):`)
+// are carried whole: the name is rewritten on the first line and every
+// continuation line through the closing `):` (or `) -> Ret:`) —
+// trailing commas, default args, and type annotations included — is
+// emitted verbatim, dedented by the def line's indent. The signature
+// span is located with splitter.PythonSignatureEnd's paren/string-aware
+// scanning, so a `:` inside a default-value string or a `dict[str,
+// int]` annotation doesn't end the signature early. Single-line
+// signatures emit byte-identically to the pre-multi-line behaviour.
 func pythonHelperHeader(aCode, helperName string) (string, bool) {
-	for _, l := range strings.Split(aCode, "\n") {
+	lines := strings.Split(aCode, "\n")
+	defIdx := -1
+	for i, l := range lines {
 		t := strings.TrimSpace(l)
 		if t == "" || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "@") {
 			continue
 		}
-		rest := t
-		prefix := ""
-		if strings.HasPrefix(rest, "async ") {
-			prefix = "async "
-			rest = strings.TrimSpace(rest[len("async "):])
-		}
-		if !strings.HasPrefix(rest, "def ") {
-			return "", false
-		}
-		afterDef := rest[len("def "):]
-		nameEnd := 0
-		for nameEnd < len(afterDef) && isIdentByte(afterDef[nameEnd]) {
-			nameEnd++
-		}
-		return prefix + "def " + helperName + afterDef[nameEnd:], true
+		defIdx = i
+		break
 	}
-	return "", false
+	if defIdx < 0 {
+		return "", false
+	}
+	defLine := lines[defIdx]
+	t := strings.TrimSpace(defLine)
+	rest := t
+	prefix := ""
+	if strings.HasPrefix(rest, "async ") {
+		prefix = "async "
+		rest = strings.TrimSpace(rest[len("async "):])
+	}
+	if !strings.HasPrefix(rest, "def ") {
+		return "", false
+	}
+	afterDef := rest[len("def "):]
+	nameEnd := 0
+	for nameEnd < len(afterDef) && isIdentByte(afterDef[nameEnd]) {
+		nameEnd++
+	}
+	first := prefix + "def " + helperName + afterDef[nameEnd:]
+	sigEnd := splitter.PythonSignatureEnd(lines, defIdx)
+	if sigEnd <= defIdx {
+		return first, true
+	}
+	defIndent := defLine[:len(defLine)-len(strings.TrimLeft(defLine, " \t"))]
+	out := []string{first}
+	for _, cl := range lines[defIdx+1 : sigEnd+1] {
+		out = append(out, strings.TrimPrefix(cl, defIndent))
+	}
+	return strings.Join(out, "\n"), true
 }
 
 // pythonRebodyAsHelper returns snippet A's body re-indented for a
@@ -1058,7 +1116,9 @@ func pythonHelperHeader(aCode, helperName string) (string, bool) {
 // and each non-blank line is re-indented at 4 spaces. Decorators on
 // the original chunk are dropped — the helper does not carry
 // user-defined decorators forward (they may be undefined at the
-// helper's scope).
+// helper's scope). Multi-line signatures are skipped whole (mirroring
+// pythonHelperHeader): the body starts after the line whose top-level
+// `:` closes the signature.
 func pythonRebodyAsHelper(aCode string) string {
 	lines := strings.Split(strings.TrimRight(aCode, "\n"), "\n")
 
@@ -1074,10 +1134,14 @@ func pythonRebodyAsHelper(aCode string) string {
 		}
 		break
 	}
-	if defIdx < 0 || defIdx == len(lines)-1 {
+	if defIdx < 0 {
 		return ""
 	}
-	body := lines[defIdx+1:]
+	sigEnd := splitter.PythonSignatureEnd(lines, defIdx)
+	if sigEnd >= len(lines)-1 {
+		return ""
+	}
+	body := lines[sigEnd+1:]
 
 	minIndent := -1
 	for _, l := range body {

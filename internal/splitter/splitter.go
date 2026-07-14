@@ -291,6 +291,17 @@ func pythonSignatureEndLine(lines []string, defLine int) int {
 	return len(lines) - 1
 }
 
+// PythonSignatureEnd exposes pythonSignatureEndLine's paren/string-aware
+// signature scanning for reuse outside the splitter — the refactor
+// emitter uses it to carry Black-formatted multi-line `def` signatures
+// into synthesized helpers verbatim. Same contract: returns the 0-based
+// index of the line whose top-level `:` closes the signature starting
+// at defLine (defLine itself for a single-line signature; the last line
+// index on malformed input).
+func PythonSignatureEnd(lines []string, defLine int) int {
+	return pythonSignatureEndLine(lines, defLine)
+}
+
 // pythonDecoratorEndLine returns the 0-based index of the last line of a
 // decorator block beginning at decoLine. A simple `@cached` returns
 // decoLine itself; a multi-line `@retry(\n    attempts=3,\n)` returns the
@@ -513,11 +524,19 @@ func findBraceEnd(lines []string, start int) (int, bool) {
 
 // ── JavaScript / TypeScript ───────────────────────────────────────────────────
 
+// TypeScript notes: `.ts`/`.tsx` files come through Detect as
+// JavaScript, so these patterns cover TS header shapes too. jsArrowRe
+// allows an optional `: ReturnType` between the parameter list and the
+// `=>`; jsMethodRe allows TS access modifiers (public/private/
+// protected/readonly/override) and an optional `: ReturnType` before
+// the opening `{`. Interface declarations and type aliases are
+// deliberately NOT chunked — they aren't functions, so they stay out of
+// both detection and the refactor emitter's scope.
 var (
 	jsFuncRe   = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
-	jsArrowRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)`)
+	jsArrowRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]*)?=>|\w+\s*=>)`)
 	jsClassRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?class\s+\w+`)
-	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*\{`)
+	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:public|private|protected|readonly|override|async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*(?::[^{]*)?\{`)
 )
 
 // jsMethodReservedNames are control-flow / language keywords whose
