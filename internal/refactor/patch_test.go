@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ccsrvs/codetwin/internal/splitter"
 )
 
 // TestBuildPatch_GoSimple_AppliesClean is the round-trip integration
@@ -605,5 +607,120 @@ func gitInit(t *testing.T, dir string) {
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v\noutput: %s", args, err, out)
 		}
+	}
+}
+
+// TestBuildPatch_PythonMultilineSig_AppliesClean round-trips the
+// Black-formatted multi-line-signature fixture through `git apply`:
+// the emitted helper must carry the full multi-line signature verbatim
+// (renamed on the first line) and still produce a well-formed diff.
+// Bet #4 deferred follow-up.
+func TestBuildPatch_PythonMultilineSig_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-multiline-sig")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/python/realworld-multiline-sig/a.py")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.py")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.py: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.py", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s",
+			err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	wantSig := "def extracted_compute_totals_deadbeef(\n" +
+		"    orders: list[dict],\n" +
+		"    cutoff: int = 10,\n" +
+		") -> dict:"
+	if !strings.Contains(string(patched), wantSig) {
+		t.Errorf("patched file missing verbatim multi-line signature. Content:\n%s", patched)
+	}
+}
+
+// TestBuildPatch_TypeScriptRealworld_AppliesClean round-trips the
+// class-method pair of the realworld-typescript fixture through
+// `git apply`: the helper header must keep the parameter and return
+// annotations while dropping the `private` access modifier. Bet #4
+// deferred follow-up.
+func TestBuildPatch_TypeScriptRealworld_AppliesClean(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH, skipping integration test")
+	}
+	a, b := loadSnippetsByPredicate(t, "../../testdata/refactor/js/realworld-typescript",
+		func(c splitter.Chunk) bool { return strings.HasPrefix(c.Symbol, "load") })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("synthesis rejected: %q", s.Note)
+	}
+
+	tmp := t.TempDir()
+	srcA, err := os.ReadFile("../../testdata/refactor/js/realworld-typescript/a.ts")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	dstA := filepath.Join(tmp, "a.ts")
+	if err := os.WriteFile(dstA, srcA, 0o644); err != nil {
+		t.Fatalf("write a.ts: %v", err)
+	}
+	gitInit(t, tmp)
+
+	diff := buildAppendPatch("a.ts", string(srcA), s.HelperSrc)
+	patchFile := filepath.Join(tmp, "p.diff")
+	if err := os.WriteFile(patchFile, []byte(diff), 0o644); err != nil {
+		t.Fatalf("write patch: %v", err)
+	}
+
+	cmd := exec.Command("git", "apply", "--check", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply --check failed: %v\noutput:\n%s\ndiff:\n%s",
+			err, out, diff)
+	}
+	cmd = exec.Command("git", "apply", patchFile)
+	cmd.Dir = tmp
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git apply failed: %v\noutput:\n%s", err, out)
+	}
+	patched, err := os.ReadFile(dstA)
+	if err != nil {
+		t.Fatalf("read patched: %v", err)
+	}
+	if !strings.Contains(string(patched),
+		"async function extracted_loadA_deadbeef(id: string): Promise<Widget> {") {
+		t.Errorf("patched file missing annotated helper header. Content:\n%s", patched)
+	}
+	if strings.Contains(string(patched), "private async function") {
+		t.Errorf("access modifier leaked onto the free-function helper. Content:\n%s", patched)
 	}
 }
