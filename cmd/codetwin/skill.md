@@ -65,7 +65,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --json                  JSON output
 --verbose               show all pairs including weak similarities
 --min-lines int         skip chunks shorter than N non-blank lines (default 3)
---eps float             DBSCAN epsilon — cluster density (default 0.45)
+--eps float             DBSCAN epsilon — cluster density (default 0.35;
+                        links pairs scoring ≥ 0.65, the "strong clone" band)
 --min-pts int           DBSCAN min cluster size (default 2)
 --preview               show a short code excerpt for each finding
 --preview-lines int     max lines per preview; 0 = show whole snippet (default 10)
@@ -338,6 +339,12 @@ value is `--min-confidence-lines 20`.
 - **Clusters** = families of related snippets grouped by DBSCAN. One cluster = one refactoring task.
 - **Pairs** = individual high-similarity findings not part of a larger cluster.
 - Always address clusters first — they represent the highest-value consolidation opportunities.
+- Each cluster header shows **avg similarity** and **cohesion** (the weakest
+  internal pair; `min_score` in JSON). DBSCAN links transitively, so a big
+  avg-vs-cohesion gap means the family was chained together rather than
+  uniformly similar. Clusters whose cohesion falls below `--threshold` are
+  automatically re-linked at threshold strength and split into tighter
+  families; members without a threshold-strength partner drop out as noise.
 
 ### Cross-language clusters
 
@@ -414,7 +421,7 @@ codetwin --preview --threshold 0.40 ./testdata
 |---|---|
 | `not enough parseable files` | Target has < 2 files with supported extensions |
 | All scores near 0% | Files may be too short — lower `--min-lines` |
-| No clusters formed | Lower `--eps` (e.g. `--eps 0.35`) or `--min-pts 2` |
+| No clusters formed | Raise `--eps` (e.g. `--eps 0.45` links pairs ≥ 0.55) — looser linking admits weaker pairs |
 | Want to see source under findings | Add `--preview` (and tune `--preview-lines`) |
 | Too many noisy pairs from imports/logging | Add `ignore_patterns` to `.codetwin.json` |
 | Tests/vendored code dominating results | Add `ignore_paths` (e.g. `["**/*_test.go", "vendor/**"]`) |

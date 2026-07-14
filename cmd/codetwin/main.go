@@ -71,7 +71,7 @@ func main() {
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
 	minLines := flag.Int("min-lines", 3, "skip files with fewer than N non-blank lines")
-	eps := flag.Float64("eps", 0.45, "DBSCAN epsilon: max distance for two snippets to be neighbours")
+	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
 	previewLines := flag.Int("preview-lines", 10, "max lines per preview; 0 = show whole snippet")
@@ -343,30 +343,12 @@ func main() {
 	debugf("DBSCAN: %d clusters", clusterResult.NumClusters)
 	groups := cluster.Groups(clusterResult)
 
-	clusters := make([]report.Cluster, 0, len(groups))
-	for id, members := range groups {
-		names := make([]string, len(members))
-		for k, idx := range members {
-			names[k] = snippets[idx].Name
-		}
-		// Average internal pair score: mean of matrix[a][b] for every distinct
-		// member pair. Single-member clusters (which DBSCAN won't produce, but
-		// guard anyway) get a score of 0.
-		var sum float64
-		var nPairs int
-		for k := 0; k < len(members); k++ {
-			for l := k + 1; l < len(members); l++ {
-				sum += matrix[members[k]][members[l]]
-				nPairs++
-			}
-		}
-		avg := 0.0
-		if nPairs > 0 {
-			avg = sum / float64(nPairs)
-		}
-		clusters = append(clusters, report.Cluster{ID: id, Members: names, Score: avg})
+	snippetNames := make([]string, len(snippets))
+	for i, s := range snippets {
+		snippetNames[i] = s.Name
 	}
-	debugf("clusters built: %d", len(clusters))
+	clusters := buildReportClusters(groups, matrix, snippetNames, *threshold)
+	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
 	if *since != "" {
 		before := len(clusters)
@@ -511,6 +493,92 @@ func buildPreviews(
 		}
 	}
 	return previews
+}
+
+// ── Cluster building ──────────────────────────────────────────────────────────
+
+// clusterStats returns the average and minimum internal pair score over
+// all distinct member pairs, read from the similarity matrix. Groups
+// with fewer than two members (which DBSCAN won't produce, but guard
+// anyway) yield (0, 0).
+func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
+	if len(members) < 2 {
+		return 0, 0
+	}
+	var sum float64
+	var nPairs int
+	min = 1.0
+	for k := 0; k < len(members); k++ {
+		for l := k + 1; l < len(members); l++ {
+			s := matrix[members[k]][members[l]]
+			sum += s
+			if s < min {
+				min = s
+			}
+			nPairs++
+		}
+	}
+	return sum / float64(nPairs), min
+}
+
+// buildReportClusters converts DBSCAN member groups into report.Clusters
+// carrying both the average internal pair score (Score) and the minimum
+// (MinScore, "cohesion"), computed from the in-memory similarity matrix.
+//
+// DBSCAN links transitively: with eps 0.35 any chain of pairs scoring
+// ≥ 0.65 merges into one cluster even when its endpoints barely resemble
+// each other. The report frames each cluster as one refactoring task, so
+// low-cohesion chains are actively misleading. When a cluster's minimum
+// internal score falls below the report threshold, its members are
+// re-linked single-linkage at pair score ≥ threshold and each connected
+// component becomes its own cluster; components of size 1 have no
+// threshold-strength partner and drop out as noise. Split clusters get
+// their avg/min recomputed over just their own members.
+//
+// IDs are assigned deterministically by first member name, so cluster
+// numbering is stable across runs regardless of map iteration order.
+func buildReportClusters(
+	groups map[int][]int,
+	matrix [][]float64,
+	names []string,
+	threshold float64,
+) []report.Cluster {
+	memberLists := make([][]int, 0, len(groups))
+	for _, members := range groups {
+		_, min := clusterStats(members, matrix)
+		if min >= threshold {
+			memberLists = append(memberLists, members)
+			continue
+		}
+		link := func(a, b int) bool { return matrix[a][b] >= threshold }
+		for _, comp := range cluster.Components(members, link) {
+			if len(comp) < 2 {
+				continue // singleton at the stricter bound → noise
+			}
+			memberLists = append(memberLists, comp)
+		}
+	}
+
+	clusters := make([]report.Cluster, 0, len(memberLists))
+	for _, members := range memberLists {
+		avg, min := clusterStats(members, matrix)
+		memberNames := make([]string, len(members))
+		for k, idx := range members {
+			memberNames[k] = names[idx]
+		}
+		clusters = append(clusters, report.Cluster{
+			Members: memberNames, Score: avg, MinScore: min,
+		})
+	}
+	// Deterministic renumbering: order by first member name. Clusters are
+	// disjoint, so first members are unique and the order is total.
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].Members[0] < clusters[j].Members[0]
+	})
+	for i := range clusters {
+		clusters[i].ID = i
+	}
+	return clusters
 }
 
 // ── Refactor suggestions (--suggest / --suggest-all) ─────────────────────────
@@ -666,6 +734,10 @@ type jsonCluster struct {
 	ID      int      `json:"id"`
 	Members []string `json:"members"`
 	Score   float64  `json:"score"`
+	// MinScore is the cluster's cohesion: the minimum internal pair
+	// score over all distinct member pairs. A MinScore far below Score
+	// flags a transitively chained family.
+	MinScore float64 `json:"min_score"`
 }
 
 type jsonPreview struct {
@@ -704,7 +776,7 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, previews map[stri
 		out.Pairs = append(out.Pairs, jp)
 	}
 	for _, c := range clusters {
-		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score})
+		out.Clusters = append(out.Clusters, jsonCluster{ID: c.ID, Members: c.Members, Score: c.Score, MinScore: c.MinScore})
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -1065,7 +1137,8 @@ FLAGS:
   --json               output as JSON
   --verbose            show all pairs including weak similarities
   --min-lines int      skip files with fewer than N non-blank lines (default 3)
-  --eps float          DBSCAN epsilon distance (default 0.45)
+  --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
+                       the 'strong clone' band)
   --min-pts int        DBSCAN min cluster size (default 2)
   --preview            show a short code excerpt for each finding
   --preview-lines int  max lines per preview; 0 = show whole snippet (default 10)

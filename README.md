@@ -110,7 +110,7 @@ codetwin --suggest <pair-id> ./src
 | `--json` | false | JSON output |
 | `--verbose` | false | Show all pairs including weak |
 | `--min-lines` | `3` | Skip chunks shorter than N non-blank lines |
-| `--eps` | `0.45` | DBSCAN epsilon (cluster density threshold) |
+| `--eps` | `0.35` | DBSCAN epsilon (cluster density threshold). The default links pairs scoring ≥ 0.65 — the "strong clone" band |
 | `--min-pts` | `2` | DBSCAN minimum cluster size |
 | `--preview` | false | Show line-numbered code excerpts under each finding |
 | `--preview-lines` | `10` | Max lines per preview; `0` = show whole snippet |
@@ -342,7 +342,12 @@ with different control flow patterns).
 **Cluster** (`internal/cluster`)
 DBSCAN over the combined similarity matrix. Rather than reporting O(n²) pairs,
 it groups families of similar snippets into clusters. Each cluster is one
-refactoring task. Noise points (unique snippets) are omitted.
+refactoring task. Noise points (unique snippets) are omitted. DBSCAN links
+transitively, so each cluster header reports both the average internal pair
+score and its **cohesion** (the weakest internal pair — `min_score` in JSON);
+clusters whose cohesion falls below `--threshold` are re-linked single-linkage
+at threshold strength and split into tighter families (members left without a
+threshold-strength partner drop out as noise).
 
 **Report** (`internal/report`)
 Renders results to stdout with ANSI colour-coded labels and cluster membership.

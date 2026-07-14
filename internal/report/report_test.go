@@ -984,6 +984,28 @@ func TestRender_ClusterAvgScoreShown(t *testing.T) {
 	if !strings.Contains(buf.String(), "avg similarity  97%") {
 		t.Errorf("cluster line should include avg similarity:\n%s", buf.String())
 	}
+	// MinScore unset (zero) → no cohesion segment on the header.
+	if strings.Contains(buf.String(), "cohesion") {
+		t.Errorf("cluster with no computed MinScore should not render cohesion:\n%s", buf.String())
+	}
+}
+
+func TestRender_ClusterCohesionShown(t *testing.T) {
+	var buf strings.Builder
+	clusters := []Cluster{{ID: 0, Members: []string{"a.go", "b.go", "c.go"}, Score: 0.80, MinScore: 0.55}}
+	pairs := []Pair{
+		{NameA: "a.go", NameB: "b.go", Score: 0.95},
+		{NameA: "a.go", NameB: "c.go", Score: 0.90},
+		{NameA: "b.go", NameB: "c.go", Score: 0.55},
+	}
+	Render(&buf, pairs, clusters, Options{Plain: true, Threshold: 0.50})
+	out := buf.String()
+	if !strings.Contains(out, "avg similarity  80%") {
+		t.Errorf("cluster line should include avg similarity:\n%s", out)
+	}
+	if !strings.Contains(out, "cohesion  55%") {
+		t.Errorf("cluster line should include cohesion (min internal pair score):\n%s", out)
+	}
 }
 
 func TestRender_OnlyClustersNoStandalonePairs_StillReports(t *testing.T) {

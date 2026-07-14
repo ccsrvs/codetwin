@@ -96,6 +96,59 @@ func Groups(result Result) map[int][]int {
 	return groups
 }
 
+// Components partitions points into connected components under the
+// symmetric link predicate — single-linkage: two points share a
+// component when a chain of directly linked points connects them.
+// link is called with the point *values* (e.g. snippet indices), not
+// their positions in the slice.
+//
+// Used to split low-cohesion DBSCAN clusters at a stricter bound:
+// re-link the cluster's members with a tighter predicate and each
+// resulting component becomes its own cluster (singleton components
+// have no partner at the stricter bound and drop out as noise).
+//
+// Deterministic: each component's members keep their input order, and
+// components are ordered by their first member's input position.
+func Components(points []int, link func(a, b int) bool) [][]int {
+	var comps [][]int
+	assigned := make([]bool, len(points))
+	for start := range points {
+		if assigned[start] {
+			continue
+		}
+		assigned[start] = true
+		// BFS over slice positions; comp doubles as the queue.
+		comp := []int{start}
+		for qi := 0; qi < len(comp); qi++ {
+			cur := comp[qi]
+			for cand := range points {
+				if !assigned[cand] && link(points[cur], points[cand]) {
+					assigned[cand] = true
+					comp = append(comp, cand)
+				}
+			}
+		}
+		// BFS discovers positions out of order; restore input order.
+		sortInts(comp)
+		members := make([]int, len(comp))
+		for i, pos := range comp {
+			members[i] = points[pos]
+		}
+		comps = append(comps, members)
+	}
+	return comps
+}
+
+// sortInts is an insertion sort — component sizes are small and this
+// avoids pulling in the sort package for one call site.
+func sortInts(a []int) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j] < a[j-1]; j-- {
+			a[j], a[j-1] = a[j-1], a[j]
+		}
+	}
+}
+
 func neighbors(i, n int, eps float64, dist DistFunc) []int {
 	var nb []int
 	for j := 0; j < n; j++ {

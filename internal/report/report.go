@@ -68,6 +68,13 @@ type Cluster struct {
 	ID      int
 	Members []string
 	Score   float64 // average internal pair score across the cluster's members
+
+	// MinScore is the cluster's cohesion: the minimum internal pair
+	// score over all distinct member pairs. DBSCAN links transitively,
+	// so a chained family can contain endpoints that barely resemble
+	// each other — a low MinScore relative to Score is the tell. Zero
+	// when never computed (e.g. clusters built outside main.go).
+	MinScore float64
 }
 
 // Preview is a code excerpt to display under a pair or cluster member.
@@ -625,9 +632,18 @@ func printClusters(w io.Writer, clusters []Cluster, opts Options) {
 	for _, c := range clusters {
 		if c.Score > 0 {
 			_, clr := classify(c.Score)
-			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s\n",
+			// Cohesion (the weakest internal pair) renders alongside the
+			// average when it was computed — the gap between the two is
+			// how you spot a transitively chained family.
+			cohesion := ""
+			if c.MinScore > 0 {
+				_, minClr := classify(c.MinScore)
+				cohesion = fmt.Sprintf(" · %scohesion %3.0f%%%s",
+					color(minClr, opts), c.MinScore*100, color(reset, opts))
+			}
+			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets · %savg similarity %3.0f%%%s%s\n",
 				color(green, opts), c.ID+1, color(reset, opts), len(c.Members),
-				color(clr, opts), c.Score*100, color(reset, opts))
+				color(clr, opts), c.Score*100, color(reset, opts), cohesion)
 		} else {
 			fmt.Fprintf(w, "  %sCluster %d%s — %d snippets\n",
 				color(green, opts), c.ID+1, color(reset, opts), len(c.Members))
