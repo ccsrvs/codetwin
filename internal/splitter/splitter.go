@@ -65,7 +65,12 @@ func (c Chunk) Name() string {
 // per-definition splitters entirely.
 func WholeFile(path, code string) Chunk {
 	lines := strings.Split(code, "\n")
-	return Chunk{Path: path, StartLine: 1, EndLine: len(lines), Code: code}
+	// KindFunction is the ordinary comparable kind: whole-file chunks —
+	// both the no-definitions fallback and every file-mode chunk — take
+	// it so they score against each other and (in function mode) against
+	// per-definition chunks, matching pre-Kind behavior. Only class-span
+	// chunks are segregated by kind.
+	return Chunk{Path: path, StartLine: 1, EndLine: len(lines), Code: code, Kind: KindFunction}
 }
 
 // CountNonBlankLines reports how many newline-separated lines in code have

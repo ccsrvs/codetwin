@@ -10,7 +10,6 @@ import (
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/splitter"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 // materializationFloorMin is the absolute minimum materialization

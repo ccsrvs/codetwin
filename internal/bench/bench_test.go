@@ -21,7 +21,6 @@ import (
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
 	"github.com/ccsrvs/codetwin/internal/splitter"
-	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
 const (
