@@ -2496,3 +2496,330 @@ func TestSynthesize_ClassPairRejectedWithNote(t *testing.T) {
 		t.Errorf("Note = %q, want a class-level rejection", s.Note)
 	}
 }
+
+// ── Bet #4 deferred follow-ups: Python multi-line signatures + TS syntax ─────
+
+// Given a single-line Python def, when pythonHelperHeader rewrites it,
+// then the output is byte-identical to the pre-multi-line-support
+// behaviour: the trimmed def line with only the name replaced. Pins the
+// single-line path against regressions from the multi-line work.
+func TestPythonHelperHeader_SingleLine_ByteIdentical(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"plain def with default arg",
+			"def price(amount, rate=0.07):\n    return amount\n",
+			"def extracted_h(amount, rate=0.07):",
+		},
+		{
+			"async def",
+			"async def fetch(client):\n    return client\n",
+			"async def extracted_h(client):",
+		},
+		{
+			"annotated single-line def",
+			"def price(amount: float) -> float:\n    return amount\n",
+			"def extracted_h(amount: float) -> float:",
+		},
+		{
+			"indented method def",
+			"    def fetch(self, key):\n        return key\n",
+			"def extracted_h(self, key):",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pythonHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("pythonHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a Black-formatted multi-line def signature, when
+// pythonHelperHeader rewrites it, then the function name is replaced on
+// the first line and the remaining signature lines (params with
+// trailing commas, default args, type annotations, and the closing
+// `) -> Ret:` line) are carried verbatim, dedented by the def line's
+// indent. Bet #4 deferred follow-up.
+func TestPythonHelperHeader_MultilineSignatureForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"black-formatted multi-line def",
+			"def compute(\n    orders,\n    cutoff=10,\n) -> dict:\n    return {}\n",
+			"def extracted_h(\n    orders,\n    cutoff=10,\n) -> dict:",
+		},
+		{
+			"async multi-line def",
+			"async def fetch(\n    client,\n    user_id: int,\n) -> dict:\n    return await client.get(user_id)\n",
+			"async def extracted_h(\n    client,\n    user_id: int,\n) -> dict:",
+		},
+		{
+			"indented method multi-line def dedents by def indent",
+			"    def fetch(\n        self,\n        key: str,\n    ) -> str:\n        return key\n",
+			"def extracted_h(\n    self,\n    key: str,\n) -> str:",
+		},
+		{
+			"decorator above multi-line def",
+			"@retry\ndef load(\n    path,\n):\n    return path\n",
+			"def extracted_h(\n    path,\n):",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := pythonHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("pythonHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given a multi-line def signature, when pythonRebodyAsHelper extracts
+// the body, then the body starts AFTER the signature's closing `):`
+// line — the continuation params must not leak into the body.
+func TestPythonRebodyAsHelper_MultilineSignatureSkipped(t *testing.T) {
+	code := "def compute(\n    orders,\n    cutoff=10,\n) -> dict:\n    total = 0\n    return {\"total\": total}\n"
+	body := pythonRebodyAsHelper(code)
+	if strings.Contains(body, "orders,") || strings.Contains(body, "cutoff=10,") {
+		t.Errorf("signature lines leaked into body:\n%q", body)
+	}
+	if !strings.HasPrefix(body, "    total = 0\n") {
+		t.Errorf("body should start at the first post-signature line, got:\n%q", body)
+	}
+}
+
+// Given the realworld-multiline-sig fixture (Black-formatted def with
+// trailing-comma params, a default arg, type annotations, and a
+// `) -> dict:` return annotation on the closing line), when Synthesize
+// runs, then the helper carries the whole multi-line signature verbatim
+// with only the name rewritten, and the body starts after the closing
+// line. Bet #4 deferred follow-up.
+func TestSynthesize_PythonRealworld_MultilineSig(t *testing.T) {
+	a, b := loadSnippets(t, "../../testdata/refactor/python/realworld-multiline-sig")
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	wantHeader := "def extracted_compute_totals_deadbeef(\n" +
+		"    orders: list[dict],\n" +
+		"    cutoff: int = 10,\n" +
+		") -> dict:\n" +
+		"    total = 0\n"
+	if !strings.Contains(s.HelperSrc, wantHeader) {
+		t.Errorf("helper missing verbatim multi-line signature + body start.\nWant substring:\n%s\nGot:\n%s", wantHeader, s.HelperSrc)
+	}
+	// Divergences must surface both labels.
+	for _, want := range []string{`"totals:v1"`, `"sums:v2"`} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	if s.Confidence < 0.5 {
+		t.Errorf("Confidence = %.2f, want >= 0.5", s.Confidence)
+	}
+}
+
+// Given TypeScript-specific header shapes, when jsHelperHeader rewrites
+// them, then parameter and return-type annotations plus generics are
+// carried verbatim, and access modifiers (public/private/protected/
+// readonly — invalid on a free function) are dropped while async/static
+// are preserved. Bet #4 deferred follow-up.
+func TestJsHelperHeader_TypeScriptForms(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{
+			"function with return annotation",
+			"function makeWidget(spec: string): Widget {\n  return spec;\n}",
+			"function extracted_h(spec: string): Widget {",
+		},
+		{
+			"generic function",
+			"function pickFirst<T extends Base>(items: T[]): T {\n  return items[0];\n}",
+			"function extracted_h<T extends Base>(items: T[]): T {",
+		},
+		{
+			"arrow with return annotation",
+			"const buildLabel = (name: string): string => {\n  return name;\n};",
+			"function extracted_h(name: string): string {",
+		},
+		{
+			"async arrow with return annotation",
+			"const fetchItem = async (id: string): Promise<Item> => {\n  return id;\n};",
+			"async function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"method with return annotation",
+			"  load(id: string): Promise<Item> {\n    return id;\n  }",
+			"function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"private method drops access modifier",
+			"  private load(id: string): Promise<Item> {\n    return id;\n  }",
+			"function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"private async method keeps async",
+			"  private async load(id: string): Promise<Item> {\n    return this.get(id);\n  }",
+			"async function extracted_h(id: string): Promise<Item> {",
+		},
+		{
+			"protected static method keeps static",
+			"  protected static count(): number {\n    return 1;\n  }",
+			"static function extracted_h(): number {",
+		},
+		{
+			"public method drops modifier",
+			"  public format(name: string): string {\n    return name;\n  }",
+			"function extracted_h(name: string): string {",
+		},
+		{
+			"readonly dropped",
+			"  readonly compute(x: number): number {\n    return x;\n  }",
+			"function extracted_h(x: number): number {",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := jsHelperHeader(c.input, "extracted_h")
+			if !ok {
+				t.Fatalf("jsHelperHeader returned ok=false for %q", c.input)
+			}
+			if got != c.expect {
+				t.Errorf("got %q, want %q", got, c.expect)
+			}
+		})
+	}
+}
+
+// Given the realworld-typescript fixture, when the splitter runs on the
+// .ts file, then Detect maps .ts to JavaScript and exactly the four
+// function-shaped definitions are chunked. The `interface` declaration
+// and `type` alias are NOT chunked — they're type-level declarations,
+// not functions, and stay out of the emitter's scope by construction.
+func TestSplit_TypeScriptRealworld_ChunksFunctionsNotTypes(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/refactor/js/realworld-typescript/a.ts")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	lang := tokenizer.Detect("a.ts", string(data))
+	if lang != tokenizer.JavaScript {
+		t.Fatalf("Detect(a.ts) = %v, want JavaScript", lang)
+	}
+	chunks := splitter.Split("a.ts", string(data), lang)
+	// Functions and methods chunk as KindFunction; the TS class ALSO
+	// emits a KindClass span (§5.2 class-level granularity). Interfaces
+	// and type aliases must never chunk — the fixture contains both, so
+	// any extra chunk beyond these five is a regression.
+	type wantChunk struct {
+		symbol string
+		kind   splitter.ChunkKind
+	}
+	want := []wantChunk{
+		{"makeWidgetA", splitter.KindFunction},
+		{"buildLabelA", splitter.KindFunction},
+		{"pickFirstA", splitter.KindFunction},
+		{"ItemStoreA", splitter.KindClass},
+		{"loadA", splitter.KindFunction},
+	}
+	if len(chunks) != len(want) {
+		t.Fatalf("expected %d chunks %v, got %d:\n%s", len(want), want, len(chunks), summariseChunks(chunks))
+	}
+	for i, w := range want {
+		if chunks[i].Symbol != w.symbol || chunks[i].Kind != w.kind {
+			t.Errorf("chunk[%d] = %q/%s, want %q/%s", i, chunks[i].Symbol, chunks[i].Kind, w.symbol, w.kind)
+		}
+	}
+}
+
+// Given the realworld-typescript fixture pairs (annotated function,
+// annotated arrow, generic function, class method with access
+// modifier), when Synthesize runs on each, then the helper header
+// carries the TS annotations verbatim. Only the class-method pair
+// (whose body touches `this.`) carries the this-binding NOTE.
+// Bet #4 deferred follow-up.
+func TestSynthesize_TypeScriptRealworld_Shapes(t *testing.T) {
+	dir := "../../testdata/refactor/js/realworld-typescript"
+	cases := []struct {
+		name         string
+		symbolPrefix string
+		expectHeader string
+		expectNote   bool
+		expectInSrc  []string
+	}{
+		{
+			"function with param and return annotations",
+			"makeWidget",
+			"function extracted_makeWidgetA_deadbeef(spec: string, size: number = 1): Widget {",
+			false,
+			[]string{`"/v1"`, `"/v2"`},
+		},
+		{
+			"arrow with return annotation",
+			"buildLabel",
+			"function extracted_buildLabelA_deadbeef(name: string): string {",
+			false,
+			[]string{`"user:"`, `"admin:"`},
+		},
+		{
+			"generic function",
+			"pickFirst",
+			"function extracted_pickFirstA_deadbeef<T extends Widget>(items: T[], fallback: T): T {",
+			false,
+			[]string{"items[0]", "items[items.length - 1]"},
+		},
+		{
+			"class method with access modifier",
+			"load",
+			"async function extracted_loadA_deadbeef(id: string): Promise<Widget> {",
+			true,
+			[]string{`"store:v1:"`, `"store:v2:"`},
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			a, b := loadSnippetsByPredicate(t, dir, func(ch splitter.Chunk) bool {
+				return strings.HasPrefix(ch.Symbol, c.symbolPrefix)
+			})
+			al := Align(a, b)
+			s := Synthesize(a, b, "deadbeef", al)
+			if s.Note != "" {
+				t.Fatalf("expected accept, got Note=%q", s.Note)
+			}
+			if !strings.Contains(s.HelperSrc, c.expectHeader) {
+				t.Errorf("HelperSrc missing header %q. Source:\n%s", c.expectHeader, s.HelperSrc)
+			}
+			hasNote := strings.Contains(s.HelperSrc, "// NOTE:")
+			if hasNote != c.expectNote {
+				t.Errorf("NOTE presence = %v, want %v. Source:\n%s", hasNote, c.expectNote, s.HelperSrc)
+			}
+			for _, want := range c.expectInSrc {
+				if !strings.Contains(s.HelperSrc, want) {
+					t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+				}
+			}
+		})
+	}
+}

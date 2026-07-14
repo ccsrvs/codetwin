@@ -366,6 +366,17 @@ func pythonSignatureEndLine(lines []string, defLine int) int {
 	return len(lines) - 1
 }
 
+// PythonSignatureEnd exposes pythonSignatureEndLine's paren/string-aware
+// signature scanning for reuse outside the splitter — the refactor
+// emitter uses it to carry Black-formatted multi-line `def` signatures
+// into synthesized helpers verbatim. Same contract: returns the 0-based
+// index of the line whose top-level `:` closes the signature starting
+// at defLine (defLine itself for a single-line signature; the last line
+// index on malformed input).
+func PythonSignatureEnd(lines []string, defLine int) int {
+	return pythonSignatureEndLine(lines, defLine)
+}
+
 // pythonDecoratorEndLine returns the 0-based index of the last line of a
 // decorator block beginning at decoLine. A simple `@cached` returns
 // decoLine itself; a multi-line `@retry(\n    attempts=3,\n)` returns the
@@ -603,17 +614,30 @@ func findBraceEnd(lines []string, start int) (int, bool) {
 
 // ── JavaScript / TypeScript ───────────────────────────────────────────────────
 
+// TypeScript notes: `.ts`/`.tsx` files come through Detect as
+// JavaScript, so these patterns cover TS header shapes too. jsArrowRe
+// allows an optional `: ReturnType` between the parameter list and the
+// `=>`; jsMethodRe allows TS access modifiers (public/private/
+// protected/readonly/override) and an optional `: ReturnType` before
+// the opening `{`. Interface declarations and type aliases are
+// deliberately NOT chunked — they aren't functions, so they stay out of
+// both detection and the refactor emitter's scope.
 var (
-	jsFuncRe  = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
-	jsArrowRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)`)
+	jsFuncRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)`)
+	// jsArrowRe accepts an optional TS return annotation between `)` and
+	// `=>` (e.g. `const f = (x: string): Foo => {`).
+	jsArrowRe = regexp.MustCompile(`^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=]*)?=>|\w+\s*=>)`)
 	// jsClassRe matches class DECLARATIONS (optionally exported /
 	// abstract-TS-style) and captures the name. Class expressions
 	// (`const A = class { ... }`) are deliberately not matched — the
 	// header shape overlaps the arrow/function-expression matchers and
 	// class expressions are rare as clone containers; noted as a
 	// follow-up in docs/comparative-algorithms-review.md §5.2.
-	jsClassRe  = regexp.MustCompile(`^[ \t]*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+(\w+)`)
-	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*\{`)
+	jsClassRe = regexp.MustCompile(`^[ \t]*(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+(\w+)`)
+	// jsMethodRe accepts TS access modifiers and an optional return
+	// annotation before the body brace (`private async load(id: string):
+	// Promise<Item> {`); optional groups keep plain-JS matching unchanged.
+	jsMethodRe = regexp.MustCompile(`^[ \t]+(?:(?:public|private|protected|readonly|override|async|static|get|set)\s+)*(\w+)\s*\([^)]*\)\s*(?::[^{]*)?\{`)
 )
 
 // jsMethodReservedNames are control-flow / language keywords whose

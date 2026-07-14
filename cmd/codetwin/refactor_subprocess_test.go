@@ -746,3 +746,69 @@ func TestSuggest_JavaRejectThrow_ExitsNonZeroWithNote(t *testing.T) {
 		t.Errorf("expected empty stdout on rejection, got:\n%s", stdout.String())
 	}
 }
+
+// TestSuggest_TypeScriptRealworld_ExitsZeroAndPrintsAnnotatedHelper:
+// discover the class-method pair (loadA/loadB) of the .ts fixture via
+// --json, then invoke --suggest <id>. Asserts exit 0 and that the diff
+// carries the TS parameter and return-type annotations on the helper
+// header (with the `private` access modifier dropped). Also pins that
+// the pipeline treats .ts files as JavaScript end-to-end. Bet #4
+// deferred follow-up.
+func TestSuggest_TypeScriptRealworld_ExitsZeroAndPrintsAnnotatedHelper(t *testing.T) {
+	bin := subprocessBin(t)
+	fixtureDir := "../../testdata/refactor/js/realworld-typescript"
+
+	jsonOut, err := exec.Command(bin,
+		"--threshold", "0.0",
+		"--no-cache", "--no-progress",
+		"--json", fixtureDir,
+	).Output()
+	if err != nil {
+		t.Fatalf("--json discovery: %v\nstdout:\n%s", err, jsonOut)
+	}
+	var doc struct {
+		Pairs []struct {
+			ID    string `json:"id"`
+			FileA string `json:"file_a"`
+			FileB string `json:"file_b"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(jsonOut, &doc); err != nil {
+		t.Fatalf("parse JSON: %v\nstdout:\n%s", err, jsonOut)
+	}
+	pairID := ""
+	for _, p := range doc.Pairs {
+		if strings.Contains(p.FileA, "load") && strings.Contains(p.FileB, "load") {
+			pairID = p.ID
+			break
+		}
+	}
+	if pairID == "" {
+		t.Fatalf("no loadA/loadB pair found in JSON output:\n%s", jsonOut)
+	}
+
+	cmd := exec.Command(bin,
+		"--no-cache", "--no-progress",
+		"--suggest", pairID, fixtureDir,
+	)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("--suggest exited non-zero: %v\nstdout:\n%s\nstderr:\n%s",
+			err, stdout, stderr.String())
+	}
+	diff := string(stdout)
+	if !strings.Contains(diff, "@@") {
+		t.Errorf("stdout missing hunk header. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "async function extracted_load") {
+		t.Errorf("stdout missing annotated TS helper header. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, ": Promise<Widget>") {
+		t.Errorf("stdout missing return-type annotation on helper. Got:\n%s", diff)
+	}
+	if !strings.Contains(diff, "// Divergences (B vs A):") {
+		t.Errorf("stdout missing divergence comment block. Got:\n%s", diff)
+	}
+}
