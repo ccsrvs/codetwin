@@ -36,7 +36,12 @@ const Filename = ".codetwin-cache.bin"
 // v3: added Chunk.LexTerms (raw-code lexical vocabulary for the
 // structural-twin label gate). Caches written by earlier versions lack
 // the field and are invalidated wholesale on Load.
-const Version uint32 = 3
+//
+// v4: added Chunk.Kind and class-span chunks for Python/Java/JS
+// (§5.2 class-level granularity). Entries written by earlier versions
+// were split without class chunks, so they must be invalidated
+// wholesale — a stale entry would silently drop class findings.
+const Version uint32 = 4
 
 // Chunk mirrors enough of the tokenizer + fingerprint output to reconstruct
 // a snippet without rerunning either. Tokens are stored as raw strings;
@@ -45,6 +50,7 @@ const Version uint32 = 3
 type Chunk struct {
 	Name       string
 	Lang       string
+	Kind       string // mirrors splitter.Chunk.Kind ("function" or "class")
 	StartLine  int
 	EndLine    int
 	Code       string

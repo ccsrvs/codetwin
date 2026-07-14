@@ -9,6 +9,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -267,6 +268,19 @@ func buildHashIndex(snippets []scan.Snippet) map[uint32][]int {
 		}
 	}
 	return idx
+}
+
+// ComparableKinds reports whether two snippets sit at the same
+// granularity and may therefore be scored against each other. Class
+// chunks (splitter.KindClass) only compare against other class chunks:
+// a class span weakly resembling a small function or method across
+// files is container-vs-part dilution — the exact "washed out by
+// unrelated code" noise the splitter exists to avoid — not a clone.
+// Cross-file class↔class pairs are the §5.2 value-add and stay
+// comparable. The zero Kind (snippets built before the field existed,
+// or by tests) behaves as function-kind.
+func ComparableKinds(a, b scan.Snippet) bool {
+	return (a.Kind == splitter.KindClass) == (b.Kind == splitter.KindClass)
 }
 
 // chunksNestedSameFile reports whether two snippets come from the same

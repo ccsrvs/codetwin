@@ -20,6 +20,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
+	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -450,4 +451,98 @@ func labelForBest(s scored, a, b scan.Snippet) (string, float64) {
 
 func fmtF(f float64) string {
 	return fmt.Sprintf("%.2f", f)
+}
+
+// ── Class-level granularity (§5.2) ───────────────────────────────────────────
+
+// classCasePairs runs one testdata/bench/classes case through the real
+// matrix pipeline — BuildMatrix applies the mixed-kind gate, the
+// same-file nesting filter, and the length dampener exactly as a scan
+// would — and returns the snippets plus materialized pairs.
+func classCasePairs(t *testing.T, name string) ([]scan.Snippet, []report.Pair) {
+	t.Helper()
+	a, b := caseSnippets(t, filepath.Join("../../testdata/bench/classes", name))
+	snips := append(append([]scan.Snippet{}, a...), b...)
+	streams := make([][]string, len(snips))
+	for i, s := range snips {
+		streams[i] = s.Tokens
+	}
+	corpus := similarity.NewCorpus(streams)
+	vectors := make([]similarity.NormalizedVector, len(snips))
+	for i, s := range snips {
+		vectors[i] = similarity.Normalize(corpus.Vectorize(s.Tokens))
+	}
+	_, pairs, _ := similarity.BuildMatrix(
+		snips, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil)
+	return snips, pairs
+}
+
+// classNames returns the Name set of the case's class-kind snippets.
+func classNames(snips []scan.Snippet) map[string]bool {
+	out := map[string]bool{}
+	for _, s := range snips {
+		if s.Kind == splitter.KindClass {
+			out[s.Name] = true
+		}
+	}
+	return out
+}
+
+// TestBench_ClassGranularity is the §5.2 contract: cross-file
+// class↔class pairs must surface as strong clones (the case
+// method-level granularity underreports — a renamed class with slightly
+// reordered methods), while class↔function pairs across files are
+// mixed-kind noise and must never materialize.
+func TestBench_ClassGranularity(t *testing.T) {
+	// Positive: same class renamed, methods slightly reordered.
+	for _, name := range []string{"python-class-clone", "java-class-clone"} {
+		snips, pairs := classCasePairs(t, name)
+		classes := classNames(snips)
+		if len(classes) != 2 {
+			t.Fatalf("%s: expected 2 class chunks (one per file), got %d: %v", name, len(classes), classes)
+		}
+		var best float64
+		found := false
+		for _, p := range pairs {
+			if classes[p.NameA] && classes[p.NameB] {
+				found = true
+				if p.Score > best {
+					best = p.Score
+				}
+			}
+		}
+		if !found {
+			t.Errorf("%s: no class↔class pair materialized", name)
+		} else if best < positiveMin {
+			t.Errorf("%s: class↔class pair score = %s, want >= %s", name, fmtF(best), fmtF(positiveMin))
+		} else {
+			t.Logf("%-40s class pair score=%s ok", "classes/"+name, fmtF(best))
+		}
+	}
+
+	// Negative: a class in a.js vs the same methods as loose functions
+	// in b.js. The class↔function pairs are mixed-kind and must produce
+	// NO pair at all; the methods inside the class must still match the
+	// loose functions individually.
+	snips, pairs := classCasePairs(t, "js-class-vs-loose-funcs")
+	classes := classNames(snips)
+	if len(classes) != 1 {
+		t.Fatalf("js-class-vs-loose-funcs: expected exactly 1 class chunk (in a.js), got %d: %v", len(classes), classes)
+	}
+	var methodBest float64
+	for _, p := range pairs {
+		if classes[p.NameA] || classes[p.NameB] {
+			t.Errorf("js-class-vs-loose-funcs: class chunk must not pair with anything, got %s <-> %s (%s)",
+				p.NameA, p.NameB, fmtF(p.Score))
+		}
+		if !classes[p.NameA] && !classes[p.NameB] && p.Score > methodBest {
+			methodBest = p.Score
+		}
+	}
+	if methodBest < positiveMin {
+		t.Errorf("js-class-vs-loose-funcs: best method↔function pair = %s, want >= %s (method-level matching must keep working)",
+			fmtF(methodBest), fmtF(positiveMin))
+	} else {
+		t.Logf("%-40s no class pair; method pair score=%s ok", "classes/js-class-vs-loose-funcs", fmtF(methodBest))
+	}
 }

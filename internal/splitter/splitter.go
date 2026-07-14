@@ -17,13 +17,30 @@ import (
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
+// ChunkKind classifies the granularity of a chunk. Downstream scoring
+// only compares chunks of the same kind: a class span weakly resembling
+// a small function across files is container-vs-part noise, not a
+// clone (see similarity.ComparableKinds).
+type ChunkKind string
+
+const (
+	// KindFunction covers functions, methods, closures, and the
+	// whole-file fallback chunk — everything that was chunkable before
+	// class-level granularity existed.
+	KindFunction ChunkKind = "function"
+	// KindClass covers class-span chunks: Python `class` blocks, Java
+	// class/interface/enum/record bodies, JS/TS `class` declarations.
+	KindClass ChunkKind = "class"
+)
+
 // Chunk is a contiguous span of source code, optionally named after the
 // definition that opens it.
 type Chunk struct {
 	Path      string
-	StartLine int    // 1-based, inclusive
-	EndLine   int    // 1-based, inclusive
-	Symbol    string // best-effort symbol name (function/class), may be empty
+	StartLine int       // 1-based, inclusive
+	EndLine   int       // 1-based, inclusive
+	Symbol    string    // best-effort symbol name (function/class), may be empty
+	Kind      ChunkKind // KindFunction (default) or KindClass
 	Code      string
 }
 
@@ -78,6 +95,9 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 	}
 	for i := range chunks {
 		chunks[i].Path = path
+		if chunks[i].Kind == "" {
+			chunks[i].Kind = KindFunction
+		}
 	}
 	return chunks
 }
