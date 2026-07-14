@@ -2823,3 +2823,211 @@ func TestSynthesize_TypeScriptRealworld_Shapes(t *testing.T) {
 		})
 	}
 }
+
+// Given the realworld-spec fixture's single-clause cache_key pair,
+// whose defs carry a @doc string and a @spec, when Synthesize runs,
+// then the attribute block is propagated into the helper with the
+// @spec's function name rewritten to the helper's name (arity
+// unchanged) and the @doc carried verbatim. The two @specs agree
+// modulo function name, so no spec-divergence NOTE is emitted.
+func TestSynthesize_ElixirSpecDocPropagation_SingleClause(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "cache_key" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	for _, want := range []string{
+		"@doc \"Builds a cache key for the rendered value.\"",
+		"@spec extracted_cache_key_deadbeef(String.t(), integer()) :: String.t()",
+		"def extracted_cache_key_deadbeef(ns, id) do",
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	if strings.Contains(s.HelperSrc, "@spec cache_key") {
+		t.Errorf("original @spec name must be rewritten to the helper's name. Source:\n%s", s.HelperSrc)
+	}
+	if strings.Contains(s.HelperSrc, "@spec diverges") {
+		t.Errorf("matching @specs must not produce a divergence NOTE. Source:\n%s", s.HelperSrc)
+	}
+}
+
+// Given the realworld-spec fixture's render pair, whose @doc is a
+// heredoc and whose @specs conflict (String.t() vs binary() return),
+// when Synthesize runs, then the heredoc survives verbatim, A's @spec
+// is carried (renamed), and a one-line # NOTE: flags B's diverging
+// @spec.
+func TestSynthesize_ElixirSpecConflict_CarriesAAndNotesDivergence(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "render" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	// Heredoc @doc carried verbatim (opening fence, body lines, fence).
+	for _, want := range []string{
+		"@doc \"\"\"\n",
+		"Renders a value for display.\n",
+		"Binaries pass through trimmed; anything else is inspected.\n",
+		"\"\"\"\n",
+		"@spec extracted_render_deadbeef(binary() | term()) :: String.t()",
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	// One-line divergence NOTE mentioning B's spec.
+	specNote := ""
+	for _, l := range strings.Split(s.HelperSrc, "\n") {
+		if strings.HasPrefix(l, "# NOTE:") && strings.Contains(l, "@spec") {
+			specNote = l
+			break
+		}
+	}
+	if specNote == "" {
+		t.Fatalf("expected a one-line # NOTE: about the conflicting @spec. Source:\n%s", s.HelperSrc)
+	}
+	if !strings.Contains(specNote, ":: binary()") {
+		t.Errorf("spec NOTE should surface B's spec; got %q", specNote)
+	}
+}
+
+// Given the realworld-multiclause parse/decode pair (4 adjacent
+// clauses per symbol), when Synthesize runs, then the helper is a
+// single multi-clause def carrying every clause of A's symbol renamed
+// consistently, with guards and pattern-matched args verbatim, and no
+// clause-count NOTE (both sides have 4 clauses).
+func TestSynthesize_ElixirMultiClauseGrouping_AllClauses(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-multiclause",
+		func(c splitter.Chunk) bool { return c.StartLine >= 9 && c.StartLine <= 13 })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if got := strings.Count(s.HelperSrc, "def extracted_parse_deadbeef"); got != 4 {
+		t.Errorf("expected 4 renamed clauses, got %d. Source:\n%s", got, s.HelperSrc)
+	}
+	for _, want := range []string{
+		"def extracted_parse_deadbeef({:ok, value}, default) when is_binary(value) do",
+		"def extracted_parse_deadbeef({:ok, value}, _default) when is_integer(value) do",
+		"def extracted_parse_deadbeef({:error, reason}, default) do",
+		"def extracted_parse_deadbeef(:nil, default), do: default",
+		`"parse failed:`,
+		`"decode failed:`,
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	if strings.Contains(s.HelperSrc, "clauses, B has") {
+		t.Errorf("equal clause counts must not produce a clause-count NOTE. Source:\n%s", s.HelperSrc)
+	}
+	// No CODE line may keep the original name (the divergence comment
+	// legitimately quotes the original headers).
+	for _, l := range strings.Split(s.HelperSrc, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			continue
+		}
+		if strings.Contains(l, "def parse") {
+			t.Errorf("clause kept the original name: %q. Source:\n%s", l, s.HelperSrc)
+		}
+	}
+}
+
+// Given the realworld-spec render pair where A has 2 clauses and B has
+// 3, when Synthesize runs, then the helper carries A's 2 clauses and a
+// `# NOTE: A has 2 clauses, B has 3` line records the mismatch (a
+// divergence, not a rejection).
+func TestSynthesize_ElixirClauseCountMismatch_Noted(t *testing.T) {
+	a, b := loadSnippetsByPredicate(t,
+		"../../testdata/refactor/elixir/realworld-spec",
+		func(c splitter.Chunk) bool { return c.Symbol == "render" })
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	if !strings.Contains(s.HelperSrc, "# NOTE: A has 2 clauses, B has 3") {
+		t.Errorf("expected clause-count NOTE. Source:\n%s", s.HelperSrc)
+	}
+	if got := strings.Count(s.HelperSrc, "def extracted_render_deadbeef"); got != 2 {
+		t.Errorf("expected A's 2 clauses in the helper, got %d. Source:\n%s", got, s.HelperSrc)
+	}
+	for _, want := range []string{
+		"def extracted_render_deadbeef(value) when is_binary(value) do",
+		"def extracted_render_deadbeef(value) do",
+	} {
+		if !strings.Contains(s.HelperSrc, want) {
+			t.Errorf("HelperSrc missing %q. Source:\n%s", want, s.HelperSrc)
+		}
+	}
+	// B's extra is_atom clause is a divergence: it must surface in the
+	// divergence comment, not as a helper clause.
+	if !strings.Contains(s.HelperSrc, "is_atom(value)") {
+		t.Errorf("expected B's extra clause to surface in the divergence block. Source:\n%s", s.HelperSrc)
+	}
+}
+
+// Given a NON-first clause of a multi-clause def as the pair endpoint,
+// when Synthesize runs, then attribute propagation is symbol-scoped:
+// the @doc/@spec above the FIRST clause is found and carried, and the
+// grouped helper is identical to synthesizing from the first clause.
+func TestSynthesize_ElixirSpecPropagation_SymbolScopedFromLaterClause(t *testing.T) {
+	first := func(c splitter.Chunk) bool { return c.Symbol == "render" }
+	second := func(c splitter.Chunk) bool { return c.Symbol == "render" && c.StartLine >= 12 }
+
+	a1, b1 := loadSnippetsByPredicate(t, "../../testdata/refactor/elixir/realworld-spec", first)
+	a2, b2 := loadSnippetsByPredicate(t, "../../testdata/refactor/elixir/realworld-spec", second)
+	if a1.StartLine == a2.StartLine {
+		t.Fatalf("fixture setup: expected distinct clauses, both start at %d", a1.StartLine)
+	}
+	s1 := Synthesize(a1, b1, "deadbeef", Align(a1, b1))
+	s2 := Synthesize(a2, b2, "deadbeef", Align(a2, b2))
+	if s1.Note != "" || s2.Note != "" {
+		t.Fatalf("expected accepts, got Notes %q / %q", s1.Note, s2.Note)
+	}
+	if !strings.Contains(s2.HelperSrc, "@spec extracted_render_deadbeef(") {
+		t.Errorf("later-clause endpoint must still find the symbol's @spec. Source:\n%s", s2.HelperSrc)
+	}
+	if s1.HelperSrc != s2.HelperSrc {
+		t.Errorf("grouping must be symbol-scoped: first-clause and later-clause endpoints should emit identical helpers.\nfirst:\n%s\nsecond:\n%s", s1.HelperSrc, s2.HelperSrc)
+	}
+}
+
+// Given an Elixir def with NO module attributes above it, when
+// Synthesize runs, then the output is byte-identical to the historical
+// v1 emitter output — pins the no-attribute path so @spec/@doc
+// propagation and multi-clause grouping cannot disturb it.
+func TestSynthesize_ElixirNoAttributes_ByteIdenticalPin(t *testing.T) {
+	a := scan.Snippet{Name: "x.ex:1-3 a", Lang: tokenizer.Elixir, Code: "def a(x) do\n  x + 1\nend"}
+	b := scan.Snippet{Name: "y.ex:1-3 b", Lang: tokenizer.Elixir, Code: "def b(x) do\n  x + 2\nend"}
+	al := Align(a, b)
+	s := Synthesize(a, b, "deadbeef", al)
+	if s.Note != "" {
+		t.Fatalf("expected accept, got Note=%q", s.Note)
+	}
+	want := `# codetwin: starter helper extracted from a + b (pair deadbeef).
+# This is a literal copy of the first snippet's body. Review the
+# divergences below and parameterize as needed before relying on it.
+# NOTE: appended at file scope; Elixir defs must live inside a
+# defmodule — move this def into the appropriate module (or
+# extract to a shared helper module) before compiling.
+# Divergences (B vs A):
+#   #1  A[L1-2]: def a(x) do |   x + 1
+#        B[L1-2]: def b(x) do |   x + 2
+def extracted_a_deadbeef(x) do
+  x + 1
+end
+`
+	if s.HelperSrc != want {
+		t.Errorf("no-attribute Elixir output changed.\ngot:\n%s\nwant:\n%s", s.HelperSrc, want)
+	}
+}
