@@ -1,9 +1,66 @@
 package fingerprint
 
 import (
+	"math/bits"
 	"sort"
+	"strings"
 	"testing"
 )
+
+// refGramHashes is the pre-optimization reference pipeline: materialize
+// each k-gram as a space-joined string, then hash it byte-by-byte.
+// gramHashes must produce bit-identical values — cached fingerprints and
+// bench ground-truth scores depend on the hash values, so any deliberate
+// change to the byte stream or mixing must bump SchemaVersion instead of
+// silently diverging from this reference.
+func refGramHashes(tokens []string, k int) []uint32 {
+	if len(tokens) < k {
+		return nil
+	}
+	hashes := make([]uint32, 0, len(tokens)-k+1)
+	for i := 0; i <= len(tokens)-k; i++ {
+		g := strings.Join(tokens[i:i+k], " ")
+		h := uint32(2166136261)
+		for j := 0; j < len(g); j++ {
+			h ^= uint32(g[j])
+			h = bits.RotateLeft32(h*16777619, 5)
+		}
+		hashes = append(hashes, h)
+	}
+	return hashes
+}
+
+func TestGramHashes_MatchesJoinedStringHash(t *testing.T) {
+	cases := []struct {
+		name   string
+		tokens []string
+		k      int
+	}{
+		{"synthetic stream", seqTokens(37), 10},
+		{"single gram", seqTokens(5), 5},
+		{"too short", seqTokens(4), 5},
+		{"k=1", seqTokens(9), 1},
+		{"empty tokens present", []string{"a", "", "b", "", "c", "d"}, 3},
+		{"realistic punctuation", []string{
+			"func", "VAR", "(", "VAR", "[", "]", "STR", ")", "{", "for",
+			"VAR", ":=", "range", "VAR", "{", "VAR", "+=", "VAR", "}", "}",
+		}, DefaultK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := gramHashes(tc.tokens, tc.k)
+			want := refGramHashes(tc.tokens, tc.k)
+			if len(got) != len(want) {
+				t.Fatalf("length mismatch: got %d hashes, want %d", len(got), len(want))
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("gram %d: gramHashes = %#x, reference = %#x", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
 
 // seqTokens builds n distinct tokens ("t0", "t1", …) so tests scale with
 // DefaultK instead of hardcoding stream lengths.

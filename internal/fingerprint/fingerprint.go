@@ -50,14 +50,9 @@ type PositionalSet struct {
 // least one k-gram: when the hash sequence is shorter than the window size w,
 // the whole sequence is treated as a single window.
 func Generate(tokens []string, k, w int) Set {
-	grams := kgrams(tokens, k)
-	if len(grams) == 0 {
+	hashes := gramHashes(tokens, k)
+	if len(hashes) == 0 {
 		return Set{}
-	}
-
-	hashes := make([]uint32, len(grams))
-	for i, g := range grams {
-		hashes[i] = hashString(g)
 	}
 
 	fps := Set{}
@@ -76,14 +71,9 @@ func Generate(tokens []string, k, w int) Set {
 // algorithm as Generate. The token-position recorded for each fingerprint is
 // the k-gram start index that produced the hash within the chosen window.
 func GeneratePositional(tokens []string, k, w int) PositionalSet {
-	grams := kgrams(tokens, k)
-	if len(grams) == 0 {
+	hashes := gramHashes(tokens, k)
+	if len(hashes) == 0 {
 		return PositionalSet{Set: Set{}, Positions: map[uint32][]int{}, K: k}
-	}
-
-	hashes := make([]uint32, len(grams))
-	for i, g := range grams {
-		hashes[i] = hashString(g)
 	}
 
 	fps := Set{}
@@ -171,34 +161,50 @@ func Hashes(s Set) []uint32 {
 	return out
 }
 
-// kgrams produces all consecutive k-grams from the token slice as joined strings.
-func kgrams(tokens []string, k int) []string {
+// FNV-1a-variant parameters shared by every k-gram hash.
+const (
+	fnvOffset uint32 = 2166136261
+	fnvPrime  uint32 = 16777619
+)
+
+// gramHashes returns one hash per consecutive k-gram of tokens, hashed
+// directly from the token slice — no gram string is ever materialized.
+// Each hash consumes exactly the byte sequence "tok₀ tok₁ … tokₖ₋₁"
+// (single-space separators), so values are bit-identical to the former
+// join-into-a-string-then-hash pipeline; TestGramHashes_MatchesJoinedStringHash
+// locks that equivalence. Anyone changing the byte stream or the mixing
+// function must bump SchemaVersion so cached fingerprints invalidate.
+//
+// The former pipeline built every gram by repeated string concatenation
+// (O(k) allocations and O(k²) byte copying per gram) before hashing it;
+// this is the hot loop of per-file processing, so grams are now hashed
+// in place with zero per-gram allocations.
+func gramHashes(tokens []string, k int) []uint32 {
 	if len(tokens) < k {
 		return nil
 	}
-	grams := make([]string, 0, len(tokens)-k+1)
-	for i := 0; i <= len(tokens)-k; i++ {
-		g := ""
+	hashes := make([]uint32, len(tokens)-k+1)
+	for i := range hashes {
+		h := fnvOffset
 		for j := 0; j < k; j++ {
 			if j > 0 {
-				g += " "
+				h = hashByte(h, ' ')
 			}
-			g += tokens[i+j]
+			tok := tokens[i+j]
+			for b := 0; b < len(tok); b++ {
+				h = hashByte(h, tok[b])
+			}
 		}
-		grams = append(grams, g)
+		hashes[i] = h
 	}
-	return grams
+	return hashes
 }
 
-// hashString is a fast, deterministic non-cryptographic hash (FNV-1a variant).
-func hashString(s string) uint32 {
-	const prime = 16777619
-	h := uint32(2166136261)
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h = bits.RotateLeft32(h*prime, 5)
-	}
-	return h
+// hashByte folds one byte into a running FNV-1a-variant state
+// (xor, multiply, rotate — deterministic and non-cryptographic).
+func hashByte(h uint32, b byte) uint32 {
+	h ^= uint32(b)
+	return bits.RotateLeft32(h*fnvPrime, 5)
 }
 
 func minHash(window []uint32) uint32 {
