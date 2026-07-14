@@ -5,20 +5,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
-// BuildPatch produces a unified diff that appends the suggestion's
-// HelperSrc to the end of pathA. v1 patches are deliberately
-// additive: codetwin doesn't rewrite the existing call sites at A or
-// B, it just plants a starter helper so the human (or the Claude
-// skill) can finish the refactor with full visibility on what was
-// extracted and how A and B diverge.
+// Placement NOTEs prepended to the helper when a Java/Elixir
+// suggestion has to fall back to a file-scope append because no
+// enclosing container was found around A's chunk.
+const (
+	javaFileScopeNote = "// NOTE: appended at file scope; move it into the appropriate Java\n" +
+		"// class (or extract to a utility class) before compiling.\n"
+	elixirFileScopeNote = "# NOTE: appended at file scope; Elixir defs must live inside a\n" +
+		"# defmodule — move this def into the appropriate module (or\n" +
+		"# extract to a shared helper module) before compiling.\n"
+)
+
+// BuildPatch produces a unified diff that adds the suggestion's
+// HelperSrc to pathA. v1 patches are deliberately additive: codetwin
+// doesn't rewrite the existing call sites at A or B, it just plants a
+// starter helper so the human (or the Claude skill) can finish the
+// refactor with full visibility on what was extracted and how A and B
+// diverge.
 //
-// The diff uses up to 3 lines of trailing context anchored on the
-// final lines of pathA so `git apply` succeeds even when the
-// surrounding file has unrelated commits since the snapshot codetwin
-// scanned. Returns ("", nil) when s.HelperSrc is empty (rejection
-// case) — callers should check Suggestion.Note instead.
+// Placement depends on the language (see buildPlacedPatch): Java and
+// Elixir helpers are inserted inside A's enclosing container so the
+// patched file compiles as emitted; every other language appends at
+// the end of the file. Returns ("", nil) when s.HelperSrc is empty
+// (rejection case) — callers should check Suggestion.Note instead.
 func BuildPatch(pathA string, s Suggestion) (string, error) {
 	if s.HelperSrc == "" {
 		return "", nil
@@ -27,7 +40,106 @@ func BuildPatch(pathA string, s Suggestion) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", pathA, err)
 	}
-	return buildAppendPatch(pathA, string(data), s.HelperSrc), nil
+	return buildPlacedPatch(pathA, string(data), s), nil
+}
+
+// buildPlacedPatch routes a suggestion to its insertion strategy:
+//
+//   - Java: insert immediately before the closing `}` of the innermost
+//     class/interface/enum/record enclosing A's chunk, indented like
+//     A's chunk itself (a sibling member of the same container).
+//   - Elixir: insert immediately before the closing `end` of the
+//     innermost defmodule enclosing A's chunk, indented like a sibling
+//     def.
+//   - Everything else — and the defensive Java/Elixir case where no
+//     enclosing container is found (free-standing code, placement
+//     metadata missing) — appends at the end of the file. The
+//     fallback prepends the language's file-scope placement NOTE so
+//     the "move this before compiling" contract is still flagged.
+func buildPlacedPatch(pathA, fileContent string, s Suggestion) string {
+	switch s.Lang {
+	case tokenizer.Java:
+		if line, ok := javaEnclosingTypeClose(fileContent, s.SourceStartLine); ok {
+			helper := indentBlock(s.HelperSrc, lineIndent(fileContent, s.SourceStartLine))
+			return buildInsertBeforePatch(pathA, fileContent, helper, line)
+		}
+		return buildAppendPatch(pathA, fileContent, javaFileScopeNote+s.HelperSrc)
+	case tokenizer.Elixir:
+		if line, ok := elixirEnclosingModuleEnd(fileContent, s.SourceStartLine); ok {
+			helper := indentBlock(s.HelperSrc, lineIndent(fileContent, s.SourceStartLine))
+			return buildInsertBeforePatch(pathA, fileContent, helper, line)
+		}
+		return buildAppendPatch(pathA, fileContent, elixirFileScopeNote+s.HelperSrc)
+	}
+	return buildAppendPatch(pathA, fileContent, s.HelperSrc)
+}
+
+// buildInsertBeforePatch returns a unified diff that inserts helperSrc
+// immediately before the (1-based) insertBefore line of fileContent,
+// with up to 3 lines of context on each side. A blank separator line
+// is added above the helper when the preceding line is non-blank, so
+// the helper reads like any other member. Counterpart of
+// buildAppendPatch for mid-file insertion; insertion points past the
+// end of the file degrade to a plain append.
+func buildInsertBeforePatch(pathA, fileContent, helperSrc string, insertBefore int) string {
+	trimmed := strings.TrimSuffix(fileContent, "\n")
+	var fileLines []string
+	if trimmed != "" {
+		fileLines = strings.Split(trimmed, "\n")
+	}
+	if insertBefore < 1 {
+		insertBefore = 1
+	}
+	if insertBefore > len(fileLines) {
+		return buildAppendPatch(pathA, fileContent, helperSrc)
+	}
+
+	insIdx := insertBefore - 1 // 0-based index of the line pushed down
+	leadStart := insIdx - 3
+	if leadStart < 0 {
+		leadStart = 0
+	}
+	lead := fileLines[leadStart:insIdx]
+	trailEnd := insIdx + 3
+	if trailEnd > len(fileLines) {
+		trailEnd = len(fileLines)
+	}
+	trail := fileLines[insIdx:trailEnd]
+
+	helperLines := strings.Split(strings.TrimRight(helperSrc, "\n"), "\n")
+	needSep := len(lead) > 0 && strings.TrimSpace(lead[len(lead)-1]) != ""
+
+	oldStart := leadStart + 1
+	oldLen := len(lead) + len(trail)
+	newLen := oldLen + len(helperLines)
+	if needSep {
+		newLen++
+	}
+
+	rel := strings.TrimPrefix(filepath.ToSlash(pathA), "/")
+	var b strings.Builder
+	fmt.Fprintf(&b, "--- a/%s\n", rel)
+	fmt.Fprintf(&b, "+++ b/%s\n", rel)
+	fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", oldStart, oldLen, oldStart, newLen)
+	for _, l := range lead {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	if needSep {
+		b.WriteString("+\n")
+	}
+	for _, l := range helperLines {
+		b.WriteString("+")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	for _, l := range trail {
+		b.WriteString(" ")
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // buildAppendPatch is BuildPatch's pure core: given the current file

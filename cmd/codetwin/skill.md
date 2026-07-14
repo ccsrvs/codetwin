@@ -172,12 +172,13 @@ Rejection cases (printed as a `note:` line on stderr; exit 1):
   `raise`/`throw`/`exit` for Elixir) and the other doesn't — that
   asymmetry signals semantically different snippets
 
-For Java specifically, the helper is appended at file scope (after the
-wrapping class's closing `}`) so the diff applies cleanly via `git
-apply`, but the file won't compile until a human moves the helper
-inside an appropriate class. The helper carries a leading `// NOTE:
-appended at file scope; move it into the appropriate Java class…`
-comment to flag the placement step.
+For Java specifically, the diff inserts the helper inside the
+innermost class/interface/enum/record enclosing the source method —
+immediately before its closing `}`, indented like a sibling member —
+so the patched file compiles as emitted. Only when no enclosing type
+is found (free-standing code, not legal Java) does the helper fall
+back to a file-scope append with a leading `// NOTE: appended at file
+scope…` comment flagging the manual placement step.
 
 For JavaScript/TypeScript, ES6+ class methods are unwrapped from their
 class chunk and emitted as free `function` helpers. When the body
@@ -200,11 +201,13 @@ For Elixir, every common def shape is supported: `def`/`defp`/
 `defmacro`/`defmacrop` block-form (`do … end`), `, do:` shorthand
 (single-line and split forms), multi-line wrapping headers, pattern-
 matched args, and `when` guards. The helper preserves the input's
-keyword form and shorthand-vs-block style. It ALWAYS carries a
-`# NOTE: appended at file scope; Elixir defs must live inside a
-defmodule…` comment — Elixir cannot have free-standing defs, so the
-user must always move the helper into an appropriate module before
-running. Real-world idioms exercised in fixtures: GenServer callbacks
+keyword form and shorthand-vs-block style. The diff inserts the helper
+inside the innermost defmodule enclosing the source def — immediately
+before its closing `end`, indented like a sibling def — so the patched
+file compiles as emitted. Only when no defmodule encloses the chunk
+(defensive; Elixir cannot have free-standing defs) does the helper
+fall back to a file-scope append with a `# NOTE: appended at file
+scope…` comment. Real-world idioms exercised in fixtures: GenServer callbacks
 with `@impl`, Phoenix-style multi-line headers, multi-clause pattern-
 matched defs, and `defmacro` DSL builders.
 

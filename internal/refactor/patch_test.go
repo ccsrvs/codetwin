@@ -246,13 +246,12 @@ func TestBuildPatch_PythonDecoratedRealworld_AppliesClean(t *testing.T) {
 	}
 }
 
-// TestBuildPatch_JavaSimple_AppliesClean is the Java round-trip:
-// synthesize the helper for the simple Java fixture, build the diff
-// against a temp git repo, and confirm `git apply` accepts it. The
-// resulting file is NOT valid Java (the helper lands after the
-// wrapping class's closing `}`) — that's the documented v1 contract.
-// We assert the diff applies cleanly and the helper text appears in
-// the patched file.
+// TestBuildPatch_JavaSimple_AppliesClean is the Java round-trip for
+// the file-scope append CORE (buildAppendPatch — the fallback used
+// when no enclosing class is found): synthesize the helper for the
+// simple Java fixture, build the diff against a temp git repo, and
+// confirm `git apply` accepts it. In-class placement is covered by
+// placement_test.go.
 func TestBuildPatch_JavaSimple_AppliesClean(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH, skipping integration test")
@@ -302,9 +301,6 @@ func TestBuildPatch_JavaSimple_AppliesClean(t *testing.T) {
 	}
 	if !strings.Contains(got, "// Divergences (B vs A):") {
 		t.Errorf("patched file missing `//`-style divergence block")
-	}
-	if !strings.Contains(got, "// NOTE: appended at file scope") {
-		t.Errorf("patched file missing the placement-note comment")
 	}
 }
 
@@ -418,11 +414,12 @@ func TestBuildPatch_RustSimple_AppliesClean(t *testing.T) {
 	}
 }
 
-// TestBuildPatch_ElixirSimple_AppliesClean is the Elixir round-trip:
-// synthesize the helper for the simple Elixir fixture, build the diff
-// against a temp git repo, and confirm `git apply` accepts it. The
-// resulting file is NOT valid Elixir (the helper lands after the
-// wrapping defmodule's `end`) — that's the documented v1 contract.
+// TestBuildPatch_ElixirSimple_AppliesClean is the Elixir round-trip
+// for the file-scope append CORE (buildAppendPatch — the fallback used
+// when no enclosing defmodule is found): synthesize the helper for the
+// simple Elixir fixture, build the diff against a temp git repo, and
+// confirm `git apply` accepts it. In-module placement is covered by
+// placement_test.go.
 func TestBuildPatch_ElixirSimple_AppliesClean(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not on PATH, skipping integration test")
@@ -472,9 +469,6 @@ func TestBuildPatch_ElixirSimple_AppliesClean(t *testing.T) {
 	}
 	if !strings.Contains(got, "# Divergences (B vs A):") {
 		t.Errorf("patched file missing `#`-style divergence block")
-	}
-	if !strings.Contains(got, "# NOTE: appended at file scope") {
-		t.Errorf("patched file missing the module-context NOTE")
 	}
 }
 

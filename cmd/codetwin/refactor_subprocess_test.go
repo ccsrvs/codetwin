@@ -490,8 +490,13 @@ func TestSuggest_ElixirSimple_ExitsZeroAndPrintsDiff(t *testing.T) {
 	if !strings.Contains(diff, "# Divergences (B vs A):") {
 		t.Errorf("stdout missing divergence comment block. Got:\n%s", diff)
 	}
-	if !strings.Contains(diff, "# NOTE:") {
-		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	// The helper is inserted inside the enclosing defmodule (indented
+	// like a sibling def), so the file-scope placement NOTE is gone.
+	if !strings.Contains(diff, "+  def extracted_price_with_tax_") {
+		t.Errorf("stdout missing the module-indented helper added line. Got:\n%s", diff)
+	}
+	if strings.Contains(diff, "# NOTE:") {
+		t.Errorf("stdout still carries the obsolete placement NOTE. Got:\n%s", diff)
 	}
 }
 
@@ -651,8 +656,13 @@ func TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff(t *testing.T) {
 	if !strings.Contains(diff, "extracted_") {
 		t.Errorf("stdout missing extracted_… helper. Got:\n%s", diff)
 	}
-	if !strings.Contains(diff, "# NOTE:") {
-		t.Errorf("stdout missing the module-context NOTE. Got:\n%s", diff)
+	// The helper is inserted inside UserCache's defmodule (indented as
+	// a sibling def), so no file-scope placement NOTE appears.
+	if !strings.Contains(diff, "+  def extracted_") {
+		t.Errorf("stdout missing the module-indented helper added line. Got:\n%s", diff)
+	}
+	if strings.Contains(diff, "# NOTE:") {
+		t.Errorf("stdout still carries the obsolete placement NOTE. Got:\n%s", diff)
 	}
 }
 

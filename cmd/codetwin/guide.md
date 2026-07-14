@@ -300,9 +300,11 @@ A few things worth knowing:
   helpers — Go, Python, Java, JavaScript/TypeScript, Rust, and Elixir.
   The synthesizer needs language-specific logic to spot the function
   header and produce a sensible helper body. For Java, the helper is
-  appended at file scope (after the wrapping class's closing `}`) and
-  carries a `// NOTE: appended at file scope` comment; the human moves
-  it into the appropriate class before compiling. For
+  inserted inside the innermost class enclosing the source method
+  (before its closing `}`, indented as a sibling member) so the
+  patched file compiles as emitted; only when no enclosing type is
+  found does it fall back to a file-scope append with a `// NOTE:
+  appended at file scope` comment. For
   JavaScript/TypeScript, ES6+ class methods are unwrapped and emitted
   as free `function` helpers; when the body references `this`, the
   helper carries a `// NOTE: extracted as a free function from a
@@ -315,9 +317,12 @@ A few things worth knowing:
   `defmacro`/`defmacrop` block-form, `, do:` shorthand (single-line
   and split forms), multi-line wrapping headers, pattern-matched
   args, and `when` guards. The helper preserves the input's keyword
-  form and shorthand-vs-block style and ALWAYS carries a `# NOTE:
-  appended at file scope; Elixir defs must live inside a defmodule…`
-  comment, since Elixir cannot have free-standing defs.
+  form and shorthand-vs-block style and is inserted inside the
+  innermost defmodule enclosing the source def (before its closing
+  `end`, indented as a sibling def) so the patched file compiles as
+  emitted; only when no defmodule encloses the chunk does it fall
+  back to a file-scope append with a `# NOTE: appended at file
+  scope…` comment.
 
 ## A note on config
 

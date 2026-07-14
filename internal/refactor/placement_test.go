@@ -95,13 +95,31 @@ func placeHelper(t *testing.T, fixtureDir, fileA string) (string, string) {
 	return dir, string(patched)
 }
 
+// javaBraceCounts counts `{` and `}` outside `//` comment lines (the
+// helper's divergence comments quote code containing braces). Simple
+// counting — enough to catch a helper landing outside its class.
+func javaBraceCounts(content string) (opens, closes int) {
+	for _, l := range strings.Split(content, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "//") {
+			continue
+		}
+		opens += strings.Count(l, "{")
+		closes += strings.Count(l, "}")
+	}
+	return opens, closes
+}
+
 // elixirDoEndCounts returns the number of do-block openers (lines
 // ending in the bare `do` keyword) and closers (lines that are exactly
-// `end`). Simple line counting — enough to catch a helper landing
-// outside its module.
+// `end`), skipping `#` comment lines (the divergence comments quote
+// code that may contain `do`). Simple line counting — enough to catch
+// a helper landing outside its module.
 func elixirDoEndCounts(content string) (opens, ends int) {
 	for _, l := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
 		if trimmed == "end" {
 			ends++
 		}
@@ -137,7 +155,7 @@ func TestBuildPatch_JavaSimple_InsertsHelperInsideClass(t *testing.T) {
 		t.Errorf("helper must sit immediately before the class's closing brace; tail:\n%q",
 			patched[max(0, len(patched)-40):])
 	}
-	if o, c := strings.Count(patched, "{"), strings.Count(patched, "}"); o != c {
+	if o, c := javaBraceCounts(patched); o != c {
 		t.Errorf("brace imbalance after patch: %d '{' vs %d '}'\n%s", o, c, patched)
 	}
 }
@@ -161,7 +179,7 @@ func TestBuildPatch_JavaNested_InsertsHelperInsideInnerClass(t *testing.T) {
 		t.Errorf("helper must sit immediately before Inner's closing brace; tail:\n%q",
 			patched[max(0, len(patched)-60):])
 	}
-	if o, c := strings.Count(patched, "{"), strings.Count(patched, "}"); o != c {
+	if o, c := javaBraceCounts(patched); o != c {
 		t.Errorf("brace imbalance after patch: %d '{' vs %d '}'\n%s", o, c, patched)
 	}
 }
