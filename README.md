@@ -52,6 +52,22 @@ runs the same in any directory.
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/ccsrvs/codetwin/main/install.sh | bash
+```
+
+Installs the latest release for your platform into `~/.local/bin`, or updates an
+existing `codetwin` in place. Re-run it to upgrade. Two knobs:
+
+- `CODETWIN_VERSION=v0.3.1` — pin or roll back to a specific tag
+- `CODETWIN_BIN_DIR=/usr/local/bin` — choose the install directory
+
+Prebuilt binaries cover linux and macOS on amd64/arm64; Windows amd64 is
+attached to each [release](https://github.com/ccsrvs/codetwin/releases) for
+manual download.
+
+Or with the Go toolchain:
+
+```bash
 go install github.com/ccsrvs/codetwin/cmd/codetwin@latest
 ```
 
@@ -1017,3 +1033,7 @@ error: --blame requires the git binary on PATH
 $ codetwin --since main --blame ./src
 error: --since and --blame require running inside a git repository
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
