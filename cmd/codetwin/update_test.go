@@ -111,6 +111,30 @@ func TestLatestReleaseTagNoRelease(t *testing.T) {
 	}
 }
 
+func TestLatestReleaseTagMalformedRedirect(t *testing.T) {
+	// A 302 whose Location is empty or ends in no usable tag must error,
+	// never fall through to a bogus download URL.
+	cases := map[string]http.HandlerFunc{
+		"no location": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusFound) // 302, no Location header
+		},
+		"empty tag": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "/releases/tag/")
+			w.WriteHeader(http.StatusFound)
+		},
+	}
+	for name, h := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(h)
+			t.Cleanup(srv.Close)
+			t.Setenv("CODETWIN_UPDATE_BASE_URL", srv.URL)
+			if tag, err := latestReleaseTag(); err == nil {
+				t.Errorf("malformed redirect must error, got tag %q", tag)
+			}
+		})
+	}
+}
+
 // TestUpdateCheckSubcommand drives the real binary against the fake
 // server: --check must report availability without touching the binary.
 func TestUpdateCheckSubcommand(t *testing.T) {
@@ -173,6 +197,74 @@ func TestUpdateSwapsBinary(t *testing.T) {
 	leftovers, _ := filepath.Glob(filepath.Join(dir, ".codetwin-update-*"))
 	if len(leftovers) > 0 {
 		t.Errorf("temp download files leaked: %v", leftovers)
+	}
+}
+
+// TestUpdateRefusesCorruptDownload is the file's core safety promise:
+// a served asset that is not a runnable binary must fail the sanity
+// check, leave the installed binary byte-identical, and leak no temp
+// files.
+func TestUpdateRefusesCorruptDownload(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix rename semantics")
+	}
+	bin := subprocessBin(t)
+	binBytes, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := fakeReleaseServer(t, "v99.0.0", []byte("this is not a mach-o or elf binary\n"))
+
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "codetwin")
+	if err := os.WriteFile(victim, binBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(victim, "update")
+	cmd.Env = append(os.Environ(),
+		"CODETWIN_UPDATE_BASE_URL="+srv.URL,
+		"CODETWIN_NO_UPDATE_CHECK=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("corrupt download must fail the update:\n%s", out)
+	}
+	if !strings.Contains(string(out), "failed to run") {
+		t.Errorf("expected the sanity-check error, got:\n%s", out)
+	}
+	after, err := os.ReadFile(victim)
+	if err != nil || len(after) != len(binBytes) {
+		t.Errorf("installed binary must be untouched after a corrupt download (err=%v, %d vs %d bytes)",
+			err, len(after), len(binBytes))
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, ".codetwin-update-*")); len(leftovers) > 0 {
+		t.Errorf("temp files leaked: %v", leftovers)
+	}
+}
+
+// TestUpdateMissingAsset covers a release with no binary for this
+// platform: a clean error, not a partial install.
+func TestUpdateMissingAsset(t *testing.T) {
+	bin := subprocessBin(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/releases/tag/v99.0.0", http.StatusFound)
+	})
+	srv := httptest.NewServer(mux) // no download route at all
+	t.Cleanup(srv.Close)
+
+	cmd := exec.Command(bin, "update", "--force")
+	cmd.Env = append(os.Environ(),
+		"CODETWIN_UPDATE_BASE_URL="+srv.URL,
+		"CODETWIN_NO_UPDATE_CHECK=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("missing asset must fail the update:\n%s", out)
+	}
+	if !strings.Contains(string(out), "HTTP 404") {
+		t.Errorf("expected the missing-asset error, got:\n%s", out)
 	}
 }
 

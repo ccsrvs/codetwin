@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -40,8 +39,9 @@ var releaseTagRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$`)
 func validReleaseTag(tag string) bool { return releaseTagRe.MatchString(tag) }
 
 // latestReleaseTag resolves the newest release tag from the 302 redirect
-// GitHub serves at /releases/latest: the Location header's last path
-// element is the tag. One HEAD-sized round-trip, no JSON, no API quota.
+// GitHub serves at /releases/latest: the Location header names
+// .../releases/tag/<tag>. One HEAD-sized round-trip, no JSON, no API
+// quota.
 func latestReleaseTag() (string, error) {
 	client := &http.Client{
 		Timeout: updateNetTimeout,
@@ -58,10 +58,14 @@ func latestReleaseTag() (string, error) {
 		return "", fmt.Errorf("no release redirect at %s/releases/latest (HTTP %d — no published releases?)",
 			updateBaseURL(), resp.StatusCode)
 	}
+	// The redirect target is .../releases/tag/<tag>. Extract the segment
+	// after the marker explicitly — path.Base would strip a trailing
+	// slash and hand back "tag" as a plausible-looking version.
 	loc := resp.Header.Get("Location")
-	tag := path.Base(loc)
-	if loc == "" || tag == "." || tag == "/" {
-		return "", fmt.Errorf("release redirect carried no usable Location header")
+	_, after, found := strings.Cut(loc, "/releases/tag/")
+	tag := strings.Trim(after, "/")
+	if !found || tag == "" {
+		return "", fmt.Errorf("release redirect carried no usable Location header (%q)", loc)
 	}
 	if !validReleaseTag(tag) {
 		return "", fmt.Errorf("unexpected release tag %q from redirect", tag)
