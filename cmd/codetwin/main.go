@@ -34,6 +34,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
+	"github.com/ccsrvs/codetwin/internal/deadcode"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/git"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
@@ -95,6 +96,7 @@ func main() {
 	baselinePath := flag.String("baseline", "", "compare this scan's clusters against the snapshot in <file>: drift events print to stderr (one line each) and any drift exits 1 — a CI gate. Create the snapshot with --update-baseline; both runs must use the same threshold/eps/min-pts/granularity/include-tests.")
 	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair or partial-clone block (look up the 8-char ID in --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir; blocks: Go and Python. Other languages print a 'note' explaining why.")
 	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair and partial clone. Off by default — synthesis adds work proportional to finding count.")
+	deadCode := flag.Bool("dead-code", false, "report definitions nothing in the scan references (name-based reachability; conservative). Adds a DEAD CODE section / dead_symbols in JSON. Requires --granularity function.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
 	guide := flag.Bool("guide", false, "print the report interpretation guide and exit")
 	showVersion := flag.Bool("version", false, "print the codetwin version and exit")
@@ -152,6 +154,13 @@ func main() {
 	granularity, err := scan.ParseGranularity(*granularityFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Dead-code analysis needs per-definition chunks: whole-file
+	// granularity has no symbols to check reachability for.
+	if *deadCode && granularity == scan.GranularityFile {
+		fmt.Fprintln(os.Stderr, "error: --dead-code requires --granularity function (whole-file chunks carry no definitions)")
 		os.Exit(1)
 	}
 
@@ -329,6 +338,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Dead-code analysis runs over the full snippet set, independent of
+	// the similarity matrix, threshold, and --since filtering: liveness
+	// is a whole-corpus property, so a --since scan still reports
+	// against every scanned file.
+	var deadSymbols []report.DeadSymbol
+	if *deadCode {
+		deadFindings, deadWarnings := deadcode.Analyze(snippets)
+		for _, w := range deadWarnings {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+		deadSymbols = toReportDeadSymbols(deadFindings, *limit)
+		debugf("--dead-code: %d findings (%d shown)", len(deadFindings), len(deadSymbols))
+	}
+
 	// Static placeholder so the user has a visible indicator during the
 	// silent gap between phase 1 ("processing files") and phase 2
 	// ("comparing snippets"). Covers cache save + corpus build +
@@ -466,6 +489,7 @@ func main() {
 		CrossRepoOnly: *crossRepoOnly,
 		IncludeTests:  *includeTests,
 		Flat:          *flat,
+		DeadCode:      deadSymbols,
 	}
 
 	// Sort + threshold filter + limit ONCE here in main.go, then build
@@ -539,7 +563,7 @@ func main() {
 			debugf("--suggest-all: built %d pair + %d block suggestions",
 				len(suggestions), len(blockSuggestions))
 		}
-		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, blockSuggestions, suppressed, driftEvents)
+		printJSON(visiblePairs, visibleClusters, visibleBlocks, opts.Previews, suggestions, blockSuggestions, suppressed, driftEvents, deadSymbols)
 		debugf("done (json)")
 		finishBaseline(*updateBaselinePath, *baselinePath, curSnap, driftEvents)
 		return
@@ -873,6 +897,11 @@ type jsonOutput struct {
 	// pre-segregation JSON schema for CI consumers.
 	Suppressed *jsonSuppressed `json:"suppressed,omitempty"`
 
+	// DeadSymbols lists --dead-code findings: definitions nothing in
+	// the scan references. Omitted when the flag is off or every
+	// definition proved alive.
+	DeadSymbols []jsonDeadSymbol `json:"dead_symbols,omitempty"`
+
 	// Drift lists clone-watchlist events from --baseline mode. Omitted
 	// when there is no drift (and in runs without --baseline), so the
 	// schema stays byte-stable for consumers that don't use baselines.
@@ -981,8 +1010,47 @@ type jsonPreview struct {
 // terminal renderer. When suggestions is non-nil, each pair's
 // suggested_patch field is populated by ID lookup. Non-zero suppressed
 // counts add a top-level `suppressed` summary object.
-func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed, drift []baseline.Event) {
+// jsonDeadSymbol mirrors report.DeadSymbol for --json consumers. Name
+// uses the same "path:start-end symbol" format as pair/cluster names.
+type jsonDeadSymbol struct {
+	Name     string `json:"name"`
+	Symbol   string `json:"symbol"`
+	Kind     string `json:"kind"`
+	Lang     string `json:"lang"`
+	Exported bool   `json:"exported"`
+	Verdict  string `json:"verdict"`
+	TestRefs int    `json:"test_refs,omitempty"`
+}
+
+// toReportDeadSymbols converts analysis findings to the display type,
+// applying --limit the same way the pair and cluster sections do.
+func toReportDeadSymbols(findings []deadcode.Finding, limit int) []report.DeadSymbol {
+	if limit > 0 && len(findings) > limit {
+		findings = findings[:limit]
+	}
+	out := make([]report.DeadSymbol, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, report.DeadSymbol{
+			Name:     f.Name,
+			Symbol:   f.Symbol,
+			Kind:     string(f.Kind),
+			Lang:     string(f.Lang),
+			Exported: f.Exported,
+			Verdict:  string(f.Verdict),
+			TestRefs: f.TestRefs,
+		})
+	}
+	return out
+}
+
+func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed, drift []baseline.Event, deadSymbols []report.DeadSymbol) {
 	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones, blockSuggestions)}
+	for _, d := range deadSymbols {
+		out.DeadSymbols = append(out.DeadSymbols, jsonDeadSymbol{
+			Name: d.Name, Symbol: d.Symbol, Kind: d.Kind, Lang: d.Lang,
+			Exported: d.Exported, Verdict: d.Verdict, TestRefs: d.TestRefs,
+		})
+	}
 	for _, e := range drift {
 		out.Drift = append(out.Drift, jsonDriftEvent{Kind: string(e.Kind), Cluster: e.Cluster, Detail: e.Detail})
 	}
