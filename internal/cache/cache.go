@@ -55,7 +55,12 @@ const Filename = ".codetwin-cache.bin"
 // (§5.2 class-level granularity). Entries written by earlier versions
 // were split without class chunks, so they must be invalidated
 // wholesale — a stale entry would silently drop class findings.
-const Version uint32 = 4
+//
+// v5: added Chunk.Symbol (definition name for dead-code analysis). Gob
+// decodes the missing field in older entries as "" rather than erroring,
+// which would silently classify every cached chunk as unnamed — so old
+// caches must be invalidated wholesale.
+const Version uint32 = 5
 
 // SchemaTag encodes every algorithm parameter whose change makes cached
 // per-file output stale: the cache storage version, the fingerprint
@@ -85,6 +90,7 @@ func schemaTag(cacheVersion uint32, k, w, fpSchema, tokSchema, splitSchema int) 
 // re-materialized into a Set on load.
 type Chunk struct {
 	Name       string
+	Symbol     string // mirrors splitter.Chunk.Symbol; empty for whole-file chunks
 	Lang       string
 	Kind       string // mirrors splitter.Chunk.Kind ("function" or "class")
 	StartLine  int

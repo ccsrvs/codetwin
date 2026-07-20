@@ -67,6 +67,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Only bigger sub-function partial clones (default N=8) | `codetwin --min-block-lines 15 <path>` |
 | Function-level findings only, block channel off | `codetwin --min-block-lines 0 <path>` |
 | Whole-file comparison ("which files should be merged?") | `codetwin --granularity file <path>` |
+| Find unreferenced definitions ("what can be deleted?") | `codetwin --dead-code <path>` |
 | Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
@@ -109,6 +110,17 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         snippet named by its bare path. Use for module-level
                         consolidation ("these two files should be one module")
                         and for languages without a splitter.
+--dead-code             report definitions nothing in the scan references, in a
+                        DEAD CODE section (JSON: top-level dead_symbols array).
+                        Name-based reachability, biased conservative: string-literal
+                        and import mentions keep a symbol alive; entry points and
+                        implicitly-dispatched methods (main, init, TestXxx, dunders,
+                        OTP callbacks, String/Error, ...) are never reported.
+                        Verdicts: dead (private, zero refs — highest confidence),
+                        unused-in-scan (exported, zero refs — external consumers
+                        possible), test-only (production code only tests reference).
+                        Requires --granularity function; --threshold does not filter
+                        it, --limit does.
 --cross-lang-only       report only pairs whose two snippets are in different languages
                         (e.g. duplicate logic across a Go service and a TS dashboard)
 --cross-repo-only       report only findings whose endpoints are in different repos.

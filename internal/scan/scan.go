@@ -49,6 +49,7 @@ func ParseGranularity(s string) (Granularity, error) {
 type Snippet struct {
 	Name       string
 	Path       string // absolute file path, used for same-file containment checks
+	Symbol     string // best-effort definition name from splitter.Chunk.Symbol; empty for whole-file chunks
 	Lang       tokenizer.Language
 	Code       string
 	StartLine  int
@@ -196,6 +197,7 @@ func ProcessFile(
 			out = append(out, Snippet{
 				Name:       c.Name,
 				Path:       absPath,
+				Symbol:     c.Symbol,
 				Lang:       tokenizer.Language(c.Lang),
 				Code:       c.Code,
 				StartLine:  c.StartLine,
@@ -235,6 +237,7 @@ func ProcessFile(
 
 		entryChunks = append(entryChunks, cache.Chunk{
 			Name:       name,
+			Symbol:     ch.Symbol,
 			Lang:       string(lang),
 			Kind:       string(ch.Kind),
 			StartLine:  ch.StartLine,
@@ -255,6 +258,7 @@ func ProcessFile(
 		out = append(out, Snippet{
 			Name:       name,
 			Path:       absPath,
+			Symbol:     ch.Symbol,
 			Lang:       lang,
 			Code:       ch.Code,
 			StartLine:  ch.StartLine,

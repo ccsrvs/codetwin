@@ -8,7 +8,8 @@ description: >
   like "find repeated code", "what can be refactored", "check for duplicates", "scan my project
   for similar functions", "watch/track clone drift" (baseline snapshots + CI drift gating via
   --update-baseline / --baseline), "did this PR add duplication" (--since), "who introduced this
-  clone" (--blame), or "suggest a refactor for this duplicate" (--suggest).
+  clone" (--blame), "suggest a refactor for this duplicate" (--suggest), or "find dead/unused
+  code", "what code can be deleted", "unreferenced functions" (--dead-code).
 ---
 
 # codetwin Skill
@@ -21,8 +22,9 @@ class↔class only),
 structural (Winnowing/Jaccard) + semantic (TF-IDF/cosine) scoring,
 DBSCAN clusters. It also reports sub-function partial clones, gates CI on
 duplication a PR introduces (`--since`), annotates findings with git
-provenance (`--blame`), emits starter refactor diffs (`--suggest`), and
-suppresses test↔test findings by default (`--include-tests` restores them).
+provenance (`--blame`), emits starter refactor diffs (`--suggest`),
+finds unreferenced definitions (`--dead-code`), and suppresses
+test↔test findings by default (`--include-tests` restores them).
 
 ## How to use this skill
 

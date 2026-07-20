@@ -363,6 +363,11 @@ type Options struct {
 	// (test-suppressed, sorted, limited). Options.Threshold does not
 	// apply to them — containment is their quality bar.
 	PartialClones []BlockClone
+
+	// DeadCode lists definitions the scan could not prove alive,
+	// rendered in the DEAD CODE section. Independent of the similarity
+	// threshold; empty unless the caller ran the --dead-code analysis.
+	DeadCode []DeadSymbol
 }
 
 // ANSI color codes
@@ -590,6 +595,9 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 			color(green, opts), opts.Threshold*100, color(reset, opts))
 		printSuppressed(w, sup, opts)
 		fmt.Fprintln(w)
+		// Dead code is threshold-independent: a corpus with no clones
+		// can still have unreferenced definitions.
+		printDeadCode(w, opts.DeadCode, opts)
 		return
 	}
 
@@ -597,6 +605,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 		printPairs(w, visiblePairs, opts)
 		printClusters(w, visibleClusters, opts)
 		printPartialClones(w, opts.PartialClones, opts)
+		printDeadCode(w, opts.DeadCode, opts)
 		printSummary(w, visiblePairs, visiblePairs, visibleClusters, 0, 0, sup, opts)
 		return
 	}
@@ -608,6 +617,7 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 		printPairs(w, shownPairs, opts)
 	}
 	printPartialClones(w, opts.PartialClones, opts)
+	printDeadCode(w, opts.DeadCode, opts)
 	crossCollapsed := 0
 	for _, r := range relations {
 		crossCollapsed += r.Count
@@ -1100,6 +1110,11 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 	if len(opts.PartialClones) > 0 {
 		fmt.Fprintf(w, "  %sPartial clones%s    %s%d%s %s(sub-function blocks; see PARTIAL CLONES)%s\n",
 			color(grey, opts), color(reset, opts), color(orange, opts), len(opts.PartialClones), color(reset, opts),
+			color(grey, opts), color(reset, opts))
+	}
+	if len(opts.DeadCode) > 0 {
+		fmt.Fprintf(w, "  %sDead code%s         %s%d%s %s(unreferenced definitions; see DEAD CODE)%s\n",
+			color(grey, opts), color(reset, opts), color(red, opts), len(opts.DeadCode), color(reset, opts),
 			color(grey, opts), color(reset, opts))
 	}
 	printSuppressed(w, sup, opts)

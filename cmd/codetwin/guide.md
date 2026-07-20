@@ -291,6 +291,56 @@ identical to the pre-segregation schema. Scores and clustering are
 unchanged — this is purely a presentation filter, applied after the
 threshold and before `--limit`.
 
+## Dead code (--dead-code)
+
+Opt-in second report channel, independent of the similarity scoring:
+every named definition the scan cannot prove alive. Liveness is
+name-based — a definition is alive if its name occurs anywhere outside
+its own body (and outside the bodies of same-named definitions).
+
+Three verdicts, in decreasing confidence:
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| DEAD | Private/unexported, zero references anywhere | Strongest candidate for deletion — still verify below |
+| TEST-ONLY | Production code referenced only from test files | Dead weight in the shipped artifact; delete the code *and its tests*, or reconnect it |
+| UNUSED IN SCAN | Exported/public, zero references in the scanned roots | Advisory only — consumers outside the scan (library users, other repos) are invisible |
+
+The analysis is deliberately conservative — every ambiguity counts as
+alive:
+
+- A name mentioned in a **string literal** keeps the symbol alive
+  (dynamic dispatch: `getattr`, reflection, `apply/3`, registry maps).
+- A name mentioned in an **import** keeps it alive (re-exports).
+- **Comment** mentions do NOT keep a symbol alive.
+- Entry points and implicitly-dispatched names are never reported:
+  `main`/`init`/`TestXxx` (Go, with stdlib interface methods like
+  `String`, `Error`, `MarshalJSON`, `ServeHTTP`, `Len`/`Less`/`Swap`),
+  dunders and unittest lifecycle (Python), React lifecycle +
+  `constructor`/`toString` (JS/TS), `equals`/`hashCode`/`run` (Java),
+  trait impls and operator overloads (Rust), OTP/Phoenix callbacks
+  including `start_link` (Elixir).
+- Two same-named definitions share references: one live `parse()`
+  keeps every `parse()` alive. The report never guesses which one.
+
+What it still can't see — verify before deleting:
+
+- Consumers outside the scanned roots (the whole UNUSED IN SCAN tier).
+- Build-tag/conditional-compilation variants and generated-code callers
+  that live outside the scan.
+- Frameworks that discover handlers by annotation/convention without
+  ever writing the name (rare — most registries name the symbol or a
+  string containing it, both of which count as references).
+- Definitions shorter than `--min-lines` (default 3) are not analyzed.
+
+Requires `--granularity function`. `--threshold` does not filter the
+section; `--limit` caps it like every other section. `--since` does not
+filter it either — liveness is a whole-corpus property, so a PR-delta
+scan still reports dead code across the full scanned set. In JSON the
+findings land in a top-level `dead_symbols` array (omitted when the
+flag is off or nothing was found), each with `name`, `symbol`, `kind`,
+`lang`, `exported`, `verdict`, and `test_refs`.
+
 ## What moves the labels
 
 - `--threshold N` filters which pairs are *reported*. Doesn't change the math, just hides anything below.

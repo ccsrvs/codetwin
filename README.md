@@ -44,6 +44,13 @@ What sets codetwin apart from other clone detectors:
   one-line summary, while test↔production copy-paste still renders.
   `--include-tests` restores the full listing. See
   [Test code segregation](#test-code-segregation).
+- **Dead code detection** — `--dead-code` reports definitions nothing in
+  the scan references, tiered by confidence: `dead` (private, zero refs),
+  `test-only` (production code only tests keep alive), `unused-in-scan`
+  (exported; external consumers possible). Name-based and conservative —
+  string-literal and import mentions count as alive, entry points and
+  implicitly-dispatched methods are never reported. See
+  [Dead code detection](#dead-code-detection---dead-code).
 
 The git-aware features (`--since`, `--blame`, `--sort age`) require git on
 `PATH` and a git repository in the working directory; without them codetwin
@@ -150,6 +157,10 @@ codetwin --blame --sort age --limit 10 ./src
 
 # Suggest a starter helper for one same-language pair (look up <id> in --json output)
 codetwin --suggest <pair-id> ./src
+
+# Dead code: definitions nothing in the scan references
+codetwin --dead-code ./src
+codetwin --dead-code --json ./src | jq '.dead_symbols[] | select(.verdict == "dead")'
 ```
 
 ## Flags
@@ -170,6 +181,7 @@ codetwin --suggest <pair-id> ./src
 | `--min-confidence-lines` | `10` | Dampen pair scores when `min(LinesA, LinesB) < N` (0 = off). On by default. See [Scoring](#scoring). |
 | `--min-block-lines` | `8` | Report sub-function partial clones spanning at least N matched lines on both sides (0 = off). See [Partial clones](#partial-clones-block-level). |
 | `--granularity` | `function` | Chunking unit: `function` (per-definition chunks) or `file` (each source file is one whole-file snippet). See [Granularity](#granularity). |
+| `--dead-code` | false | Report definitions nothing in the scan references, tiered by confidence. Requires `--granularity function`. See [Dead code detection](#dead-code-detection---dead-code). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
@@ -544,6 +556,50 @@ filtering (the summary counts only findings that would have rendered)
 and before `--limit` (the limit applies to what remains). Unlike adding
 `**/*_test.go` to `ignore_paths`, segregation keeps test files in the
 scan, so cross-boundary test↔production findings still surface.
+
+## Dead code detection (--dead-code)
+
+`--dead-code` adds a second, similarity-independent report channel:
+every named definition (function, method, class) that nothing in the
+scanned corpus references. It reuses the chunks the similarity pipeline
+already extracts — a definition is *alive* if its name occurs anywhere
+outside its own body (and outside the bodies of same-named
+definitions), *dead* otherwise.
+
+```bash
+codetwin --dead-code ./src
+codetwin --dead-code --json ./src | jq '.dead_symbols[] | select(.verdict == "dead")'
+```
+
+Findings are tiered by confidence:
+
+| Verdict | Meaning |
+|---|---|
+| `dead` | Private/unexported, zero references — the strongest deletion candidates |
+| `test-only` | Production code referenced only from test files — dead weight in the shipped artifact |
+| `unused-in-scan` | Exported/public, zero references in the scan — advisory, since external consumers are invisible |
+
+The analysis is name-based reachability, deliberately biased toward
+false-alive rather than false-dead: a name mentioned in a string
+literal (dynamic dispatch, reflection, registries) or in an import
+(re-exports) keeps its symbol alive; comment mentions do not. Entry
+points and implicitly-dispatched methods are never reported — `main`,
+`init`, `TestXxx`, Go stdlib interface methods (`String`, `Error`,
+`MarshalJSON`, `ServeHTTP`, ...), Python dunders, React lifecycle
+methods, Java's `equals`/`hashCode`, Rust trait impls and operator
+overloads, and Elixir OTP/Phoenix callbacks including `start_link`.
+Per-language visibility conventions drive the `exported` split: Go
+capitalization, Python leading underscore, Rust `pub`, Java `public`,
+JS `export`, Elixir `def` vs `defp`.
+
+What it cannot see — verify before deleting: consumers outside the
+scanned roots (the whole `unused-in-scan` tier exists because of them),
+build-tag variants, callers in generated code outside the scan, and
+frameworks that discover handlers by annotation alone. Definitions
+shorter than `--min-lines` (default 3) are not analyzed. Requires
+`--granularity function`; `--threshold` and `--since` do not filter the
+section, `--limit` caps it. In JSON, findings land in a top-level
+`dead_symbols` array (omitted when the flag is off or nothing is dead).
 
 ## Clone watchlist (drift alerts)
 
