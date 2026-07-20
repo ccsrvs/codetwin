@@ -212,7 +212,7 @@ func replaceBinary(newPath, dest string) error {
 			return err
 		}
 		if err := os.Rename(newPath, dest); err != nil {
-			os.Rename(old, dest) // best-effort restore
+			_ = os.Rename(old, dest) // best-effort restore
 			return err
 		}
 		os.Remove(old) // may fail while the old exe still runs; harmless
