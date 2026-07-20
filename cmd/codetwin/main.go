@@ -68,6 +68,15 @@ var supportedExts = map[string]bool{
 var buildVersion = "dev"
 
 func main() {
+	// Subcommand dispatch happens before flag parsing: everything else
+	// in the CLI is flag-driven, so a bare first argument can only be a
+	// scan path — a directory literally named "agent-install" needs the
+	// ./agent-install form.
+	if len(os.Args) > 1 && os.Args[1] == "agent-install" {
+		runAgentInstallCLI(os.Args[2:])
+		return
+	}
+
 	threshold := flag.Float64("threshold", 0.50, "minimum similarity score to report (0.0–1.0)")
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
@@ -1511,6 +1520,7 @@ codetwin — multi-language code similarity detector
 
 USAGE:
   codetwin [flags] <path> [<path>...]
+  codetwin agent-install <agent> [--scope project|user]   (see agent-install --list)
 
   Paths can be files or directories (scanned recursively).
   Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs
@@ -1548,6 +1558,10 @@ FLAGS:
                        file mode skips the splitter — each source file is one
                        whole-file snippet, for module-level consolidation and
                        languages without a splitter
+  --dead-code          report definitions nothing in the scan references, in a
+                       DEAD CODE section (JSON: dead_symbols). Verdicts: dead |
+                       test-only | unused-in-scan. Conservative name-based
+                       reachability; requires --granularity function
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
