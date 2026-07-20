@@ -72,6 +72,19 @@ Prebuilt binaries cover linux and macOS on amd64/arm64; Windows amd64 is
 attached to each [release](https://github.com/ccsrvs/codetwin/releases) for
 manual download.
 
+Once installed, the binary keeps itself current:
+
+```bash
+codetwin update            # atomically replace this binary with the latest release
+codetwin update --check    # just report whether an update is available
+```
+
+Both use plain unauthenticated HTTPS — no GitHub CLI or token needed.
+A background check also runs at most once a day (spawned detached, so it
+never delays a scan) and prints a one-line stderr notice on the next run
+when a newer release exists. Local `dev` builds never see notices. Opt
+out entirely with `CODETWIN_NO_UPDATE_CHECK=1`.
+
 Or with the Go toolchain:
 
 ```bash

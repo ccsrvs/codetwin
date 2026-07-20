@@ -70,11 +70,21 @@ var buildVersion = "dev"
 func main() {
 	// Subcommand dispatch happens before flag parsing: everything else
 	// in the CLI is flag-driven, so a bare first argument can only be a
-	// scan path — a directory literally named "agent-install" needs the
-	// ./agent-install form.
-	if len(os.Args) > 1 && os.Args[1] == "agent-install" {
-		runAgentInstallCLI(os.Args[2:])
-		return
+	// scan path — a directory named like a subcommand needs the ./name
+	// form.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "agent-install":
+			runUpdateNotifier()
+			runAgentInstallCLI(os.Args[2:])
+			return
+		case "update":
+			runUpdateCLI(os.Args[2:])
+			return
+		case updateCheckCmdName:
+			runBackgroundCheck()
+			return
+		}
 	}
 
 	threshold := flag.Float64("threshold", 0.50, "minimum similarity score to report (0.0–1.0)")
@@ -124,6 +134,10 @@ func main() {
 		fmt.Print(guideBody)
 		return
 	}
+
+	// One stderr line when a newer release is cached; at most one
+	// detached background check per day. Never blocks the scan.
+	runUpdateNotifier()
 
 	isTTY := stderrIsTTY()
 	startTime := time.Now()
@@ -1521,6 +1535,10 @@ codetwin — multi-language code similarity detector
 USAGE:
   codetwin [flags] <path> [<path>...]
   codetwin agent-install <agent> [--scope project|user]   (see agent-install --list)
+  codetwin update [--check]      self-update from the latest GitHub release
+                                 (a background check runs at most once a day and
+                                 prints a one-line notice; opt out with
+                                 CODETWIN_NO_UPDATE_CHECK=1)
 
   Paths can be files or directories (scanned recursively).
   Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs
