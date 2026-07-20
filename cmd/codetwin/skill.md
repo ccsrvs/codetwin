@@ -68,6 +68,7 @@ codetwin --threshold 0.40 <TARGET_PATH>
 | Function-level findings only, block channel off | `codetwin --min-block-lines 0 <path>` |
 | Whole-file comparison ("which files should be merged?") | `codetwin --granularity file <path>` |
 | Find unreferenced definitions ("what can be deleted?") | `codetwin --dead-code <path>` |
+| Update the CLI itself to the latest release | `codetwin update` (`--check` to only report) |
 | Also show test↔test clones (suppressed by default) | `codetwin --include-tests <path>` |
 | Two specific files | `codetwin file_a.go file_b.go` |
 | Multiple roots (nested deduped) | `codetwin ./src ./pkg` |
