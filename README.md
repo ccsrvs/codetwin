@@ -87,23 +87,29 @@ make build          # produces ./codetwin binary
 make test           # run all unit + integration tests
 ```
 
-### Install as a Claude Code skill
+### Wire codetwin into a coding agent
 
-`codetwin-SKILL.md` at the repo root is a Claude Code skill manifest that
-tells Claude when and how to invoke the CLI (find duplicate code, detect
-clones, scan for refactor targets). To make it discoverable in your Claude
-sessions, drop it into your user-level skills folder as `SKILL.md`:
+The binary installs its own skill into your coding agent's config, so the
+agent knows when and how to drive the CLI (find duplicate code, detect
+clones, find dead code, scan for refactor targets):
 
 ```bash
-mkdir -p ~/.claude/skills/codetwin
-cp codetwin-SKILL.md ~/.claude/skills/codetwin/SKILL.md
+codetwin agent-install claude --scope user   # Claude Code, all your projects
+codetwin agent-install claude                # Claude Code, this project only
+codetwin agent-install --list                # cursor, windsurf, cline, copilot, AGENTS.md
 ```
 
-The skill assumes `codetwin` is on `PATH`. The bundled
-`./build_and_cp_cli.sh` builds the binary and copies it to `~/.local/bin`,
-which is one easy way to satisfy that. Once both are in place, Claude can
-locate the binary via `which codetwin` and run `codetwin --skill` /
-`codetwin --guide` for the full guides embedded in the binary.
+Dedicated files (Claude, Cursor, Windsurf, Cline) are written whole and
+refuse to clobber locally-edited content without `--force`; shared files
+(`AGENTS.md`, `.github/copilot-instructions.md`) get an idempotent marked
+block spliced in, preserving whatever else is there. Re-run after
+upgrading codetwin to pick up skill changes — an unchanged skill is a
+no-op.
+
+The skill assumes `codetwin` is on `PATH`. The manifest source lives at
+`codetwin-SKILL.md` in this repo (embedded into the binary at build time),
+and the deeper guides remain available from the binary itself via
+`codetwin --skill` and `codetwin --guide`.
 
 ## Usage
 

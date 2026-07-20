@@ -89,3 +89,15 @@ case ":$PATH:" in
   *":$dest_dir:"*) ;;
   *) echo "note: $dest_dir is not on your PATH — add it to run '$BIN_NAME' directly." ;;
 esac
+
+# Most people drive codetwin through a coding agent — point them at the
+# built-in skill installer. Claude Code user scope covers every project;
+# other agents and project scope are under `agent-install --list`.
+cat <<EOF
+
+Next: let your coding agent drive $BIN_NAME. For Claude Code (user scope, all projects):
+
+    $BIN_NAME agent-install claude --scope user
+
+Other agents (cursor, copilot, ...) and project scope: $BIN_NAME agent-install --list
+EOF
