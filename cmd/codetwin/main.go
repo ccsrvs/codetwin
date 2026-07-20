@@ -1558,6 +1558,10 @@ FLAGS:
                        file mode skips the splitter — each source file is one
                        whole-file snippet, for module-level consolidation and
                        languages without a splitter
+  --dead-code          report definitions nothing in the scan references, in a
+                       DEAD CODE section (JSON: dead_symbols). Verdicts: dead |
+                       test-only | unused-in-scan. Conservative name-based
+                       reachability; requires --granularity function
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
