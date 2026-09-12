@@ -86,7 +86,10 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --plain                 no ANSI colors — use for piping or file output
 --json                  JSON output
 --verbose               show all pairs including weak similarities
---min-lines int         skip chunks shorter than N non-blank lines (default 3)
+--min-lines int         skip chunks shorter than N non-blank lines (default 5)
+--ignore pattern        skip paths matching an ignore_paths-style pattern (repeatable;
+                        merged with .codetwin.json ignore_paths). node_modules and
+                        vendor directories below a scan root are always skipped.
 --eps float             DBSCAN epsilon — cluster density (default 0.35;
                         links pairs scoring ≥ 0.65, the "strong clone" band)
 --min-pts int           DBSCAN min cluster size (default 2)

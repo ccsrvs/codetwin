@@ -598,6 +598,10 @@ func Render(w io.Writer, pairs []Pair, clusters []Cluster, opts Options) {
 		// Dead code is threshold-independent: a corpus with no clones
 		// can still have unreferenced definitions.
 		printDeadCode(w, opts.DeadCode, opts)
+		if len(opts.DeadCode) > 0 {
+			printSectionTitle(w, "SUMMARY", opts)
+			printDeadCodeSummary(w, opts)
+		}
 		return
 	}
 
@@ -1049,6 +1053,17 @@ func printClusterMembersByRepo(w io.Writer, c Cluster, opts Options) {
 // allVisible so "Exact clones" describes the scan, not just the
 // standalone leftovers (a repo whose exact clones all live inside
 // clusters would otherwise report "Exact clones 0").
+// printDeadCodeSummary prints the summary's dead-code count line, or
+// nothing when the dead-code channel is off or empty.
+func printDeadCodeSummary(w io.Writer, opts Options) {
+	if len(opts.DeadCode) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  %sDead code%s         %s%d%s %s(unreferenced definitions; see DEAD CODE)%s\n",
+		color(grey, opts), color(reset, opts), color(red, opts), len(opts.DeadCode), color(reset, opts),
+		color(grey, opts), color(reset, opts))
+}
+
 func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, collapsed, crossCollapsed int, sup Suppressed, opts Options) {
 	exact, near, twins, strong, candidates, weak := 0, 0, 0, 0, 0, 0
 	for _, p := range allVisible {
@@ -1112,11 +1127,7 @@ func printSummary(w io.Writer, shown, allVisible []Pair, clusters []Cluster, col
 			color(grey, opts), color(reset, opts), color(orange, opts), len(opts.PartialClones), color(reset, opts),
 			color(grey, opts), color(reset, opts))
 	}
-	if len(opts.DeadCode) > 0 {
-		fmt.Fprintf(w, "  %sDead code%s         %s%d%s %s(unreferenced definitions; see DEAD CODE)%s\n",
-			color(grey, opts), color(reset, opts), color(red, opts), len(opts.DeadCode), color(reset, opts),
-			color(grey, opts), color(reset, opts))
-	}
+	printDeadCodeSummary(w, opts)
 	printSuppressed(w, sup, opts)
 	fmt.Fprintln(w)
 }

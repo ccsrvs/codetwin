@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -68,14 +69,55 @@ func noUpdateCheck() bool {
 	return false
 }
 
-// updateAvailable reports whether latest names a release other than the
+// updateAvailable reports whether latest names a release newer than the
 // running build. Local builds ("dev" or dev-*) never see a notice — they
-// are ahead of or beside releases, not behind them.
+// are ahead of or beside releases, not behind them. A cached latest that
+// is older than the build (the daily check ran before `codetwin update`
+// installed a fresher release) is not an update either.
 func updateAvailable(current, latest string) bool {
 	if latest == "" || current == "dev" || strings.HasPrefix(current, "dev-") {
 		return false
 	}
-	return latest != current
+	return newerRelease(latest, current)
+}
+
+// newerRelease reports whether tag a is a newer release than tag b.
+// Both are compared numerically as vMAJOR.MINOR.PATCH (a "v" prefix and
+// any pre-release suffix after "-" are tolerated). When either tag does
+// not parse, the only safe answer is "different", which preserves the
+// old behavior for unconventional tags.
+func newerRelease(a, b string) bool {
+	av, aok := parseReleaseTag(a)
+	bv, bok := parseReleaseTag(b)
+	if !aok || !bok {
+		return a != b
+	}
+	for i := range av {
+		if av[i] != bv[i] {
+			return av[i] > bv[i]
+		}
+	}
+	return false
+}
+
+func parseReleaseTag(tag string) ([3]int, bool) {
+	var v [3]int
+	tag = strings.TrimPrefix(tag, "v")
+	if i := strings.IndexAny(tag, "-+"); i >= 0 {
+		tag = tag[:i]
+	}
+	parts := strings.Split(tag, ".")
+	if len(parts) != 3 {
+		return v, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return v, false
+		}
+		v[i] = n
+	}
+	return v, true
 }
 
 // checkIsDue reports whether the daily background check should run:

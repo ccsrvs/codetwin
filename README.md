@@ -190,7 +190,8 @@ codetwin --dead-code --json ./src | jq '.dead_symbols[] | select(.verdict == "de
 | `--plain` | false | Disable ANSI colors (CI-safe) |
 | `--json` | false | JSON output |
 | `--verbose` | false | Show all pairs including weak |
-| `--min-lines` | `3` | Skip chunks shorter than N non-blank lines |
+| `--min-lines` | `5` | Skip chunks shorter than N non-blank lines |
+| `--ignore` | | Skip paths matching an `ignore_paths`-style pattern; repeatable, merged with the config file |
 | `--eps` | `0.35` | DBSCAN epsilon (cluster density threshold). The default links pairs scoring ≥ 0.65 — the "strong clone" band |
 | `--min-pts` | `2` | DBSCAN minimum cluster size |
 | `--preview` | false | Show line-numbered code excerpts under each finding |
@@ -614,8 +615,8 @@ JS `export`, Elixir `def` vs `defp`.
 What it cannot see — verify before deleting: consumers outside the
 scanned roots (the whole `unused-in-scan` tier exists because of them),
 build-tag variants, callers in generated code outside the scan, and
-frameworks that discover handlers by annotation alone. Definitions
-shorter than `--min-lines` (default 3) are not analyzed. Requires
+frameworks that discover handlers by annotation alone. `--min-lines`
+does not apply: every named definition is analyzed, however short. Requires
 `--granularity function`; `--threshold` and `--since` do not filter the
 section, `--limit` caps it. In JSON, findings land in a top-level
 `dead_symbols` array (omitted when the flag is off or nothing is dead).
@@ -743,6 +744,12 @@ individual false-positive pairs. CLI flags always win over config defaults.
 ```
 
 ### Path patterns (`ignore_paths`)
+
+Patterns come from `ignore_paths` in `.codetwin.json` and from any number
+of `--ignore <pattern>` flags; both use the syntax below and the union is
+applied. Dot-directories (`.git`, `.idea`), `node_modules`, and `vendor`
+are always skipped below a scan root without any pattern. To scan one of
+those, pass it as the root itself: `codetwin vendor/`.
 
 | Pattern              | Matches                                                  |
 |----------------------|----------------------------------------------------------|

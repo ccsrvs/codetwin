@@ -28,7 +28,9 @@ func TestDampen_ShortNoisePairHiddenByDefault(t *testing.T) {
 		Label string  `json:"label"`
 	} {
 		t.Helper()
-		full := append([]string{"--json", "--no-cache", "--no-progress"}, args...)
+		// The fixture's clauses sit under the default --min-lines; admit
+		// them so the dampener, not the line gate, is what hides them.
+		full := append([]string{"--json", "--no-cache", "--no-progress", "--min-lines", "3"}, args...)
 		full = append(full, fixtureDir)
 		out, err := exec.Command(bin, full...).Output()
 		if err != nil {

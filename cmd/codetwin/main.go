@@ -91,7 +91,9 @@ func main() {
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
-	minLines := flag.Int("min-lines", 3, "skip chunks with fewer than N non-blank lines")
+	minLines := flag.Int("min-lines", 5, "skip chunks with fewer than N non-blank lines")
+	var ignoreFlags multiFlag
+	flag.Var(&ignoreFlags, "ignore", "skip paths matching this ignore_paths-style pattern (repeatable; merged with .codetwin.json ignore_paths)")
 	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
 	minPts := flag.Int("min-pts", 2, "DBSCAN minPts: minimum cluster size")
 	preview := flag.Bool("preview", false, "show a short code excerpt for each finding")
@@ -212,9 +214,12 @@ func main() {
 	if cfg != nil {
 		cfgRules = *cfg
 	}
-	ignoreMatcher, err := compileIfAny(cfgRules.IgnorePaths, config.CompileIgnorePaths)
+	// --ignore patterns join the config file's ignore_paths; both use
+	// the same syntax and the union is applied.
+	ignorePaths := append(append([]string{}, cfgRules.IgnorePaths...), ignoreFlags...)
+	ignoreMatcher, err := compileIfAny(ignorePaths, config.CompileIgnorePaths)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error in ignore_paths: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error in ignore_paths / --ignore: %v\n", err)
 		os.Exit(1)
 	}
 	stripPatterns, err := compileIfAny(cfgRules.IgnorePatterns, config.CompileIgnorePatterns)
@@ -326,8 +331,16 @@ func main() {
 		progWg.Add(1)
 		go reportProgress(&done, totalFiles, progStop, &progWg, "processing files")
 	}
+	// Dead-code liveness is a whole-corpus property: a 2-line helper
+	// nothing calls is just as dead as a 40-line one, so the scan keeps
+	// every definition when --dead-code is on and the --min-lines gate
+	// is applied to the similarity pipeline afterwards instead.
+	scanMinLines := *minLines
+	if *deadCode {
+		scanMinLines = 1
+	}
 	snippets, fileWarnings := scan.ProcessFiles(
-		files, *minLines, stripPatterns, cacheState, patternsHash,
+		files, scanMinLines, stripPatterns, cacheState, patternsHash,
 		granularity,
 		func() { done.Add(1) },
 	)
@@ -373,6 +386,15 @@ func main() {
 		}
 		deadSymbols = toReportDeadSymbols(deadFindings, *limit)
 		debugf("--dead-code: %d findings (%d shown)", len(deadFindings), len(deadSymbols))
+		// Now apply the --min-lines gate the scan skipped above.
+		kept := snippets[:0]
+		for _, s := range snippets {
+			if s.NonBlankLn >= *minLines {
+				kept = append(kept, s)
+			}
+		}
+		snippets = kept
+		debugf("--dead-code: %d snippets survive --min-lines %d for similarity", len(snippets), *minLines)
 	}
 
 	// Static placeholder so the user has a visible indicator during the
@@ -1130,6 +1152,23 @@ func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []rep
 
 // ── File collection ───────────────────────────────────────────────────────────
 
+// dependencyDirs are directory names that hold third-party copies
+// rather than the project's own code. They are skipped wherever they
+// appear below a scan root; to scan one, pass it as the root itself.
+var dependencyDirs = map[string]bool{
+	"node_modules": true,
+	"vendor":       true,
+}
+
+// multiFlag collects a repeatable string flag.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
+
 // collectFiles walks the given paths and returns the supported source
 // files plus a repoMap recording which directory root each file came
 // from. The repoMap only takes effect downstream when two or more
@@ -1153,10 +1192,11 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, *repo
 				if err != nil {
 					return err
 				}
-				// Skip dotfile dirs (.git, .idea, etc.) but never the walk
-				// root itself — passing "." as a path would otherwise be
-				// rejected before any file got visited.
-				if d.IsDir() && path != p && strings.HasPrefix(d.Name(), ".") {
+				// Skip dotfile dirs (.git, .idea, etc.) and dependency
+				// trees (node_modules, vendor) but never the walk root
+				// itself — passing "." or a vendor directory as a path
+				// would otherwise be rejected before any file got visited.
+				if d.IsDir() && path != p && (strings.HasPrefix(d.Name(), ".") || dependencyDirs[d.Name()]) {
 					return filepath.SkipDir
 				}
 				// Ignore patterns are relative to the scan root, including
@@ -1564,7 +1604,8 @@ FLAGS:
   --plain              no ANSI colors, suitable for pipes and CI
   --json               output as JSON
   --verbose            show all pairs including weak similarities
-  --min-lines int      skip chunks with fewer than N non-blank lines (default 3)
+  --min-lines int      skip chunks with fewer than N non-blank lines (default 5)
+  --ignore pattern     skip paths matching an ignore_paths-style pattern (repeatable)
   --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
                        the 'strong clone' band)
   --min-pts int        DBSCAN min cluster size (default 2)

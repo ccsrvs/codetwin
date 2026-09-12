@@ -32,6 +32,13 @@ func TestUpdateAvailable(t *testing.T) {
 	}{
 		{"v0.1.0", "v0.2.0", true},
 		{"v0.2.0", "v0.2.0", false},
+		// Stale cache after `codetwin update`: the daily check saw
+		// v0.3.0 before v0.3.1 was installed. Not an update.
+		{"v0.3.1", "v0.3.0", false},
+		{"v1.0.0", "v0.9.9", false},
+		// Numeric, not lexical: v0.10.0 is newer than v0.9.0.
+		{"v0.9.0", "v0.10.0", true},
+		{"v0.3.1", "v0.3.2-rc1", true},
 		{"v0.2.0", "", false},
 		{"dev", "v0.2.0", false},
 		{"dev-3893fbf", "v0.2.0", false},

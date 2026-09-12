@@ -59,7 +59,13 @@ const (
 	// the first place.
 	twinMin = 0.85
 
-	minLines = 3 // mirror the CLI default
+	minLines = 5 // mirror the CLI default
+
+	// Short-negative cases hold clauses under the default --min-lines;
+	// they exist to prove the length dampener keeps such snippets from
+	// scoring as clones once a user admits them with --min-lines 3, so
+	// they are loaded at that lowered setting.
+	shortNegativeMinLines = 3
 )
 
 type benchCase struct {
@@ -208,7 +214,7 @@ func collectCases(t *testing.T) []benchCase {
 
 // caseSnippets loads the a.* and b.* file of a case through the real
 // scan pipeline (splitter → tokenizer → fingerprint).
-func caseSnippets(t *testing.T, dir string) (a, b []scan.Snippet) {
+func caseSnippets(t *testing.T, dir string, minLines int) (a, b []scan.Snippet) {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(dir, "*"))
 	if err != nil {
@@ -259,7 +265,11 @@ func TestBench_GroundTruth(t *testing.T) {
 	var all []loaded
 	var streams [][]string
 	for _, c := range cases {
-		a, b := caseSnippets(t, c.dir)
+		caseMin := minLines
+		if c.shortNegative {
+			caseMin = shortNegativeMinLines
+		}
+		a, b := caseSnippets(t, c.dir, caseMin)
 		all = append(all, loaded{c, a, b})
 		for _, s := range append(append([]scan.Snippet{}, a...), b...) {
 			streams = append(streams, s.Tokens)
@@ -473,7 +483,7 @@ func fmtF(f float64) string {
 // would — and returns the snippets plus materialized pairs.
 func classCasePairs(t *testing.T, name string) ([]scan.Snippet, []report.Pair) {
 	t.Helper()
-	a, b := caseSnippets(t, filepath.Join("../../testdata/bench/classes", name))
+	a, b := caseSnippets(t, filepath.Join("../../testdata/bench/classes", name), minLines)
 	snips := append(append([]scan.Snippet{}, a...), b...)
 	streams := make([][]string, len(snips))
 	for i, s := range snips {

@@ -154,3 +154,31 @@ func TestCollectFiles_AnchoredIgnoreUsesScanRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestCollectFiles_SkipsDependencyDirsBelowRoot(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFiles(t, root, map[string]string{
+		"keep.go":                       "package x\n",
+		"vendor/dep/dep.go":             "package dep\n",
+		"web/node_modules/lib/index.js": "module.exports = 1;\n",
+		"web/app.js":                    "export const a = 1;\n",
+	})
+	files, _, err := collectFiles([]string{root}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := relPaths(files, root)
+	sort.Strings(got)
+	if want := []string{"keep.go", "web/app.js"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	// Naming the dependency directory as the root scans it.
+	files, _, err = collectFiles([]string{filepath.Join(root, "vendor")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := relPaths(files, root); !reflect.DeepEqual(got, []string{"vendor/dep/dep.go"}) {
+		t.Errorf("explicit vendor root: got %v", got)
+	}
+}
