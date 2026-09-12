@@ -359,7 +359,7 @@ func TestChangedSince_IgnoresDisplayPrefixConfig(t *testing.T) {
 			if out, err := exec.Command("git", "-C", dir, "config", setting, "true").CombinedOutput(); err != nil {
 				t.Fatalf("config: %v (%s)", err, out)
 			}
-			t.Cleanup(func() { exec.Command("git", "-C", dir, "config", "--unset", setting).Run() })
+			t.Cleanup(func() { _ = exec.Command("git", "-C", dir, "config", "--unset", setting).Run() })
 			path := filepath.Join(dir, "foo.go")
 			if err := os.WriteFile(path, []byte("a\nb\nc\nd\n"), 0o644); err != nil {
 				t.Fatal(err)
