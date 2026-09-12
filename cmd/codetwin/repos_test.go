@@ -144,3 +144,16 @@ func mustAbs(t *testing.T, p string) string {
 	}
 	return abs
 }
+
+func TestNamespaceSnippets_DotPrefixedFilename(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "..generated.go")
+	rm := newRepoMap()
+	label := rm.addRoot(root)
+	rm.addFile(path, root, label)
+	snippets := []scan.Snippet{{Name: path + ":1-5 F", Path: path}}
+	namespaceSnippets(snippets, rm)
+	if want := label + ":..generated.go:1-5 F"; snippets[0].Name != want {
+		t.Fatalf("name = %q, want %q", snippets[0].Name, want)
+	}
+}

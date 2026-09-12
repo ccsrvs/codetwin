@@ -10,13 +10,14 @@ import (
 // Contains reports whether `child` lives inside the directory tree rooted at
 // `parent`. Both paths must be absolute and clean. The check is purely
 // lexical (no filesystem access): parent must be a strict prefix of child
-// with the next character being a separator, so /foo does not match /foobar.
+// at a separator boundary, so /foo does not match /foobar. A filesystem
+// root already ends in a separator and contains every strict descendant.
 func Contains(parent, child string) bool {
 	if !strings.HasPrefix(child, parent) {
 		return false
 	}
 	rest := child[len(parent):]
-	return len(rest) > 0 && rest[0] == filepath.Separator
+	return len(rest) > 0 && (strings.HasSuffix(parent, string(filepath.Separator)) || rest[0] == filepath.Separator)
 }
 
 // Dedupe removes duplicate inputs and inputs that are contained within

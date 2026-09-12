@@ -103,10 +103,11 @@ type IgnoreMatcher struct {
 }
 
 type ignoreRule struct {
-	raw     string
-	re      *regexp.Regexp // non-nil when the pattern uses wildcards
-	literal string         // non-empty when the pattern is a plain substring
-	dirOnly bool
+	raw      string
+	re       *regexp.Regexp // non-nil when the pattern uses wildcards
+	literal  string         // non-empty when the pattern is a plain substring
+	dirOnly  bool
+	anchored bool
 }
 
 // CompileIgnorePaths turns a slice of glob/substring patterns into a
@@ -138,7 +139,7 @@ func CompileIgnorePaths(patterns []string) (*IgnoreMatcher, error) {
 			}
 			rules = append(rules, ignoreRule{raw: raw, re: re, dirOnly: dirOnly})
 		} else {
-			rules = append(rules, ignoreRule{raw: raw, literal: p, dirOnly: dirOnly})
+			rules = append(rules, ignoreRule{raw: raw, literal: strings.TrimPrefix(p, "/"), dirOnly: dirOnly, anchored: strings.HasPrefix(p, "/")})
 		}
 	}
 	return &IgnoreMatcher{rules: rules}, nil
@@ -178,7 +179,11 @@ func (m *IgnoreMatcher) Match(path string, isDir bool) bool {
 				return true
 			}
 		} else {
-			if matchPathComponent(normalizedPath, r.literal) {
+			if r.anchored {
+				if normalizedPath == r.literal || strings.HasPrefix(normalizedPath, r.literal+"/") {
+					return true
+				}
+			} else if matchPathComponent(normalizedPath, r.literal) {
 				return true
 			}
 		}
@@ -237,11 +242,13 @@ func globToRegex(glob string) (*regexp.Regexp, error) {
 		c := glob[i]
 		switch {
 		case c == '*' && i+1 < len(glob) && glob[i+1] == '*':
-			// "**/" → ".*" (eats following slash). Bare "**" at end → ".*".
-			sb.WriteString(".*")
+			// **/ consumes whole directories, never a partial component.
 			i += 2
 			if i < len(glob) && glob[i] == '/' {
+				sb.WriteString("(?:.*/)?")
 				i++
+			} else {
+				sb.WriteString(".*")
 			}
 		case c == '*':
 			sb.WriteString("[^/]*")

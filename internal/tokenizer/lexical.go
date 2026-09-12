@@ -36,7 +36,7 @@ func LexicalTerms(code string, lang Language) []string {
 		kw[strings.ToLower(k)] = true
 	}
 
-	s := p.comments.ReplaceAllString(code, " ")
+	s := stripComments(code, p)
 	for _, im := range p.imports {
 		s = im.ReplaceAllString(s, " ")
 	}

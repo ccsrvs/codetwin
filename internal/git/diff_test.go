@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -285,4 +286,115 @@ func initRepoWithCommit(t *testing.T) string {
 		t.Fatalf("git commit: %v (%s)", err, out)
 	}
 	return dir
+}
+
+func TestParseUnifiedDiff_QuotedPaths(t *testing.T) {
+	cases := []struct{ header, path string }{
+		{`"b/caf\303\251.go"`, "café.go"},
+		{`"b/tab\tname.go"`, "tab\tname.go"},
+		{`"b/quote\"name.go"`, "quote\"name.go"},
+		{`"b/back\\slash.go"`, "back\\slash.go"},
+		{"b/space name.go", "space name.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			out := []byte("--- a/old.go\n+++ " + tc.header + "\n@@ -1 +1 @@\n-old\n+new\n")
+			want := DiffMap{tc.path: {{Start: 1, End: 1}}}
+			if got := parseUnifiedDiff(out); !reflect.DeepEqual(got, want) {
+				t.Errorf("diff map = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestChangedSince_UnicodeFilename(t *testing.T) {
+	requireGit(t)
+	dir := initRepoWithCommit(t)
+	name := "café.go"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("a\nb\nc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"config", "core.quotePath", "true"},
+		{"add", "--", name},
+		{"commit", "-q", "-m", "add unicode filename"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	if err := os.WriteFile(path, []byte("a\nb\nc\nd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := repo.ChangedSince("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Touches(repo.Root, path, 4, 4) {
+		t.Errorf("changed line in %q was missed: %#v", name, m)
+	}
+	if m.Touches(repo.Root, path, 1, 3) {
+		t.Error("unchanged lines should not be marked as touched")
+	}
+}
+
+func TestParseUnifiedDiff_ContentResemblingFileHeader(t *testing.T) {
+	out := []byte("diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1 +1 @@\n-old\n+++ b/not-a-file.go\n@@ -3 +3 @@\n-old\n+new\n")
+	want := DiffMap{"foo.go": {{Start: 1, End: 1}, {Start: 3, End: 3}}}
+	if got := parseUnifiedDiff(out); !reflect.DeepEqual(got, want) {
+		t.Fatalf("diff map = %#v, want %#v", got, want)
+	}
+}
+
+func TestChangedSince_IgnoresDisplayPrefixConfig(t *testing.T) {
+	requireGit(t)
+	dir := initRepoWithCommit(t)
+	for _, setting := range []string{"diff.noprefix", "diff.mnemonicprefix"} {
+		t.Run(setting, func(t *testing.T) {
+			if out, err := exec.Command("git", "-C", dir, "config", setting, "true").CombinedOutput(); err != nil {
+				t.Fatalf("config: %v (%s)", err, out)
+			}
+			t.Cleanup(func() { _ = exec.Command("git", "-C", dir, "config", "--unset", setting).Run() })
+			path := filepath.Join(dir, "foo.go")
+			if err := os.WriteFile(path, []byte("a\nb\nc\nd\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			repo, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, err := repo.ChangedSince("HEAD")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !m.Touches(repo.Root, path, 4, 4) {
+				t.Fatalf("changed line missed with %s: %#v", setting, m)
+			}
+		})
+	}
+}
+
+func TestParseUnifiedDiff_LongSourceLineDoesNotHideLaterHunks(t *testing.T) {
+	out := []byte("diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1 +1 @@\n-old\n+" + strings.Repeat("x", 16*1024*1024) + "\n@@ -3 +3 @@\n-old\n+new\n")
+	want := DiffMap{"foo.go": {{Start: 1, End: 1}, {Start: 3, End: 3}}}
+	if got := parseUnifiedDiff(out); !reflect.DeepEqual(got, want) {
+		t.Fatalf("diff map = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiffMap_TouchesDotPrefixedDescendant(t *testing.T) {
+	root := t.TempDir()
+	name := "..generated.go"
+	m := DiffMap{name: {{Start: 1, End: 5}}}
+	if !m.Touches(root, filepath.Join(root, name), 2, 3) {
+		t.Fatal("a filename beginning with two dots is still inside the repository")
+	}
+	if m.Touches(root, filepath.Join(root, "..", name), 2, 3) {
+		t.Fatal("a parent-directory traversal must remain outside the repository")
+	}
 }

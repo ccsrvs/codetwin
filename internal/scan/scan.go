@@ -195,7 +195,7 @@ func ProcessFile(
 				continue
 			}
 			out = append(out, Snippet{
-				Name:       c.Name,
+				Name:       (splitter.Chunk{Path: path, StartLine: c.StartLine, EndLine: c.EndLine, Symbol: c.Symbol}).Name(),
 				Path:       absPath,
 				Symbol:     c.Symbol,
 				Lang:       tokenizer.Language(c.Lang),

@@ -296,3 +296,39 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestIgnoreMatcher_DoubleStarRequiresDirectoryBoundary(t *testing.T) {
+	for _, pattern := range []string{"vendor/*.go", "**/vendor/*.go", "/src/**/vendor/*.go"} {
+		m, err := CompileIgnorePaths([]string{pattern})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{"src/vendor/a.go", "src/deep/vendor/a.go"} {
+			if !m.Match(path, false) {
+				t.Errorf("%q should match %q", pattern, path)
+			}
+		}
+		for _, path := range []string{"src/myvendor/a.go", "src/deep/myvendor/a.go"} {
+			if m.Match(path, false) {
+				t.Errorf("%q must not match %q", pattern, path)
+			}
+		}
+	}
+}
+
+func TestIgnoreMatcher_AnchoredLiteral(t *testing.T) {
+	m, err := CompileIgnorePaths([]string{"/build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"build", true}, {"build/a.go", true}, {"src/build", false}, {"builder", false},
+	} {
+		if got := m.Match(tc.path, true); got != tc.want {
+			t.Errorf("Match(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}

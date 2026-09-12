@@ -189,7 +189,8 @@ func TestMaterializationFloor_IsThresholdAware(t *testing.T) {
 	cases := []struct {
 		threshold, want float64
 	}{
-		{0.0, 0.30},  // degenerate threshold: absolute minimum applies
+		{0.0, 0.0}, // explicitly requested weak pairs must survive
+		{0.20, 0.20},
 		{0.30, 0.30}, // threshold−0.20 = 0.10 < 0.30: clamp
 		{0.50, 0.30}, // CLI default: floor sits exactly at the minimum
 		{0.60, 0.40},
@@ -360,5 +361,39 @@ func TestBuildMatrix_IdenticalShortSnippetsGetStructuralCredit(t *testing.T) {
 	}
 	if matrix[0][1] < 0.9 {
 		t.Errorf("matrix[0][1] = %v, want >= 0.9 for identical short snippets", matrix[0][1])
+	}
+}
+
+func TestBuildMatrix_IncludeWeakPairs_ReachesMinimumFloorButSkipsZeroEvidence(t *testing.T) {
+	// a↔b: identical 4-line snippets dampened to 0.6 (see the floor test
+	// above). c shares no vocabulary with either, so a↔c and b↔c score
+	// exactly 0 — no evidence at all, not a "weak similarity".
+	tokens := []string{"VAR", "=", "VAR", ".", "len", "(", ")", "for", "VAR", "in", "VAR", "VAR", "+=", "VAR"}
+	a := makeSnippet("a/sum.go", "/a.go", tokens)
+	a.NonBlankLn = 4
+	b := makeSnippet("b/sum.go", "/b.go", tokens)
+	b.NonBlankLn = 4
+	c := makeSnippet("c/other.go", "/c.go", seqTokensSim(30, "z"))
+	snips := []scan.Snippet{a, b, c}
+	vectors := vectorsFor(snips)
+
+	// Verbose at a high threshold: the 0.20 band (floor 0.65) is
+	// bypassed down to the 0.30 minimum, so a↔b (0.6) materializes —
+	// but the zero-score pairs never do.
+	_, pairs, _ := BuildMatrix(snips, vectors, 20, 0.85, nil, MatrixOptions{IncludeWeakPairs: true})
+	if len(pairs) != 1 || pairs[0].Score == 0 {
+		t.Fatalf("verbose: expected only the a↔b pair, got %d pairs: %+v", len(pairs), pairs)
+	}
+
+	// threshold 0 is an explicit request for everything with evidence;
+	// pairs with none still stay out of the report.
+	_, pairs, _ = BuildMatrix(snips, vectors, 20, 0, nil)
+	if len(pairs) != 1 {
+		t.Fatalf("threshold 0: expected only the a↔b pair, got %d pairs: %+v", len(pairs), pairs)
+	}
+	for _, p := range pairs {
+		if p.Score == 0 {
+			t.Errorf("zero-score pair materialized: %+v", p)
+		}
 	}
 }

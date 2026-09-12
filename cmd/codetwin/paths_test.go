@@ -129,3 +129,28 @@ func relPaths(files []string, root string) []string {
 	}
 	return out
 }
+
+func TestCollectFiles_AnchoredIgnoreUsesScanRoot(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFiles(t, root, map[string]string{
+		"build/a.go":     "package x\n",
+		"sub/build/b.go": "package x\n",
+		"keep.go":        "package x\n",
+	})
+	for _, pattern := range []string{"/build", "/build/", "/build/**"} {
+		matcher, err := config.CompileIgnorePaths([]string{pattern})
+		if err != nil {
+			t.Fatal(err)
+		}
+		files, _, err := collectFiles([]string{root}, matcher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := relPaths(files, root)
+		sort.Strings(got)
+		want := []string{"keep.go", "sub/build/b.go"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: got %v, want %v", pattern, got, want)
+		}
+	}
+}

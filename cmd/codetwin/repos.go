@@ -78,7 +78,7 @@ func (rm *repoMap) addFile(scanned, root, label string) {
 		return // unresolvable path → no repo assignment; name stays as-is
 	}
 	rel, err := filepath.Rel(root, scanned)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || !filepath.IsLocal(rel) {
 		rel = scanned
 	}
 	rm.byFile[filepath.Clean(abs)] = fileRepo{

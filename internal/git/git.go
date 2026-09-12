@@ -69,7 +69,7 @@ func Open(dir string) (*Repo, error) {
 // with filepath.Abs, which preserves symlinks (e.g. /var). The second
 // return is false when absPath is outside the repo either way.
 func relWithinRoot(root, absPath string) (string, bool) {
-	if rel, err := filepath.Rel(root, absPath); err == nil && !strings.HasPrefix(rel, "..") {
+	if rel, err := filepath.Rel(root, absPath); err == nil && filepath.IsLocal(rel) {
 		return rel, true
 	}
 	resolvedRoot, errRoot := filepath.EvalSymlinks(root)
@@ -78,7 +78,7 @@ func relWithinRoot(root, absPath string) (string, bool) {
 		return "", false
 	}
 	rel, err := filepath.Rel(resolvedRoot, resolvedPath)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || !filepath.IsLocal(rel) {
 		return "", false
 	}
 	return rel, true

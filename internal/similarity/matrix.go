@@ -13,7 +13,7 @@ import (
 )
 
 // materializationFloorMin is the absolute minimum materialization
-// floor, and materializationBand is how far below the user's
+// default floor, and materializationBand is how far below the user's
 // --threshold the floor may reach. See MaterializationFloor.
 const (
 	materializationFloorMin = 0.30
@@ -33,7 +33,7 @@ const (
 const BlockCandidateFloor = 0.20
 
 // MaterializationFloor returns the minimum combined score below which a
-// pair is dropped from the materialized list: max(0.30, threshold−0.20).
+// pair is dropped from the materialized list: min(threshold, max(0.30, threshold−0.20)).
 // The matrix still records the true value for every pair, so DBSCAN
 // clustering is unaffected; the floor only bounds the memory footprint
 // of the returned slice — on an O(n²) scan of a big repo, materializing
@@ -51,7 +51,20 @@ func MaterializationFloor(threshold float64) float64 {
 	if floor < materializationFloorMin {
 		floor = materializationFloorMin
 	}
+	if floor > threshold {
+		floor = threshold
+	}
 	return floor
+}
+
+// MatrixOptions controls which scored pairs are retained for reporting.
+type MatrixOptions struct {
+	// IncludeWeakPairs lowers the materialization floor from
+	// MaterializationFloor(threshold) to the 0.30 minimum (or to the
+	// threshold itself when that is lower) for verbose reports. It does
+	// not change matrix scores or block-candidate selection, and pairs
+	// scoring exactly 0 are never materialized.
+	IncludeWeakPairs bool
 }
 
 // BuildMatrix computes the all-pairs similarity matrix, the
@@ -79,8 +92,17 @@ func BuildMatrix(
 	minConfLines int,
 	threshold float64,
 	onPairDone func(done, total int64),
+	options ...MatrixOptions,
 ) ([][]float64, []report.Pair, [][2]int) {
 	floor := MaterializationFloor(threshold)
+	for _, opt := range options {
+		// Verbose bypasses the threshold-relative band but not the
+		// absolute minimum: a verbose report of a large repo must not
+		// materialize (and print) every one of its n² pairs.
+		if opt.IncludeWeakPairs && floor > materializationFloorMin {
+			floor = materializationFloorMin
+		}
+	}
 	n := len(snippets)
 	matrix := make([][]float64, n)
 	for i := range matrix {
@@ -202,7 +224,10 @@ func BuildMatrix(
 					}
 
 					batchProgress++
-					if combined < floor {
+					// A pair scoring exactly 0 shares no fingerprint and
+					// no vocabulary: it carries no evidence and is never a
+					// "weak similarity", whatever the floor.
+					if combined < floor || combined <= 0 {
 						continue
 					}
 					// Lexical sub-score, computed lazily: only the
