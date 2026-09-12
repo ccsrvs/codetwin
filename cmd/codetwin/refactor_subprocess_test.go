@@ -634,7 +634,7 @@ func TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff(t *testing.T) {
 	fixtureDir := "../../testdata/refactor/elixir/realworld-genserver"
 
 	jsonOut, err := exec.Command(bin,
-		"--threshold", "0.0",
+		"--threshold", "0.0", "--min-lines", "3",
 		"--no-cache", "--no-progress",
 		"--json", fixtureDir,
 	).Output()
@@ -667,7 +667,7 @@ func TestSuggest_ElixirRealworldGenServer_ExitsZeroAndPrintsDiff(t *testing.T) {
 	}
 
 	cmd := exec.Command(bin,
-		"--no-cache", "--no-progress",
+		"--min-lines", "3", "--no-cache", "--no-progress",
 		"--suggest", pairID, fixtureDir,
 	)
 	var stderr strings.Builder
@@ -831,7 +831,7 @@ func TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec(t *testing
 	fixtureDir := "../../testdata/refactor/elixir/realworld-spec"
 
 	jsonOut, err := exec.Command(bin,
-		"--threshold", "0.0",
+		"--threshold", "0.0", "--min-lines", "3",
 		"--no-cache", "--no-progress",
 		"--json", fixtureDir,
 	).Output()
@@ -860,7 +860,7 @@ func TestSuggest_ElixirMultiClauseSpec_PrintsAllClausesAndRenamedSpec(t *testing
 	}
 
 	cmd := exec.Command(bin,
-		"--no-cache", "--no-progress",
+		"--min-lines", "3", "--no-cache", "--no-progress",
 		"--suggest", pairID, fixtureDir,
 	)
 	var stderr strings.Builder

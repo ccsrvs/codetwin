@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +75,7 @@ func TestWeakPairs_ZeroScorePairsNeverReported(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteFiles(t, dir, zeroEvidenceFixture)
 	for _, flags := range [][]string{{"--threshold", "0"}, {"--threshold", "0.95", "--verbose"}, {"--verbose"}} {
+		flags = append(flags, "--min-lines", "3") // admit the 3-line fixture
 		if scores := pairScores(t, bin, flags, dir); len(scores) != 0 {
 			t.Errorf("%v: reported %v for a pair with no shared evidence", flags, scores)
 		}
@@ -84,7 +86,7 @@ func TestSimilarity_SingleFileWithTwoFunctions(t *testing.T) {
 	bin := subprocessBin(t)
 	dir := t.TempDir()
 	mustWriteFiles(t, dir, map[string]string{
-		"a.go": "package p\nfunc first() {\n println(1)\n println(2)\n}\nfunc second() {\n println(1)\n println(2)\n}\n",
+		"a.go": "package p\nfunc first() {\n println(1)\n println(2)\n println(3)\n}\nfunc second() {\n println(1)\n println(2)\n println(3)\n}\n",
 	})
 	out, err := exec.Command(bin, "--json", "--no-cache", "--no-progress", dir).CombinedOutput()
 	if err != nil {
@@ -98,5 +100,40 @@ func TestSimilarity_SingleFileWithTwoFunctions(t *testing.T) {
 	}
 	if len(doc.Pairs) != 1 {
 		t.Fatalf("got %d pairs, want one same-file clone\n%s", len(doc.Pairs), out)
+	}
+}
+
+func TestIgnoreFlag_SkipsMatchingPaths(t *testing.T) {
+	bin := subprocessBin(t)
+	dir := t.TempDir()
+	files := map[string]string{}
+	for _, name := range []string{"a.go", "b.go", "c.go"} {
+		files[name] = weakPairFixture[name]
+	}
+	files["gen/a.go"] = weakPairFixture["a.go"]
+	files["gen/c.go"] = weakPairFixture["c.go"]
+	mustWriteFiles(t, dir, files)
+
+	out, err := exec.Command(bin, "--json", "--no-cache", "--no-progress", "--threshold", "0",
+		"--ignore", "gen", "--ignore", "b.go", dir).Output()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	var doc struct {
+		Pairs []struct {
+			FileA string `json:"file_a"`
+			FileB string `json:"file_b"`
+		} `json:"pairs"`
+	}
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Pairs) != 1 {
+		t.Fatalf("got %d pairs, want only a.go↔c.go\n%s", len(doc.Pairs), out)
+	}
+	for _, name := range []string{doc.Pairs[0].FileA, doc.Pairs[0].FileB} {
+		if strings.Contains(name, "gen/") || strings.Contains(name, "b.go") {
+			t.Errorf("--ignore did not exclude %s", name)
+		}
 	}
 }

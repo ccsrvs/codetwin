@@ -116,7 +116,12 @@ func runUpdate(check, force bool) error {
 		return err
 	}
 	current := buildVersion
-	available := current != latest
+	// A local build has no release to compare against, so any release
+	// counts; a release build only wants a strictly newer tag.
+	available := latest != current
+	if !strings.HasPrefix(current, "dev") {
+		available = newerRelease(latest, current)
+	}
 
 	if check {
 		if available {
@@ -151,6 +156,12 @@ func runUpdate(check, force bool) error {
 		return fmt.Errorf("could not replace %s (permission denied?): %w", exe, err)
 	}
 	fmt.Printf("Updated %s\n  %s → %s\n", exe, current, latest)
+	// Refresh the notifier's cache so the next run compares against the
+	// release just installed rather than whatever the daily check saw.
+	statePath := updateStatePath()
+	st := readUpdateState(statePath)
+	st.LatestVersion = latest
+	writeUpdateState(statePath, st)
 	return nil
 }
 

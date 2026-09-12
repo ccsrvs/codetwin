@@ -78,7 +78,7 @@ func overlaps(gotStart, gotEnd int, want lineRange) bool {
 func TestBlockClones_GroundTruth(t *testing.T) {
 	for _, c := range blockCases {
 		t.Run(c.name, func(t *testing.T) {
-			a, b := caseSnippets(t, blockCaseDir(c))
+			a, b := caseSnippets(t, blockCaseDir(c), minLines)
 			var matches []blocks.Match
 			for _, sa := range a {
 				for _, sb := range b {
@@ -126,7 +126,7 @@ func TestBlockClones_FixturesAreInvisibleAtFunctionLevel(t *testing.T) {
 	var all []loadedBlockCase
 	var streams [][]string
 	for _, c := range blockCases {
-		a, b := caseSnippets(t, blockCaseDir(c))
+		a, b := caseSnippets(t, blockCaseDir(c), minLines)
 		all = append(all, loadedBlockCase{c, a, b})
 		for _, s := range append(append([]scan.Snippet{}, a...), b...) {
 			streams = append(streams, s.Tokens)
