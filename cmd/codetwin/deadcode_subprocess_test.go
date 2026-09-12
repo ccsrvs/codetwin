@@ -10,6 +10,7 @@ package main
 import (
 	"encoding/json"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -128,5 +129,45 @@ func TestDeadCode_RejectsFileGranularity(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "--dead-code requires --granularity function") {
 		t.Errorf("expected the granularity error message, got:\n%s", out)
+	}
+}
+
+func TestDeadCode_SmallCorpusAndReferenceOnlyFiles(t *testing.T) {
+	bin := subprocessBin(t)
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  []string
+	}{
+		{"single definition", map[string]string{"a.go": "package p\nfunc lonely() {\n println(1)\n}\n"}, []string{"lonely"}},
+		{"short reference file", map[string]string{
+			"a.go":        "package p\nfunc liveHelper() {\n println(1)\n}\nfunc deadHelper() {\n println(2)\n}\n",
+			"registry.go": "package p\nvar hook = liveHelper\n",
+		}, []string{"deadHelper"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteFiles(t, dir, tc.files)
+			out, err := exec.Command(bin, "--dead-code", "--json", "--no-cache", "--no-progress", dir).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, out)
+			}
+			var doc struct {
+				DeadSymbols []struct {
+					Symbol string `json:"symbol"`
+				} `json:"dead_symbols"`
+			}
+			if err := json.Unmarshal(out, &doc); err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, d := range doc.DeadSymbols {
+				got = append(got, d.Symbol)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("dead symbols = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

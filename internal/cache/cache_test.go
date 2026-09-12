@@ -244,11 +244,11 @@ func TestSchemaTag_DistinctPerComponent(t *testing.T) {
 	}
 }
 
-func TestPatternsHash_OrderInsensitive(t *testing.T) {
+func TestPatternsHash_OrderSensitive(t *testing.T) {
 	a := PatternsHash([]string{"^log\\.", "^debug\\."})
 	b := PatternsHash([]string{"^debug\\.", "^log\\."})
-	if a != b {
-		t.Errorf("PatternsHash should be order-insensitive: %q vs %q", a, b)
+	if a == b {
+		t.Errorf("PatternsHash should be order-sensitive: %q vs %q", a, b)
 	}
 }
 

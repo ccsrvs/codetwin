@@ -13,6 +13,7 @@ package deadcode
 
 import (
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
@@ -65,14 +66,23 @@ type defSite struct {
 // Analyze runs name-based reachability over the scanned snippets. Files
 // are re-read from disk so references in code outside any chunk (package
 // var initializers, top-level registration calls) still count. Returns
-// findings sorted by path then line, plus per-file read warnings.
-func Analyze(snippets []scan.Snippet) ([]Finding, []string) {
+// findings sorted by path then line, plus per-file read warnings. Optional
+// files extend the reference corpus to files that yielded no eligible snippets.
+func Analyze(snippets []scan.Snippet, files ...string) ([]Finding, []string) {
 	// Definition index: symbol -> sites, and (path, symbol) -> spans for
 	// self-reference exclusion.
 	defs := map[string][]defSite{}
 	selfSpans := map[string]map[string][]span{} // path -> symbol -> spans
 	fileLang := map[string]tokenizer.Language{}
 	fileIsTest := map[string]bool{}
+	for _, file := range files {
+		abs, err := filepath.Abs(file)
+		if err != nil {
+			continue
+		}
+		fileLang[abs] = tokenizer.Detect(file, "")
+		fileIsTest[abs] = scan.IsTestFile(file)
+	}
 	for i := range snippets {
 		s := &snippets[i]
 		fileLang[s.Path] = s.Lang

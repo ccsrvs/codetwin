@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
@@ -244,20 +243,20 @@ func HashContent(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// PatternsHash returns a stable hex hash for a slice of regex pattern
-// strings. Order-insensitive (sorted before hashing) so reordering the
-// same patterns doesn't invalidate the cache.
+// PatternsHash hashes regex patterns in application order. Overlapping
+// patterns can produce different tokens when reordered, so order must be
+// part of the cache key. Length prefixes keep pattern boundaries unambiguous.
 func PatternsHash(patterns []string) string {
 	if len(patterns) == 0 {
 		return ""
 	}
-	sorted := make([]string, len(patterns))
-	copy(sorted, patterns)
-	sort.Strings(sorted)
 	h := sha256.New()
-	for _, p := range sorted {
+	// Separate these keys from the legacy order-insensitive hash, which
+	// may describe tokens produced under a different application order.
+	h.Write([]byte("ordered-patterns-v1:"))
+	for _, p := range patterns {
+		fmt.Fprintf(h, "%d:", len(p))
 		h.Write([]byte(p))
-		h.Write([]byte{0}) // separator so "ab" + "c" != "a" + "bc"
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

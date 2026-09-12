@@ -15,7 +15,7 @@ import (
 // the token stream produced for unchanged source. It is folded into
 // cache.SchemaTag so any bump auto-invalidates cached tokenization —
 // no manual cache.Version bump required.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Language represents a supported source language.
 type Language string
@@ -32,8 +32,9 @@ const (
 
 // langPatterns holds the regexes needed to normalize a given language.
 type langPatterns struct {
-	keywords []string
-	comments *regexp.Regexp
+	keywords          []string
+	comments          *regexp.Regexp
+	stringsOrComments *regexp.Regexp
 	// imports is applied AFTER comments and BEFORE strings/numbers — it strips
 	// import/use/alias statements that would otherwise dominate similarity
 	// scores for short modules. Each regex in the slice is applied in order;
@@ -103,7 +104,9 @@ var patterns = map[Language]*langPatterns{
 			regexp.MustCompile(`(?m)^[ \t]*import(?:\s+static)?\s+[\w.\*]+\s*;`),
 			regexp.MustCompile(`(?m)^[ \t]*package\s+[\w.]+\s*;`),
 		},
-		strings: regexp.MustCompile(`"(?:[^"\\]|\\.)*"`),
+		// Char literals are listed alongside strings so a quote inside one
+		// ('"', '\'') cannot open a string region in stripComments.
+		strings: regexp.MustCompile(`"(?:[^"\\]|\\.)*"|'(?:[^'\\\n]|\\u[0-9a-fA-F]{4}|\\[0-7]{1,3}|\\.)'`),
 		numbers: regexp.MustCompile(`\b\d+(\.\d+)?[fFdDlL]?\b`),
 	},
 	Go: {
@@ -122,7 +125,9 @@ var patterns = map[Language]*langPatterns{
 			regexp.MustCompile(`(?m)^[ \t]*import\s+(?:[\w.]+\s+)?["][^"]+["]`),
 			regexp.MustCompile("(?m)^[ \t]*package\\s+\\w+"),
 		},
-		strings: regexp.MustCompile("`[^`]*`|\"(?:[^\"\\\\]|\\\\.)*\""),
+		// Rune literals are listed alongside strings so a quote inside one
+		// ('"', '\'') cannot open a string region in stripComments.
+		strings: regexp.MustCompile("`[^`]*`|\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\\n]|\\\\[0-7]{3}|\\\\x[0-9a-fA-F]{2}|\\\\u[0-9a-fA-F]{4}|\\\\U[0-9a-fA-F]{8}|\\\\.)'"),
 		numbers: regexp.MustCompile(`\b\d+(\.\d+)?\b`),
 	},
 	Rust: {
@@ -139,7 +144,10 @@ var patterns = map[Language]*langPatterns{
 			regexp.MustCompile(`(?m)^[ \t]*(?:pub\s+)?use\s+[^;]+;`),
 			regexp.MustCompile(`(?m)^[ \t]*extern\s+crate\s+[^;]+;`),
 		},
-		strings: regexp.MustCompile(`r#*"[\s\S]*?"#*|"(?:[^"\\]|\\.)*"`),
+		// Char literals hold exactly one (possibly escaped) character, which
+		// keeps lifetimes ('a) out of the match while a quote inside one
+		// ('"', '\'') cannot open a string region in stripComments.
+		strings: regexp.MustCompile(`r#*"[\s\S]*?"#*|"(?:[^"\\]|\\.)*"|'(?:[^'\\\n]|\\x[0-9a-fA-F]{2}|\\u\{[0-9a-fA-F]+\}|\\.)'`),
 		numbers: regexp.MustCompile(`\b\d+(\.\d+)?(_\w+)?\b`),
 	},
 	Elixir: {
@@ -163,6 +171,31 @@ var patterns = map[Language]*langPatterns{
 		strings: regexp.MustCompile(`~[a-zA-Z]?\[[\s\S]*?\]|~[a-zA-Z]?"[\s\S]*?"|"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'`),
 		numbers: regexp.MustCompile(`\b\d[\d_]*(\.\d[\d_]*)?\b`),
 	},
+}
+
+func init() {
+	for _, p := range patterns {
+		// The leftmost literal or comment wins. A quote inside a comment
+		// and a comment marker inside a literal must not start a new region.
+		p.stringsOrComments = regexp.MustCompile("(" + p.strings.String() + ")|(?:" + p.comments.String() + ")")
+	}
+}
+
+// stripComments preserves literals verbatim and keeps source line numbers.
+func stripComments(code string, p *langPatterns) string {
+	var b strings.Builder
+	last := 0
+	for _, loc := range p.stringsOrComments.FindAllStringSubmatchIndex(code, -1) {
+		if loc[2] >= 0 {
+			continue
+		} // string literal
+		b.WriteString(code[last:loc[0]])
+		b.WriteByte(' ')
+		b.WriteString(strings.Repeat("\n", strings.Count(code[loc[0]:loc[1]], "\n")))
+		last = loc[1]
+	}
+	b.WriteString(code[last:])
+	return b.String()
 }
 
 // Detect infers the language from file extension or code heuristics.
@@ -220,7 +253,7 @@ func Normalize(code string, lang Language) string {
 	s := code
 
 	// 1. Strip comments
-	s = p.comments.ReplaceAllString(s, " ")
+	s = stripComments(s, p)
 
 	// 1b. Strip import / use / package statements (language-specific). Order
 	// matters within the slice — list multi-line patterns first so they consume
@@ -358,7 +391,7 @@ func TokenizeWithLines(code string, lang Language, opts ...Option) ([]string, []
 // patterns target language-stripped code and run before the canonical
 // import/string passes.
 func preprocessKeepLines(code string, p *langPatterns, userStrip []*regexp.Regexp) string {
-	s := replacePreservingNewlines(code, p.comments, " ")
+	s := stripComments(code, p)
 	for _, re := range userStrip {
 		s = replacePreservingNewlines(s, re, " ")
 	}

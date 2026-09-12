@@ -24,7 +24,7 @@ func References(code string, lang Language) []Ref {
 	if !ok {
 		p = patterns[JavaScript] // same fallback as Normalize
 	}
-	stripped := replacePreservingNewlines(code, p.comments, " ")
+	stripped := stripComments(code, p)
 
 	var refs []Ref
 	line := 1

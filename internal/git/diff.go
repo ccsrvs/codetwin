@@ -1,8 +1,6 @@
 package git
 
 import (
-	"bufio"
-	"bytes"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -29,7 +27,7 @@ type DiffMap map[string][]LineRange
 // snippet. Renames are reported under their new path because git's
 // post-image header uses the new name.
 func (r *Repo) ChangedSince(ref string) (DiffMap, error) {
-	out, err := r.run("diff", "--unified=0", "--no-color", "--no-ext-diff", ref, "--")
+	out, err := r.run("diff", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", ref, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -65,21 +63,34 @@ func (m DiffMap) Touches(repoRoot, absPath string, start, end int) bool {
 func parseUnifiedDiff(out []byte) DiffMap {
 	m := DiffMap{}
 	var currentPath string
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	// Diff hunks can carry long lines (minified bundles, generated
-	// code); bump the scanner buffer so we don't error out on them.
-	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
+	inHunk := false
+	// The output is already in memory. Iterate without a scanner token
+	// limit so a long generated line cannot silently hide later changes.
+	for line := range strings.SplitSeq(string(out), "\n") {
 		switch {
-		case strings.HasPrefix(line, "+++ "):
+		case strings.HasPrefix(line, "diff --git "):
+			currentPath = ""
+			inHunk = false
+		case !inHunk && strings.HasPrefix(line, "+++ "):
 			p := strings.TrimPrefix(line, "+++ ")
+			// Git quotes paths containing special bytes, including octal
+			// escapes for UTF-8 when core.quotePath is enabled. Decode
+			// before stripping b/ so lookups use the actual filename.
+			if strings.HasPrefix(p, `"`) {
+				decoded, err := strconv.Unquote(p)
+				if err != nil {
+					currentPath = ""
+					continue
+				}
+				p = decoded
+			}
 			if p == "/dev/null" {
 				currentPath = ""
 				continue
 			}
 			currentPath = stripDiffPrefix(p)
 		case strings.HasPrefix(line, "@@ ") && currentPath != "":
+			inHunk = true
 			if lr, ok := parseHunkHeader(line); ok {
 				m[currentPath] = append(m[currentPath], lr)
 			}

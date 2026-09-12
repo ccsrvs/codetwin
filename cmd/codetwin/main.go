@@ -252,8 +252,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if len(files) < 2 {
-		fmt.Fprintln(os.Stderr, "error: need at least 2 source files to compare")
+	if len(files) == 0 {
+		fmt.Fprintln(os.Stderr, "error: need at least 1 source file to scan")
 		os.Exit(1)
 	}
 
@@ -356,7 +356,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 
-	if len(snippets) < 2 {
+	if len(snippets) < 2 && !*deadCode {
 		fmt.Fprintln(os.Stderr, "error: not enough parseable snippets to compare")
 		os.Exit(1)
 	}
@@ -367,7 +367,7 @@ func main() {
 	// against every scanned file.
 	var deadSymbols []report.DeadSymbol
 	if *deadCode {
-		deadFindings, deadWarnings := deadcode.Analyze(snippets)
+		deadFindings, deadWarnings := deadcode.Analyze(snippets, files...)
 		for _, w := range deadWarnings {
 			fmt.Fprintln(os.Stderr, "warning:", w)
 		}
@@ -430,13 +430,14 @@ func main() {
 	matrix, pairs, blockCands := similarity.BuildMatrix(
 		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
+		similarity.MatrixOptions{IncludeWeakPairs: *verbose},
 	)
 	if matrixProgStop != nil {
 		close(matrixProgStop)
 		matrixProgWg.Wait()
 	}
-	debugf("similarity.BuildMatrix: %d pairs above materialization floor (%.2f), %d block candidates in gray band",
-		len(pairs), similarity.MaterializationFloor(*threshold), len(blockCands))
+	debugf("similarity.BuildMatrix: %d materialized pairs, %d block candidates in gray band",
+		len(pairs), len(blockCands))
 
 	// Tag each pair endpoint with its snippet's test-file classification
 	// so report.Prepare can segregate test↔test findings by default.
@@ -550,7 +551,8 @@ func main() {
 	// the user can target a sub-threshold pair without having to
 	// re-tune --threshold. Materialization reaches down to
 	// similarity.MaterializationFloor(threshold) — a 0.20 band below
-	// the threshold (never below 0.30). Partial-clone block IDs are
+	// the threshold (normally floored at 0.30, capped by threshold;
+	// --verbose reaches down to that 0.30 minimum). Partial-clone block IDs are
 	// searched too (all detected blocks, not just visible ones); pairs
 	// win the 1-in-4-billion ID collision.
 	if *suggest != "" {
@@ -1157,7 +1159,13 @@ func collectFiles(paths []string, ignore *config.IgnoreMatcher) ([]string, *repo
 				if d.IsDir() && path != p && strings.HasPrefix(d.Name(), ".") {
 					return filepath.SkipDir
 				}
-				if ignore.Match(path, d.IsDir()) {
+				// Ignore patterns are relative to the scan root, including
+				// when the user supplied that root as an absolute path.
+				rel, err := filepath.Rel(p, path)
+				if err != nil {
+					return err
+				}
+				if ignore.Match(rel, d.IsDir()) {
 					if d.IsDir() {
 						return filepath.SkipDir
 					}

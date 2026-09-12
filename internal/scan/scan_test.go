@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/cache"
+	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
@@ -318,5 +319,52 @@ func TestProcessFiles_GivenEmptyFileList_When_Process_Then_ReturnsNothing(t *tes
 	}
 	if warnings != nil {
 		t.Errorf("expected nil warnings, got %v", warnings)
+	}
+}
+
+func TestProcessFile_CacheUsesCurrentPathSpelling(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	writeFile(t, dir, "sum.js", multiFuncJS)
+	for _, granularity := range []Granularity{GranularityFunction, GranularityFile} {
+		t.Run(string(granularity), func(t *testing.T) {
+			state := cache.New()
+			ProcessFile(filepath.Join(dir, "sum.js"), 1, nil, state, "", granularity)
+			warm, warning := ProcessFile("sum.js", 1, nil, state, "", granularity)
+			if warning != "" {
+				t.Fatal(warning)
+			}
+			cold, warning := ProcessFile("sum.js", 1, nil, nil, "", granularity)
+			if warning != "" {
+				t.Fatal(warning)
+			}
+			if !reflect.DeepEqual(warm, cold) {
+				t.Fatalf("cached name = %q, uncached name = %q", warm[0].Name, cold[0].Name)
+			}
+		})
+	}
+}
+
+func TestProcessFile_CacheRespectsPatternOrder(t *testing.T) {
+	path := writeFile(t, t.TempDir(), "sample.js", "function sample() { return value; }\n")
+	state := cache.New()
+	orders := [][]string{{"return", "return value"}, {"return value", "return"}}
+	for _, order := range orders {
+		patterns, err := config.CompileIgnorePatterns(order)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := cache.PatternsHash(order)
+		warm, warning := ProcessFile(path, 1, patterns, state, hash, GranularityFunction)
+		if warning != "" {
+			t.Fatal(warning)
+		}
+		cold, warning := ProcessFile(path, 1, patterns, nil, hash, GranularityFunction)
+		if warning != "" {
+			t.Fatal(warning)
+		}
+		if !reflect.DeepEqual(warm, cold) {
+			t.Fatalf("patterns %v: cached tokens = %v, uncached tokens = %v", order, warm[0].Tokens, cold[0].Tokens)
+		}
 	}
 }

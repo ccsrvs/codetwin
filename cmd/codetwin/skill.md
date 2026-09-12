@@ -680,7 +680,7 @@ codetwin --preview testdata/sum_a.js testdata/sum_b.js
 
 | Symptom | Fix |
 |---|---|
-| `need at least 2 source files to compare` | Target has < 2 files with supported extensions |
+| `need at least 1 source file to scan` | Target has no files with supported extensions |
 | `not enough parseable snippets to compare` | Files were found but yielded < 2 chunks — check `--min-lines` and `ignore_paths` |
 | All scores near 0% | Files may be too short — lower `--min-lines` |
 | No clusters formed | Raise `--eps` (e.g. `--eps 0.45` links pairs ≥ 0.55) — looser linking admits weaker pairs |

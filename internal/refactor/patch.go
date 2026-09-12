@@ -77,7 +77,7 @@ func buildPatchFromFile(pathA string, s Suggestion, build func(fileContent strin
 func buildInsertAfterPatch(pathA, fileContent, helperSrc string, afterLine int) string {
 	trimmed := strings.TrimSuffix(fileContent, "\n")
 	var fileLines []string
-	if trimmed != "" {
+	if fileContent != "" {
 		fileLines = strings.Split(trimmed, "\n")
 	}
 	if afterLine >= len(fileLines) {
@@ -132,10 +132,11 @@ func buildInsertAfterPatch(pathA, fileContent, helperSrc string, afterLine int) 
 	if trailingBlank {
 		b.WriteString("+\n")
 	}
-	for _, l := range postCtx {
-		b.WriteString(" ")
-		b.WriteString(l)
-		b.WriteString("\n")
+	for i, l := range postCtx {
+		fmt.Fprintf(&b, " %s\n", l)
+		if afterLine+i == len(fileLines)-1 && !strings.HasSuffix(fileContent, "\n") {
+			b.WriteString("\\ No newline at end of file\n")
+		}
 	}
 	return b.String()
 }
@@ -154,7 +155,7 @@ func buildInsertAfterPatch(pathA, fileContent, helperSrc string, afterLine int) 
 func buildAppendPatch(pathA, fileContent, helperSrc string) string {
 	trimmed := strings.TrimSuffix(fileContent, "\n")
 	var fileLines []string
-	if trimmed != "" {
+	if fileContent != "" {
 		fileLines = strings.Split(trimmed, "\n")
 	}
 	originalLineCount := len(fileLines)
@@ -215,10 +216,13 @@ func buildAppendPatch(pathA, fileContent, helperSrc string) string {
 		}
 		b.WriteString(" \n") // trailing blank line preserved
 	} else {
-		for _, l := range ctxLines {
-			b.WriteString(" ")
-			b.WriteString(l)
-			b.WriteString("\n")
+		for i, l := range ctxLines {
+			if i == len(ctxLines)-1 && !strings.HasSuffix(fileContent, "\n") {
+				// Appending terminates the old last line before adding the helper.
+				fmt.Fprintf(&b, "-%s\n\\ No newline at end of file\n+%s\n", l, l)
+			} else {
+				fmt.Fprintf(&b, " %s\n", l)
+			}
 		}
 		b.WriteString("+\n") // blank separator before the helper
 		for _, l := range helperLines {
@@ -271,7 +275,7 @@ func buildPlacedPatch(pathA, fileContent string, s Suggestion) string {
 func buildInsertBeforePatch(pathA, fileContent, helperSrc string, insertBefore int) string {
 	trimmed := strings.TrimSuffix(fileContent, "\n")
 	var fileLines []string
-	if trimmed != "" {
+	if fileContent != "" {
 		fileLines = strings.Split(trimmed, "\n")
 	}
 	if insertBefore < 1 {
@@ -321,10 +325,11 @@ func buildInsertBeforePatch(pathA, fileContent, helperSrc string, insertBefore i
 		b.WriteString(l)
 		b.WriteString("\n")
 	}
-	for _, l := range trail {
-		b.WriteString(" ")
-		b.WriteString(l)
-		b.WriteString("\n")
+	for i, l := range trail {
+		fmt.Fprintf(&b, " %s\n", l)
+		if insIdx+i == len(fileLines)-1 && !strings.HasSuffix(fileContent, "\n") {
+			b.WriteString("\\ No newline at end of file\n")
+		}
 	}
 	return b.String()
 }

@@ -780,3 +780,41 @@ func TestBuildPatch_ElixirRealworldSpec_AppliesClean(t *testing.T) {
 		}
 	}
 }
+
+func TestPatchBuilders_PreserveFileEndings(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	for _, tc := range []struct {
+		name, source, want string
+		build              func(string, string, string) string
+	}{
+		{"append without newline", "original", "original\n\nhelper\n", buildAppendPatch},
+		{"append empty file", "", "\nhelper\n", buildAppendPatch},
+		{"append blank file", "\n", "helper\n\n", buildAppendPatch},
+		{"insert after without newline", "first\nlast", "first\n\nhelper\n\nlast", func(p, s, h string) string { return buildInsertAfterPatch(p, s, h, 1) }},
+		{"insert before without newline", "first\nlast", "first\n\nhelper\nlast", func(p, s, h string) string { return buildInsertBeforePatch(p, s, h, 2) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "a.py")
+			if err := os.WriteFile(path, []byte(tc.source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			diff := tc.build("a.py", tc.source, "helper\n")
+			cmd := exec.Command("git", "apply", "-")
+			cmd.Dir = dir
+			cmd.Stdin = strings.NewReader(diff)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git apply: %v\n%s\n%s", err, out, diff)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("patched = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

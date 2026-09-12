@@ -112,3 +112,35 @@ func TestDedupe_EmptyInput(t *testing.T) {
 		t.Errorf("expected empty output, got %v", out)
 	}
 }
+
+func TestContains_FilesystemRoot(t *testing.T) {
+	abs, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.VolumeName(abs) + string(filepath.Separator)
+	for _, child := range []string{root, filepath.Join(root, "src"), filepath.Join(root, "src", "file.go")} {
+		want := child != root
+		if got := Contains(root, child); got != want {
+			t.Errorf("Contains(%q, %q) = %v, want %v", root, child, got, want)
+		}
+	}
+}
+
+func TestDedupe_FilesystemRoot(t *testing.T) {
+	abs, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.VolumeName(abs) + string(filepath.Separator)
+	child := filepath.Join(root, "src", "file.go")
+	for _, paths := range [][]string{{root, child}, {child, root}} {
+		got, err := Dedupe(paths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{root}; !reflect.DeepEqual(got, want) {
+			t.Errorf("Dedupe(%v) = %v, want %v", paths, got, want)
+		}
+	}
+}
