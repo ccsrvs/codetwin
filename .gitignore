@@ -7,6 +7,8 @@
 /codetwin
 /codetwin.exe
 coverage.html
+coverage.txt
+benchmark.txt
 post_run.log
 .envrc
 .codetwin-cache.bin
