@@ -448,10 +448,16 @@ func main() {
 		matrixProgWg.Add(1)
 		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
+	var candidatePairs int64
 	graph, pairs, blockCands := similarity.BuildGraph(
 		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
-		similarity.MatrixOptions{IncludeWeakPairs: *verbose},
+		similarity.MatrixOptions{
+			IncludeWeakPairs: *verbose,
+			OnCandidates: func(selected, _ int64) {
+				candidatePairs = selected
+			},
+		},
 	)
 	if matrixProgStop != nil {
 		close(matrixProgStop)
@@ -459,6 +465,12 @@ func main() {
 	}
 	debugf("similarity.BuildGraph: %d materialized pairs, %d block candidates in gray band",
 		len(pairs), len(blockCands))
+	if totalPairs > 0 {
+		debugf("candidate retrieval: %d/%d pairs selected (%.1f%% pruned)",
+			candidatePairs, totalPairs, 100*(1-float64(candidatePairs)/float64(totalPairs)))
+	} else {
+		debugf("candidate retrieval: 0/0 pairs selected")
+	}
 
 	// Tag each pair endpoint with its snippet's test-file classification
 	// so report.Prepare can segregate test↔test findings by default.

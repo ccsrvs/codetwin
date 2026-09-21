@@ -884,9 +884,14 @@ positions so the renderer can highlight which lines actually matched.
 Builds TF-IDF weighted token vectors across the full corpus and computes
 cosine similarity. This is the **semantic score** — it catches functionally
 similar code even when structure differs (e.g. a Python loop vs a Go loop
-with different control flow patterns). Combined nonzero scores are stored as
-edges in a sparse graph; an absent edge has score zero. The legacy
-`BuildMatrix` API remains as a dense compatibility wrapper.
+with different control flow patterns). Candidate retrieval unions shared
+Winnowing fingerprints with a deterministic inverted index over each
+snippet's 16 highest-weight TF-IDF terms, then computes the exact structural,
+cosine, and combined scores for every selected pair. The bounded semantic
+index is approximate only at retrieval; final scores are never approximate.
+Combined nonzero scores are stored as edges in a sparse graph, where an absent
+edge has score zero. The legacy `BuildMatrix` API remains an exhaustive dense
+compatibility wrapper and regression oracle.
 
 **Blocks** (`internal/blocks`)
 The sub-function partial-clone detector behind `--min-block-lines`.
