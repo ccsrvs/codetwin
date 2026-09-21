@@ -10,19 +10,16 @@ package main
 import (
 	"math"
 	"testing"
+
+	"github.com/ccsrvs/codetwin/internal/similarity"
 )
 
 // symMatrix builds an n×n symmetric similarity matrix from upper-triangle
 // entries; the diagonal is 1.0 and unspecified entries are 0.
-func symMatrix(n int, entries map[[2]int]float64) [][]float64 {
-	m := make([][]float64, n)
-	for i := range m {
-		m[i] = make([]float64, n)
-		m[i][i] = 1.0
-	}
+func symMatrix(n int, entries map[[2]int]float64) *similarity.DenseGraph {
+	m := similarity.NewDenseGraph(n)
 	for k, v := range entries {
-		m[k[0]][k[1]] = v
-		m[k[1]][k[0]] = v
+		m.SetScore(k[0], k[1], v)
 	}
 	return m
 }

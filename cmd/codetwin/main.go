@@ -449,7 +449,7 @@ func main() {
 		matrixProgWg.Add(1)
 		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
-	matrix, pairs, blockCands := similarity.BuildMatrix(
+	graph, pairs, blockCands := similarity.BuildGraph(
 		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
 		similarity.MatrixOptions{IncludeWeakPairs: *verbose},
@@ -468,7 +468,7 @@ func main() {
 
 	if pairIgnoreMatcher != nil {
 		var ignored int
-		pairs, ignored = applyPairIgnores(pairs, matrix, snippets, pairIgnoreMatcher)
+		pairs, ignored = applyPairIgnores(pairs, graph, snippets, pairIgnoreMatcher)
 		debugf("ignore_pairs: dropped %d pairs", ignored)
 	}
 
@@ -496,7 +496,7 @@ func main() {
 		debugf("--blame: provenance attached to %d snippets", len(provs))
 	}
 
-	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
+	distFn := func(i, j int) float64 { return 1.0 - graph.Score(i, j) }
 	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
 	debugf("DBSCAN: %d clusters", clusterResult.NumClusters)
 	groups := cluster.Groups(clusterResult)
@@ -515,7 +515,7 @@ func main() {
 			snippetRepos[i] = s.Repo
 		}
 	}
-	clusters := buildReportClusters(groups, matrix, snippetNames, snippetRepos, *threshold)
+	clusters := buildReportClusters(groups, graph, snippetNames, snippetRepos, *threshold)
 	markTestOnlyClusters(clusters, snippets)
 	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
@@ -699,10 +699,10 @@ func buildPreviews(
 // ── Cluster building ──────────────────────────────────────────────────────────
 
 // clusterStats returns the average and minimum internal pair score over
-// all distinct member pairs, read from the similarity matrix. Groups
+// all distinct member pairs, read from the similarity graph. Groups
 // with fewer than two members (which DBSCAN won't produce, but guard
 // anyway) yield (0, 0).
-func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
+func clusterStats(members []int, graph similarity.Graph) (avg, min float64) {
 	if len(members) < 2 {
 		return 0, 0
 	}
@@ -711,7 +711,7 @@ func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
 	min = 1.0
 	for k := 0; k < len(members); k++ {
 		for l := k + 1; l < len(members); l++ {
-			s := matrix[members[k]][members[l]]
+			s := graph.Score(members[k], members[l])
 			sum += s
 			if s < min {
 				min = s
@@ -724,7 +724,7 @@ func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
 
 // buildReportClusters converts DBSCAN member groups into report.Clusters
 // carrying both the average internal pair score (Score) and the minimum
-// (MinScore, "cohesion"), computed from the in-memory similarity matrix.
+// (MinScore, "cohesion"), computed from the in-memory similarity graph.
 //
 // DBSCAN links transitively: with eps 0.35 any chain of pairs scoring
 // ≥ 0.65 merges into one cluster even when its endpoints barely resemble
@@ -744,19 +744,19 @@ func clusterStats(members []int, matrix [][]float64) (avg, min float64) {
 // MemberRepos nil so repo-aware rendering and JSON stay switched off.
 func buildReportClusters(
 	groups map[int][]int,
-	matrix [][]float64,
+	graph similarity.Graph,
 	names []string,
 	repos []string,
 	threshold float64,
 ) []report.Cluster {
 	memberLists := make([][]int, 0, len(groups))
 	for _, members := range groups {
-		_, min := clusterStats(members, matrix)
+		_, min := clusterStats(members, graph)
 		if min >= threshold {
 			memberLists = append(memberLists, members)
 			continue
 		}
-		link := func(a, b int) bool { return matrix[a][b] >= threshold }
+		link := func(a, b int) bool { return graph.Score(a, b) >= threshold }
 		for _, comp := range cluster.Components(members, link) {
 			if len(comp) < 2 {
 				continue // singleton at the stricter bound → noise
@@ -767,7 +767,7 @@ func buildReportClusters(
 
 	clusters := make([]report.Cluster, 0, len(memberLists))
 	for _, members := range memberLists {
-		avg, min := clusterStats(members, matrix)
+		avg, min := clusterStats(members, graph)
 		memberNames := make([]string, len(members))
 		var memberRepos []string
 		if repos != nil {
@@ -1539,9 +1539,9 @@ func filterClustersBySince(
 }
 
 // applyPairIgnores drops pairs that match the user's ignore_pairs and zeros
-// the corresponding matrix entries so DBSCAN sees the two snippets as
+// the corresponding graph edges so DBSCAN sees the two snippets as
 // maximally distant and won't co-cluster them. Returns the surviving pairs
-// (a fresh slice — input is not mutated beyond the matrix) and the count of
+// (a fresh slice — input is not mutated beyond the graph) and the count of
 // ignored pairs. A nil matcher or empty pair list short-circuits.
 //
 // Endpoints are matched against the UN-prefixed snippet name (the repo
@@ -1550,7 +1550,7 @@ func filterClustersBySince(
 // Note the path part is the root-relative path in multi-root mode.
 func applyPairIgnores(
 	pairs []report.Pair,
-	matrix [][]float64,
+	graph similarity.MutableGraph,
 	snippets []scan.Snippet,
 	matcher *config.PairIgnoreMatcher,
 ) ([]report.Pair, int) {
@@ -1566,8 +1566,7 @@ func applyPairIgnores(
 			i, okA := nameIdx[p.NameA]
 			j, okB := nameIdx[p.NameB]
 			if okA && okB {
-				matrix[i][j] = 0
-				matrix[j][i] = 0
+				graph.SetScore(i, j, 0)
 			}
 			continue
 		}

@@ -67,7 +67,7 @@ type MatrixOptions struct {
 	IncludeWeakPairs bool
 }
 
-// BuildMatrix computes the all-pairs similarity matrix, the
+// BuildGraph computes the all-pairs similarity graph, the
 // materialized pair list above MaterializationFloor(threshold), and
 // the block-candidate index pairs (same-language pairs in the gray
 // band [BlockCandidateFloor, threshold) with nonzero structural
@@ -86,14 +86,25 @@ type MatrixOptions struct {
 // onPairDone, if non-nil, is invoked after each comparison with the
 // running done count. It's called from worker goroutines, so it must
 // be cheap and concurrent-safe.
-func BuildMatrix(
+func BuildGraph(
 	snippets []scan.Snippet,
 	vectors []NormalizedVector,
 	minConfLines int,
 	threshold float64,
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
-) ([][]float64, []report.Pair, [][2]int) {
+) (MutableGraph, []report.Pair, [][2]int) {
+	return buildDenseGraph(snippets, vectors, minConfLines, threshold, onPairDone, options...)
+}
+
+func buildDenseGraph(
+	snippets []scan.Snippet,
+	vectors []NormalizedVector,
+	minConfLines int,
+	threshold float64,
+	onPairDone func(done, total int64),
+	options ...MatrixOptions,
+) (*DenseGraph, []report.Pair, [][2]int) {
 	floor := MaterializationFloor(threshold)
 	for _, opt := range options {
 		// Verbose bypasses the threshold-relative band but not the
@@ -104,15 +115,11 @@ func BuildMatrix(
 		}
 	}
 	n := len(snippets)
-	matrix := make([][]float64, n)
-	for i := range matrix {
-		matrix[i] = make([]float64, n)
-		matrix[i][i] = 1.0
-	}
+	graph := NewDenseGraph(n)
 
 	totalPairs := int64(n) * int64(n-1) / 2
 	if n < 2 {
-		return matrix, nil, nil
+		return graph, nil, nil
 	}
 
 	hashIndex := buildHashIndex(snippets)
@@ -200,8 +207,7 @@ func BuildMatrix(
 					// mask the dampener (min(x·d, cap) ≥ min(x, cap)·d).
 					combined = LengthDampen(
 						combined, snippets[i].NonBlankLn, snippets[j].NonBlankLn, minConfLines)
-					matrix[i][j] = combined
-					matrix[j][i] = combined
+					graph.SetScore(i, j, combined)
 
 					// Block-candidate gray band (review §5.3): the pair
 					// itself won't render (below threshold), but a shared
@@ -306,7 +312,24 @@ func BuildMatrix(
 		}
 		return blockCands[x][1] < blockCands[y][1]
 	})
-	return matrix, pairs, blockCands
+	return graph, pairs, blockCands
+}
+
+// BuildMatrix is the compatibility entry point for callers that still need
+// the dense representation. New consumers should call BuildGraph and depend
+// on the Graph interface instead.
+func BuildMatrix(
+	snippets []scan.Snippet,
+	vectors []NormalizedVector,
+	minConfLines int,
+	threshold float64,
+	onPairDone func(done, total int64),
+	options ...MatrixOptions,
+) ([][]float64, []report.Pair, [][2]int) {
+	graph, pairs, blockCands := buildDenseGraph(
+		snippets, vectors, minConfLines, threshold, onPairDone, options...,
+	)
+	return graph.Matrix(), pairs, blockCands
 }
 
 // buildHashIndex builds an inverted index from fingerprint hash → snippet
