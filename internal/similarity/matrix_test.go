@@ -2,6 +2,7 @@ package similarity
 
 import (
 	"math"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
@@ -54,6 +55,38 @@ func TestBuildMatrix_GivenIdenticalSnippets_When_Build_Then_PairScoreIsHigh(t *t
 	}
 	if pairs[0].Score < 0.9 {
 		t.Errorf("pair score = %v, want >= 0.9", pairs[0].Score)
+	}
+}
+
+func TestBuildGraph_PreservesBuildMatrixResults(t *testing.T) {
+	snips := []scan.Snippet{
+		makeSnippet("a.go", "a.go", []string{"func", "alpha", "return", "sharedValue"}),
+		makeSnippet("b.go", "b.go", []string{"func", "beta", "return", "sharedValue"}),
+		makeSnippet("c.py", "c.py", []string{"def", "unrelated", "return", "other_value"}),
+	}
+	snips[0].Lang = tokenizer.Go
+	snips[1].Lang = tokenizer.Go
+	snips[2].Lang = tokenizer.Python
+	vectors := vectorsFor(snips)
+
+	matrix, wantPairs, wantCandidates := BuildMatrix(snips, vectors, 0, 0.50, nil)
+	graph, gotPairs, gotCandidates := BuildGraph(snips, vectors, 0, 0.50, nil)
+
+	if !reflect.DeepEqual(gotPairs, wantPairs) {
+		t.Errorf("pairs changed through graph abstraction:\n got: %#v\nwant: %#v", gotPairs, wantPairs)
+	}
+	if !reflect.DeepEqual(gotCandidates, wantCandidates) {
+		t.Errorf("block candidates changed through graph abstraction: got %v, want %v", gotCandidates, wantCandidates)
+	}
+	if graph.Len() != len(matrix) {
+		t.Fatalf("graph size = %d, matrix size = %d", graph.Len(), len(matrix))
+	}
+	for i := range matrix {
+		for j := range matrix[i] {
+			if got := graph.Score(i, j); got != matrix[i][j] {
+				t.Errorf("Score(%d, %d) = %v, want %v", i, j, got, matrix[i][j])
+			}
+		}
 	}
 }
 

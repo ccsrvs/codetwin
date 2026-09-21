@@ -60,15 +60,15 @@ func baselineFixtureSnapshot(t *testing.T, dir string) baseline.Snapshot {
 	for i, s := range snips {
 		vecs[i] = similarity.Normalize(corpus.Vectorize(s.Tokens))
 	}
-	matrix, _, _ := similarity.BuildMatrix(snips, vecs, similarity.DefaultMinConfidenceLines, 0.50, nil)
+	graph, _, _ := similarity.BuildGraph(snips, vecs, similarity.DefaultMinConfidenceLines, 0.50, nil)
 
-	distFn := func(i, j int) float64 { return 1.0 - matrix[i][j] }
+	distFn := func(i, j int) float64 { return 1.0 - graph.Score(i, j) }
 	groups := cluster.Groups(cluster.DBSCAN(len(snips), 0.35, 2, distFn))
 	names := make([]string, len(snips))
 	for i, s := range snips {
 		names[i] = s.Name
 	}
-	clusters := buildReportClusters(groups, matrix, names, make([]string, len(snips)), 0.50)
+	clusters := buildReportClusters(groups, graph, names, make([]string, len(snips)), 0.50)
 
 	memberLists := make([][]string, len(clusters))
 	for i, c := range clusters {

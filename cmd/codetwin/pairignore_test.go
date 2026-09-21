@@ -6,6 +6,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/config"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
+	"github.com/ccsrvs/codetwin/internal/similarity"
 )
 
 // applyPairIgnores is the post-BuildMatrix filter that drops pairs matching
@@ -16,7 +17,8 @@ func mkSnippet(name string) scan.Snippet { return scan.Snippet{Name: name} }
 
 func TestApplyPairIgnores_GivenNilMatcher_WhenInvoked_ThenLeavesPairsAndMatrixIntact(t *testing.T) {
 	pairs := []report.Pair{{NameA: "a.go", NameB: "b.go", Score: 0.9}}
-	matrix := [][]float64{{1, 0.9}, {0.9, 1}}
+	matrix := similarity.NewDenseGraph(2)
+	matrix.SetScore(0, 1, 0.9)
 	snippets := []scan.Snippet{mkSnippet("a.go"), mkSnippet("b.go")}
 
 	got, ignored := applyPairIgnores(pairs, matrix, snippets, nil)
@@ -27,7 +29,7 @@ func TestApplyPairIgnores_GivenNilMatcher_WhenInvoked_ThenLeavesPairsAndMatrixIn
 	if len(got) != 1 {
 		t.Errorf("pairs len: got %d, want 1", len(got))
 	}
-	if matrix[0][1] != 0.9 || matrix[1][0] != 0.9 {
+	if matrix.Score(0, 1) != 0.9 || matrix.Score(1, 0) != 0.9 {
 		t.Errorf("matrix should be untouched, got %v", matrix)
 	}
 }
@@ -41,11 +43,10 @@ func TestApplyPairIgnores_GivenMatchingRule_WhenInvoked_ThenDropsPairAndZeroesMa
 		{NameA: "a.go", NameB: "b.go", Score: 0.9},
 		{NameA: "a.go", NameB: "c.go", Score: 0.8}, // unrelated, must survive
 	}
-	matrix := [][]float64{
-		{1.0, 0.9, 0.8},
-		{0.9, 1.0, 0.4},
-		{0.8, 0.4, 1.0},
-	}
+	matrix := similarity.NewDenseGraph(3)
+	matrix.SetScore(0, 1, 0.9)
+	matrix.SetScore(0, 2, 0.8)
+	matrix.SetScore(1, 2, 0.4)
 	snippets := []scan.Snippet{mkSnippet("a.go"), mkSnippet("b.go"), mkSnippet("c.go")}
 
 	got, ignored := applyPairIgnores(pairs, matrix, snippets, m)
@@ -63,12 +64,12 @@ func TestApplyPairIgnores_GivenMatchingRule_WhenInvoked_ThenDropsPairAndZeroesMa
 	// The matrix entry between a and b must be zeroed (both directions).
 	// DBSCAN computes distance as 1.0-matrix; zero → distance 1.0 → not
 	// neighbours, so they cannot be clustered together.
-	if matrix[0][1] != 0 || matrix[1][0] != 0 {
-		t.Errorf("matrix[a][b] expected zeroed, got %v / %v", matrix[0][1], matrix[1][0])
+	if matrix.Score(0, 1) != 0 || matrix.Score(1, 0) != 0 {
+		t.Errorf("matrix[a][b] expected zeroed, got %v / %v", matrix.Score(0, 1), matrix.Score(1, 0))
 	}
 	// Unrelated entries must be untouched.
-	if matrix[0][2] != 0.8 || matrix[2][0] != 0.8 {
-		t.Errorf("matrix[a][c] should be 0.8, got %v / %v", matrix[0][2], matrix[2][0])
+	if matrix.Score(0, 2) != 0.8 || matrix.Score(2, 0) != 0.8 {
+		t.Errorf("matrix[a][c] should be 0.8, got %v / %v", matrix.Score(0, 2), matrix.Score(2, 0))
 	}
 }
 
@@ -86,7 +87,8 @@ func TestApplyPairIgnores_GivenLineRangedSnippetNames_WhenMatchingByPath_ThenDro
 	pairs := []report.Pair{
 		{NameA: "auth/handler.go:10-40 parseRequest", NameB: "api/middleware.go:1-25 parseRequest", Score: 0.85},
 	}
-	matrix := [][]float64{{1.0, 0.85}, {0.85, 1.0}}
+	matrix := similarity.NewDenseGraph(2)
+	matrix.SetScore(0, 1, 0.85)
 	snippets := []scan.Snippet{
 		mkSnippet("auth/handler.go:10-40 parseRequest"),
 		mkSnippet("api/middleware.go:1-25 parseRequest"),
@@ -109,7 +111,8 @@ func TestApplyPairIgnores_GivenSnippetNotInIndex_WhenMatchingPair_ThenStillFilte
 		t.Fatalf("compile: %v", err)
 	}
 	pairs := []report.Pair{{NameA: "a.go", NameB: "b.go", Score: 0.9}}
-	matrix := [][]float64{{1, 0.9}, {0.9, 1}}
+	matrix := similarity.NewDenseGraph(2)
+	matrix.SetScore(0, 1, 0.9)
 	snippets := []scan.Snippet{mkSnippet("a.go")} // missing b.go
 
 	defer func() {
