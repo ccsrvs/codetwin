@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -126,4 +127,62 @@ func TestBench_QualityMetricsGate(t *testing.T) {
 		t.Logf("%d-case checkpoint: precision=%.3f recall=%.3f F1=%.3f",
 			size, checkpoint.Overall.Precision(), checkpoint.Overall.Recall(), checkpoint.Overall.F1())
 	}
+}
+
+func TestBench_SemanticCandidatesMatchExhaustive(t *testing.T) {
+	var snippets []scan.Snippet
+	for _, c := range collectCases(t) {
+		caseMin := minLines
+		if c.shortNegative {
+			caseMin = shortNegativeMinLines
+		}
+		a, b := caseSnippets(t, c.dir, caseMin)
+		snippets = append(snippets, a...)
+		snippets = append(snippets, b...)
+	}
+
+	streams := make([][]string, len(snippets))
+	for i := range snippets {
+		streams[i] = snippets[i].Tokens
+	}
+	corpus := similarity.NewCorpus(streams)
+	vectors := make([]similarity.NormalizedVector, len(snippets))
+	for i := range snippets {
+		vectors[i] = similarity.Normalize(corpus.Vectorize(snippets[i].Tokens))
+	}
+
+	matrix, wantPairs, wantBlocks := similarity.BuildMatrix(
+		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
+	)
+	var selected, total int64
+	graph, gotPairs, gotBlocks := similarity.BuildGraph(
+		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
+		similarity.MatrixOptions{OnCandidates: func(gotSelected, gotTotal int64) {
+			selected, total = gotSelected, gotTotal
+		}},
+	)
+
+	if !reflect.DeepEqual(gotPairs, wantPairs) {
+		t.Errorf("candidate pair findings differ from exhaustive findings")
+	}
+	if !reflect.DeepEqual(gotBlocks, wantBlocks) {
+		t.Errorf("candidate block findings differ from exhaustive findings")
+	}
+	for i := range matrix {
+		for j := i + 1; j < len(matrix[i]); j++ {
+			got, want := graph.Score(i, j), matrix[i][j]
+			if (got >= defaultThreshold || want >= defaultThreshold) && got != want {
+				t.Fatalf("candidate threshold score (%d,%d) = %v, exhaustive = %v", i, j, got, want)
+			}
+		}
+	}
+	if total > 0 && selected >= total {
+		t.Errorf("candidate retrieval selected %d/%d pairs; want measurable pruning", selected, total)
+	}
+	pruned := 0.0
+	if total > 0 {
+		pruned = 100 * (1 - float64(selected)/float64(total))
+	}
+	t.Logf("semantic candidates selected %d/%d pairs (%.1f%% pruned) with exhaustive finding equivalence",
+		selected, total, pruned)
 }

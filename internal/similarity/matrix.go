@@ -65,9 +65,15 @@ type MatrixOptions struct {
 	// not change matrix scores or block-candidate selection, and pairs
 	// scoring exactly 0 are never materialized.
 	IncludeWeakPairs bool
+
+	// OnCandidates receives the number of pairs selected by candidate
+	// retrieval and the total possible pair count after scoring completes.
+	// BuildGraph reports the union of structural and semantic candidates;
+	// BuildMatrix is exhaustive and therefore reports total, total.
+	OnCandidates func(selected, total int64)
 }
 
-// BuildGraph computes the all-pairs similarity graph, the
+// BuildGraph computes a candidate-pruned similarity graph, the
 // materialized pair list above MaterializationFloor(threshold), and
 // the block-candidate index pairs (same-language pairs in the gray
 // band [BlockCandidateFloor, threshold) with nonzero structural
@@ -82,9 +88,9 @@ type MatrixOptions struct {
 // sorted, so downstream block detection is deterministic and the
 // memory cost stays two ints per gray-band pair.
 //
-// onPairDone, if non-nil, is invoked after each comparison with the
-// running done count. It's called from worker goroutines, so it must
-// be cheap and concurrent-safe.
+// onPairDone, if non-nil, is invoked as each possible pair is either scored
+// or pruned, with the running visited count. It's called from worker
+// goroutines, so it must be cheap and concurrent-safe.
 func BuildGraph(
 	snippets []scan.Snippet,
 	vectors []NormalizedVector,
@@ -94,8 +100,9 @@ func BuildGraph(
 	options ...MatrixOptions,
 ) (MutableGraph, []report.Pair, [][2]int) {
 	graph := NewSparseGraph(len(snippets))
+	semanticIndex := NewSemanticCandidateIndex(vectors)
 	pairs, blockCands := buildGraph(
-		graph, snippets, vectors, minConfLines, threshold, onPairDone, options...,
+		graph, snippets, vectors, semanticIndex, minConfLines, threshold, onPairDone, options...,
 	)
 	return graph, pairs, blockCands
 }
@@ -110,7 +117,7 @@ func buildDenseGraph(
 ) (*DenseGraph, []report.Pair, [][2]int) {
 	graph := NewDenseGraph(len(snippets))
 	pairs, blockCands := buildGraph(
-		graph, snippets, vectors, minConfLines, threshold, onPairDone, options...,
+		graph, snippets, vectors, nil, minConfLines, threshold, onPairDone, options...,
 	)
 	return graph, pairs, blockCands
 }
@@ -119,12 +126,14 @@ func buildGraph(
 	graph MutableGraph,
 	snippets []scan.Snippet,
 	vectors []NormalizedVector,
+	semanticIndex *SemanticCandidateIndex,
 	minConfLines int,
 	threshold float64,
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
 ) ([]report.Pair, [][2]int) {
 	floor := MaterializationFloor(threshold)
+	var onCandidates func(selected, total int64)
 	for _, opt := range options {
 		// Verbose bypasses the threshold-relative band but not the
 		// absolute minimum: a verbose report of a large repo must not
@@ -132,11 +141,17 @@ func buildGraph(
 		if opt.IncludeWeakPairs && floor > materializationFloorMin {
 			floor = materializationFloorMin
 		}
+		if opt.OnCandidates != nil {
+			onCandidates = opt.OnCandidates
+		}
 	}
 	n := len(snippets)
 
 	totalPairs := int64(n) * int64(n-1) / 2
 	if n < 2 {
+		if onCandidates != nil {
+			onCandidates(0, totalPairs)
+		}
 		return nil, nil
 	}
 
@@ -153,6 +168,7 @@ func buildGraph(
 	var done atomic.Int64
 	pairsByWorker := make([][]report.Pair, workers)
 	blockCandsByWorker := make([][][2]int, workers)
+	candidatesByWorker := make([]int64, workers)
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -160,22 +176,39 @@ func buildGraph(
 			defer wg.Done()
 			var local []report.Pair
 			var localBlockCands [][2]int
+			var localCandidates int64
 			batchProgress := int64(0)
 			for i := workerID; i < n; i += workers {
-				// Candidates: any j > i that shares a fingerprint with i.
-				// Pairs not in this set get structural=0 without paying for
-				// a Jaccard call. We still compute cosine for every pair so
-				// cross-language semantic-only matches still surface.
-				cands := make(map[int]struct{})
+				// Structural candidates share a fingerprint. Semantic candidates
+				// share at least one indexed high-weight TF-IDF term. Their union
+				// bounds the work in candidate mode; exhaustive mode (used by
+				// BuildMatrix as a compatibility/quality oracle) leaves
+				// semanticIndex nil and scores every comparable pair.
+				structuralCands := make(map[int]struct{})
+				var candidates map[int]struct{}
+				if semanticIndex != nil {
+					candidates = make(map[int]struct{})
+					semanticIndex.addCandidates(i, candidates)
+				}
 				for h := range snippets[i].Fps.Set {
 					for _, k := range hashIndex[h] {
 						if k > i {
-							cands[k] = struct{}{}
+							structuralCands[k] = struct{}{}
+							if candidates != nil {
+								candidates[k] = struct{}{}
+							}
 						}
 					}
 				}
 
 				for j := i + 1; j < n; j++ {
+					if candidates != nil {
+						if _, ok := candidates[j]; !ok {
+							batchProgress++
+							continue
+						}
+					}
+					localCandidates++
 					// Suppress nesting false positives: an outer function
 					// that happens to contain a closure / inner def is not
 					// a duplicate of that closure. Leaving the matrix at 0
@@ -194,7 +227,7 @@ func buildGraph(
 					}
 
 					var structural float64
-					if _, ok := cands[j]; ok {
+					if _, ok := structuralCands[j]; ok {
 						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
 					}
 					semantic := CosineFromNormalized(vectors[i], vectors[j])
@@ -304,9 +337,17 @@ func buildGraph(
 			}
 			pairsByWorker[workerID] = local
 			blockCandsByWorker[workerID] = localBlockCands
+			candidatesByWorker[workerID] = localCandidates
 		}(w)
 	}
 	wg.Wait()
+	if onCandidates != nil {
+		var selected int64
+		for _, count := range candidatesByWorker {
+			selected += count
+		}
+		onCandidates(selected, totalPairs)
+	}
 
 	total := 0
 	for _, p := range pairsByWorker {
@@ -353,10 +394,10 @@ func BuildMatrix(
 }
 
 // buildHashIndex builds an inverted index from fingerprint hash → snippet
-// indices that selected that hash. Lets BuildMatrix skip Jaccard work
-// for snippet pairs that share zero fingerprints (those structural
-// scores would be 0 anyway, and on a typical big repo most pairs fall
-// into this bucket).
+// indices that selected that hash. Lets BuildGraph and BuildMatrix skip
+// Jaccard work for snippet pairs that share zero fingerprints (those
+// structural scores would be 0 anyway, and on a typical big repo most
+// pairs fall into this bucket).
 func buildHashIndex(snippets []scan.Snippet) map[uint32][]int {
 	idx := make(map[uint32][]int)
 	for i, s := range snippets {
