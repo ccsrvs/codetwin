@@ -222,84 +222,22 @@ codetwin --dead-code --json ./src | jq '.dead_symbols[] | select(.verdict == "de
 
 ## Scoring
 
-| Score | Label | Recommended action |
-|---|---|---|
-| > 95% | Exact clone | Extract shared utility, delete one |
-| > 85% | Near clone | Virtually identical; treat as a clone unless intentional |
-| > 85% + lexical < 20% | Structural twin | Same shape, different content — likely parallel boilerplate, not copy-paste |
-| > 65% | Strong clone | Parameterize differing parts |
-| > 45% | Refactor target | Evaluate shared abstraction |
-| < 45% | Weak similarity | Probably coincidental |
+codetwin combines structural Winnowing/Jaccard evidence with semantic TF-IDF
+cosine similarity. Same-language pairs use an even blend; cross-language
+pairs weight semantic evidence more heavily. Labels range from exact clones
+to weak similarity, with evidence gates to reduce short-snippet and
+language-idiom noise.
 
-The "Exact clone" label is additionally evidence-gated: it requires both
-snippets to span at least 10 non-blank lines. A shorter pair renders as
-a near clone even at a perfect score (the numeric score is unchanged —
-only the label demotes), because two tiny functions can share their
-entire token shape by API force alone.
+See [Scoring internals](docs/scoring.md) for formulas, thresholds, structural
+twins, and confidence dampening.
 
 ### Structural twins
 
-Normalization erases identifiers and string literals (`VAR`/`STR`) —
-that's what makes the score rename-invariant, and it's also why two
-table-driven tests with completely different test names, fields, and
-expected strings can score 100%: they really are token-clones, just not
-copy-paste. To tell the two apart, codetwin keeps a third, label-only
-**lexical** sub-score: Jaccard over each snippet's raw identifier and
-string-literal vocabulary (camelCase/snake_case split, lowercased,
-keywords and comments excluded). A pair in the exact/near bands
-(> 85%) whose lexical overlap is below 20% renders as **STRUCTURAL
-TWIN** (`"structural_twin"` in JSON, with the `lexical` sub-score
-exposed on the pair): same shape, different content — parallel
-boilerplate to leave alone or parameterize, not duplication to delete.
-
-The lexical score never feeds the numeric score, so rename detection is
-untouched: a typical rename keeps most of its vocabulary (helper calls,
-field names, string literals) and stays comfortably above the floor,
-which is pinned by the benchmark's renamed-clone fixtures. Pairs ≤ 85%
-are never modified, and pairs whose snippets carry fewer than 8 lexical
-terms are never demoted (too little vocabulary to judge content either
-way).
-
-Final score is `0.5 × structural (Jaccard) + 0.5 × semantic (cosine TF-IDF
-over token trigrams)` for same-language pairs. Cross-language pairs use
-`0.2 × structural + 0.8 × semantic`: winnowing fingerprints hash raw keyword
-sequences, so identical logic in two languages shares almost no fingerprints,
-and the semantic layer — which canonicalizes cross-language keywords
-(`func`/`def`/`fn`, `nil`/`None`/`null`, …) — carries the weight instead.
-For a longer walk-through of what the score means, what the
-`structural`/`semantic` sub-scores below each pair tell you, and how
-pairs differ from clusters, run `codetwin --guide`.
-
-**Same-language pairs additionally require structural corroboration.**
-Trigram cosine saturates on shared language idioms — two unrelated
-map-building loops, two comprehension-plus-guard functions, two
-async/try-catch wrappers — because normalization erases the
-identifiers that distinguish them. For a same-language pair the
-winnowing layer had every chance to fire, so near-zero structural
-evidence means idiom, not clone: when structural is below 0.20 the
-combined score is capped at 0.45 (just under the report band), with
-the cap ramping out linearly by structural 0.35, where it can no
-longer bind. Cross-language pairs are exempt — structural absence is
-expected there, which is the whole point of the 0.2/0.8 blend.
+See [structural-twin classification](docs/scoring.md#structural-twins).
 
 ### Short-snippet confidence
 
-Two 5-line snippets that share their entire token shape and two 25-line
-snippets that do the same both score identically, but the first is much
-weaker evidence — short snippets are forced into a shared shape by
-their API surface (e.g. test scaffolding that has to call one function
-and assert on the result). `--min-confidence-lines N` is a length-aware
-dampener, **on by default at N = 10**: the combined score is multiplied
-by `0.5 + 0.5 · min(LinesA, LinesB) / N` (capped at 1.0), so matches
-under N non-blank lines lose proportional score. At the default, a
-10-line exact clone keeps its full 100% score, while a 4-line
-shape-coincidence scoring 60% raw dampens to 42% and drops below the
-default threshold. The dampener is applied once at the scoring layer,
-so it also affects DBSCAN cluster boundaries — short-snippet matches
-that drop below the eps threshold don't cluster. Raise it (e.g.
-`--min-confidence-lines 20`) to push more test boilerplate out of the
-report, or pass `--min-confidence-lines 0` to turn it off and restore
-raw scores.
+See [short-snippet confidence](docs/scoring.md#short-snippet-confidence).
 
 ## Partial clones (block level)
 
@@ -792,215 +730,25 @@ that shift line numbers.
 
 ## Performance
 
-codetwin is designed to handle large repositories. A few mechanisms in
-play:
-
-**Parallel candidate scoring.** Similarity work shards candidate rows across
-`runtime.NumCPU()` goroutines. Exact scoring runs only for the union of
-structural and semantic candidates.
-
-**Inverted-index pair pruning.** Before computing scores, codetwin
-builds a `fingerprint-hash → snippet-indices` map and a bounded TF-IDF
-term index. Their union preserves structural and cross-language
-semantic-only candidates without all-pairs cosine scoring.
-
-**Persistent incremental cache.** The expensive per-file work (split →
-tokenize → fingerprint with positions) and exact candidate-pair scores are
-persisted to `.codetwin-cache.bin` in the working directory. File cache keys are
-`sha256(absPath ‖ contentHash ‖ patternsHash)` so any of those
-changing invalidates the relevant entry automatically. On a warm rerun
-unchanged files skip the parsing pipeline and unchanged candidate pairs reuse
-their exact scores. A changed file, corpus-dependent TF-IDF weight, scoring
-parameter, or snippet property invalidates the affected document identity and
-recomputes only incident candidate scores. Add `.codetwin-cache.bin` to your
-`.gitignore`. Use `--no-cache` to skip caching entirely or
-`--rebuild-cache` to force a fresh build. Persistence is behind the
-`cache.Storage` interface; the default CGO-free gob implementation uses a
-synced temporary file plus atomic rename and explicit schema validation.
-
-**Live progress.** While the matrix is computing, codetwin prints a
-counter to stderr (`comparing snippets: N/M (X%)`). Auto-suppressed
-when stderr isn't a TTY so CI logs stay clean. Use `--no-progress` to
-force off.
+Candidate pruning, parallel scoring, sparse similarity storage, and the
+persistent incremental cache keep large scans practical. See
+[Performance and caching](docs/performance.md) for the full pipeline and cache
+invalidation behavior.
 
 ## Architecture
 
-```
-codetwin/
-├── analyzer/                    # Public cancellable analysis API
-├── cmd/codetwin/
-│   ├── main.go                  # Thin CLI adapter: flags, file collection, rendering
-│   ├── blocks.go                # Partial-clone orchestration + partial_clones JSON schema
-│   ├── repos.go                 # Cross-repo mode: repo labels + snippet namespacing
-│   └── baseline.go              # Clone-watchlist CLI glue (--update-baseline / --baseline)
-└── internal/
-    ├── tokenizer/               # Language-aware lexing + normalization
-    ├── splitter/                # Function/class-level chunking per language
-    ├── fingerprint/             # Winnowing algorithm (structural similarity)
-    ├── similarity/              # TF-IDF vectors + cosine similarity (semantic); matrix + pair materialization
-    ├── blocks/                  # Sub-function partial-clone detector (seed → extend → chain → verify)
-    ├── cluster/                 # DBSCAN clustering
-    ├── report/                  # ANSI terminal + plain text rendering
-    ├── refactor/                # --suggest pipeline: align → synthesize → place → patch
-    ├── baseline/                # Clone-watchlist snapshots + drift diffing
-    ├── config/                  # .codetwin.json loading + ignore matching
-    ├── cache/                   # Pluggable cache storage; atomic gob default
-    ├── paircache/               # Persisted exact-score snapshot contract
-    ├── scan/                    # Per-file pipeline + parallel orchestrator (split → tokenize → fingerprint)
-    ├── git/                     # Optional git integration: repo detection, diff parsing, blame
-    ├── bench/                   # Test-only ground-truth benchmark (detection-quality gate)
-    └── pathutil/                # Lexical path helpers (Dedupe, Contains)
-```
+The public `analyzer` package owns the cancellable compute pipeline; the CLI
+is a thin adapter over internal tokenizer, splitter, similarity, clustering,
+reporting, cache, and git packages. See the [architecture guide](docs/architecture.md)
+for the package map and layer responsibilities.
 
 ### Reusable Go API
 
-`analyzer.Analyzer` runs the compute pipeline without CLI globals. Callers
-provide an explicit file set and `context.Context`; cancellation propagates
-through parallel scanning, exact scoring, block detection, clustering, and
-the context-aware git helpers used by the CLI.
-
-```go
-ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-defer cancel()
-
-result, err := (analyzer.Analyzer{}).Run(ctx, analyzer.Request{
-    Files:              []string{"service/a.go", "service/b.go"},
-    MinLines:           5,
-    Threshold:          0.50,
-    Epsilon:            0.35,
-    MinPoints:          2,
-    MinConfidenceLines: 10,
-    Granularity:        analyzer.GranularityFunction,
-})
-if err != nil {
-    return err
-}
-fmt.Printf("%d pairs in %d clusters\n", len(result.Pairs), len(result.Clusters))
-```
-
-`Result` also exposes snippets, partial clones, dead-code findings, warnings,
-and candidate/cache statistics. `Request.OnProgress` receives structured stage
-updates for IDE, daemon, or agent integrations. `Analyzer` is stateless and
-safe for concurrent use; each run owns its cache lifecycle.
+See the [reusable analyzer API](docs/architecture.md#reusable-go-api).
 
 ### How each layer works
 
-**Tokenizer** (`internal/tokenizer`)
-Language-aware normalization before comparison. Comments and import statements
-are stripped. String literals become `STR`, numbers become `NUM`, all
-non-keyword identifiers become `VAR`. This means `sumArray(arr)` and
-`addNumbers(nums)` normalize to the same token stream — only structure matters.
-
-`TokenizeWithLines` returns each token's source line so the rendered preview
-can show absolute file line numbers and the match-range slicer can find the
-duplicated lines.
-
-**Splitter** (`internal/splitter`)
-Breaks each file into per-definition chunks: every Python `def`, Go `func`
-(including closures/goroutines/defers), JS / TS / JSX / TSX `function` /
-`const arrow` / class method, Rust `fn`, Java method/constructor, and
-Elixir `def`/`defp`. Each chunk is then compared independently. A 500-line
-module with one duplicated 20-line helper now scores high on that helper
-instead of being washed out by 480 lines of unrelated code. For the
-container languages (Python, Java, JS/TS, Elixir, Rust) the splitter ALSO
-emits one class-span chunk per
-`class`/`interface`/`enum`/`record`/`defmodule`/`impl` declaration, and
-for Go one synthetic struct+methodset group per type with two or more
-in-file methods — all tagged with a distinct chunk kind — see
-"Class-level matching" below.
-
-**Fingerprint** (`internal/fingerprint`)
-Implements the Winnowing algorithm. Slides a window over k-gram hashes and
-selects the minimum hash in each window as a "fingerprint". Jaccard similarity
-between two fingerprint sets gives the **structural score** — fast and exact
-for near-duplicate detection. `PositionalSet` retains the originating token
-positions so the renderer can highlight which lines actually matched.
-
-**Similarity** (`internal/similarity`)
-Builds TF-IDF weighted token vectors across the full corpus and computes
-cosine similarity. This is the **semantic score** — it catches functionally
-similar code even when structure differs (e.g. a Python loop vs a Go loop
-with different control flow patterns). Candidate retrieval unions shared
-Winnowing fingerprints with a deterministic inverted index over each
-snippet's 16 highest-weight TF-IDF terms, then computes the exact structural,
-cosine, and combined scores for every selected pair. The bounded semantic
-index is approximate only at retrieval; final scores are never approximate.
-Combined nonzero scores are stored as edges in a sparse graph, where an absent
-edge has score zero. The legacy `BuildMatrix` API remains an exhaustive dense
-compatibility wrapper and regression oracle.
-
-**Blocks** (`internal/blocks`)
-The sub-function partial-clone detector behind `--min-block-lines`.
-`BuildGraph` hands it the "gray band" — same-language pairs that share
-fingerprints but score below the report threshold — and for each candidate it
-seeds on shared fingerprint positions, extends them to maximal
-exactly-matching token runs, chains runs across small gaps, and verifies each
-block with exact token comparison (containment ≥ 0.85 plus the matched-line
-floor on both sides). `cmd/codetwin/blocks.go` dedupes and packages the
-findings for the `PARTIAL CLONES` section / `partial_clones` JSON array.
-
-**Cluster** (`internal/cluster`)
-DBSCAN over the combined sparse similarity graph. Rather than reporting O(n²) pairs,
-it groups families of similar snippets into clusters. Each cluster is one
-refactoring task. Noise points (unique snippets) are omitted. DBSCAN links
-transitively, so each cluster header reports both the average internal pair
-score and its **cohesion** (the weakest internal pair — `min_score` in JSON);
-clusters whose cohesion falls below `--threshold` are re-linked single-linkage
-at threshold strength and split into tighter families (members left without a
-threshold-strength partner drop out as noise).
-
-**Report** (`internal/report`)
-Renders results to stdout with ANSI colour-coded labels and cluster membership.
-Sort, threshold filter, and limit run in a shared `Prepare()` helper so
-terminal and JSON output reflect the same set of findings. `--plain` disables
-colour for CI pipelines. `--json` emits machine-readable output.
-
-**Refactor** (`internal/refactor`)
-The `--suggest` / `--suggest-all` pipeline: `align.go` computes a line-level
-LCS alignment over the raw source (common spans + divergence "holes"),
-`synth.go` dispatches to a per-language emitter that produces a starter
-helper (a literal copy of A's body with a divergence comment block),
-`place.go` finds the innermost enclosing class/defmodule for Java/Elixir
-placement, and `patch.go` wraps the helper in a unified diff. All six
-languages have pair emitters (blocks: Go and Python); synthesis is rejected
-with a structured note for cross-language pairs, class-level pairs,
-control-flow-asymmetric holes, and chunks without a recognisable header.
-
-**Baseline** (`internal/baseline`)
-The clone watchlist behind `--update-baseline` / `--baseline`: versioned,
-byte-deterministic JSON snapshots of the visible clusters (member keys are
-line-range-stripped, root-relative names plus a normalized-token body hash)
-and the drift diff that matches clusters by membership overlap and emits the
-five drift event kinds.
-
-**Config** (`internal/config`)
-Loads `.codetwin.json` from the working directory. Compiles `ignore_paths`
-into a glob/component matcher, `ignore_patterns` into regexes consumed by
-the tokenizer, and `ignore_pairs` into a post-similarity matcher applied
-between BuildGraph and DBSCAN.
-
-**Scan** (`internal/scan`)
-Per-file pipeline that turns a source file into one or more `Snippet`s
-(split → tokenize → fingerprint) plus the parallel orchestrator that runs it
-across the file set. Sits between `cmd/codetwin/main.go` and the
-splitter/tokenizer/fingerprint packages, and consults `internal/cache` so
-unchanged files skip the work.
-
-**Git** (`internal/git`)
-Thin wrapper around the small set of git invocations the optional
-features need: `Open(dir)` discovers the repo root and surfaces
-`ErrGitNotInstalled` / `ErrNotARepo` so callers can degrade gracefully;
-`(*Repo).ChangedSince(ref)` runs `git diff --unified=0` and parses the
-hunks into a `path → []LineRange` map for the `--since` filter;
-`(*Repo).Blame(file, start, end)` aggregates `git blame --line-porcelain`
-into a single-record `BlameRange` for `--blame`. Used only when the
-relevant flag is set; codetwin is otherwise git-independent.
-
-**Pathutil** (`internal/pathutil`)
-Pure lexical path helpers. `Dedupe` collapses duplicate input paths and drops
-inputs already covered by another (e.g. `./src/utils` is dropped when `./src`
-is also passed); `Contains` does an absolute-path containment check that
-respects separator boundaries so `/foo` doesn't match `/foobar`.
+See the [layer-by-layer architecture](docs/architecture.md#how-each-layer-works).
 
 ## Adding a new language
 
