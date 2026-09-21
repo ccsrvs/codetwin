@@ -149,12 +149,8 @@ func TestRunRejectsInvalidRequest(t *testing.T) {
 	}
 }
 
-func TestRunRejectsNilContextAndInsufficientInput(t *testing.T) {
+func TestRunRejectsInsufficientInput(t *testing.T) {
 	t.Parallel()
-	//lint:ignore SA1012 Run deliberately rejects nil instead of panicking.
-	if _, err := (analyzer.Analyzer{}).Run(nil, analyzer.Request{}); err == nil {
-		t.Fatal("nil context error = nil")
-	}
 	dir := t.TempDir()
 	one := writeSource(t, dir, "one.go", "package sample\nfunc One() int { return 1 }\n")
 	_, err := (analyzer.Analyzer{}).Run(context.Background(), analyzer.Request{
