@@ -110,6 +110,38 @@ func TestBlockClones_GroundTruth(t *testing.T) {
 	}
 }
 
+func TestBlockClones_QualityMetricsGate(t *testing.T) {
+	observations := make([]Observation, 0, len(blockCases))
+	for _, c := range blockCases {
+		a, b := caseSnippets(t, blockCaseDir(c), minLines)
+		detected := false
+		for _, sa := range a {
+			for _, sb := range b {
+				for _, match := range detectBlocks(sa, sb, blockMinLines) {
+					if match.Containment < blockContainmentMin ||
+						match.AEndLine-match.AStartLine+1 < blockMinLines ||
+						match.BEndLine-match.BStartLine+1 < blockMinLines {
+						continue
+					}
+					if !c.positive || (overlaps(match.AStartLine, match.AEndLine, c.a) &&
+						overlaps(match.BStartLine, match.BEndLine, c.b)) {
+						detected = true
+					}
+				}
+			}
+		}
+		observations = append(observations, Observation{
+			Name: c.name, Category: "block-clone", Expected: c.positive, Detected: detected,
+		})
+	}
+	report := Evaluate(observations)
+	assertQualityGate(t, "block-clone corpus", report)
+	if report.Overall.Precision() != 1 || report.Overall.Recall() != 1 {
+		t.Errorf("block-clone quality must remain perfect: precision=%.3f recall=%.3f",
+			report.Overall.Precision(), report.Overall.Recall())
+	}
+}
+
 // TestBlockClones_FixturesAreInvisibleAtFunctionLevel runs TODAY (no
 // skip): it documents the recall gap block-level detection must close,
 // and protects the fixtures from drifting into function-level-visible

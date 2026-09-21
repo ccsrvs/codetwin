@@ -464,8 +464,9 @@ After bet #6 (cross-repo scanning, 2026-07-14):
 | `internal/blocks` | 85.9% |
 | `cmd/codetwin` | 28.7% (`main()` body still un-unit-tested; covered by subprocess tests, which don't count toward `-cover`) |
 
-(`internal/bench` reports no coverage — it is a test-only package; its
-`TestBench_GroundTruth` is the detection-quality gate described above.)
+`internal/bench` now includes reusable precision/recall/F1 metrics plus
+function-level, cross-language, category, corpus-size, and block-clone quality
+gates. The fixture-driving code remains intentionally test-focused.
 
 The biggest standing gap is `cmd/codetwin/main.go`'s top-level
 orchestration: `main()`, `printJSON`, `applyConfigDefaults`,

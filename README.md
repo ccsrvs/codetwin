@@ -998,7 +998,13 @@ make test                  # all packages
 make test-verbose          # with per-test names (good during TDD)
 make test-coverage         # generates coverage.html
 go test -run TestNormalize # single test by name
+go test ./internal/bench -run 'QualityMetricsGate' -v # precision/recall/F1 gates
 ```
+
+The labeled quality gate currently requires at least 0.95 precision, recall,
+and F1 for function-level detection, perfect cross-language recall, and
+perfect precision/recall for block clones. It also reports false positives by
+fixture category and deterministic corpus-size checkpoints.
 
 ## Example output
 
