@@ -435,8 +435,7 @@ func main() {
 	debugf("vectorized %d snippets", len(vectors))
 
 	n := len(snippets)
-	matrixBytes := int64(n) * int64(n) * 8
-	debugf("allocating matrix: %d × %d (%d MB)", n, n, matrixBytes/(1024*1024))
+	debugf("initializing sparse similarity graph for %d snippets", n)
 
 	totalPairs := int64(n) * int64(n-1) / 2
 	debugf("comparing %d × %d = %d pairs", n, n, totalPairs)
@@ -458,7 +457,7 @@ func main() {
 		close(matrixProgStop)
 		matrixProgWg.Wait()
 	}
-	debugf("similarity.BuildMatrix: %d materialized pairs, %d block candidates in gray band",
+	debugf("similarity.BuildGraph: %d materialized pairs, %d block candidates in gray band",
 		len(pairs), len(blockCands))
 
 	// Tag each pair endpoint with its snippet's test-file classification

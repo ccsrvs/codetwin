@@ -9,6 +9,7 @@ package main
 
 import (
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/similarity"
@@ -166,5 +167,29 @@ func TestBuildReportClusters_DeterministicIDsAcrossMapOrder(t *testing.T) {
 		if clusters[1].ID != 1 || clusters[1].Members[0] != "zz.go" {
 			t.Fatalf("run %d: cluster 1 = %+v; want first-member zz.go with ID 1", run, clusters[1])
 		}
+	}
+}
+
+func TestBuildReportClusters_DenseAndSparseGraphsAreEquivalent(t *testing.T) {
+	entries := map[[2]int]float64{
+		{0, 1}: 0.95,
+		{2, 3}: 0.90,
+		{1, 2}: 0.66,
+		{0, 2}: 0.10,
+		{0, 3}: 0.10,
+		{1, 3}: 0.10,
+	}
+	dense := symMatrix(4, entries)
+	sparse := similarity.NewSparseGraph(4)
+	for endpoints, score := range entries {
+		sparse.SetScore(endpoints[0], endpoints[1], score)
+	}
+	groups := map[int][]int{0: {0, 1, 2, 3}}
+	names := []string{"a.go", "b.go", "c.go", "d.go"}
+
+	want := buildReportClusters(groups, dense, names, nil, 0.70)
+	got := buildReportClusters(groups, sparse, names, nil, 0.70)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("sparse clusters differ from dense clusters:\n got: %#v\nwant: %#v", got, want)
 	}
 }

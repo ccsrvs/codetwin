@@ -539,7 +539,7 @@ jq '.clusters | map(.members|length) | sort | reverse | .[0:8]' self.json
 # Materialization floor (83% of pairs kept at 0.05)
 ./codetwin --debug --no-cache --json ./internal ./cmd >/dev/null
 # → comparing 723 × 723 = 261003 pairs
-# → similarity.BuildMatrix: 215752 pairs above noise floor
+# → similarity.BuildGraph: 215752 pairs above noise floor
 
 # Block-dilution demonstration: identical 15-line block inside two
 # ~45-line functions with unrelated surrounding code scores 0.37
