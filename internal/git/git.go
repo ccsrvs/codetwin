@@ -99,10 +99,6 @@ func relWithinRoot(root, absPath string) (string, bool) {
 // run executes a git subcommand inside the repo and returns its stdout
 // on success. Stderr is folded into the returned error so callers don't
 // have to thread two streams through their handlers.
-func (r *Repo) run(args ...string) ([]byte, error) {
-	return r.runContext(context.Background(), args...)
-}
-
 func (r *Repo) runContext(ctx context.Context, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

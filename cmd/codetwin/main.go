@@ -34,7 +34,6 @@ import (
 	"github.com/ccsrvs/codetwin/internal/blocks"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
-	"github.com/ccsrvs/codetwin/internal/deadcode"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/git"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
@@ -954,27 +953,6 @@ type jsonDeadSymbol struct {
 	TestRefs int    `json:"test_refs,omitempty"`
 }
 
-// toReportDeadSymbols converts analysis findings to the display type,
-// applying --limit the same way the pair and cluster sections do.
-func toReportDeadSymbols(findings []deadcode.Finding, limit int) []report.DeadSymbol {
-	if limit > 0 && len(findings) > limit {
-		findings = findings[:limit]
-	}
-	out := make([]report.DeadSymbol, 0, len(findings))
-	for _, f := range findings {
-		out = append(out, report.DeadSymbol{
-			Name:     f.Name,
-			Symbol:   f.Symbol,
-			Kind:     string(f.Kind),
-			Lang:     string(f.Lang),
-			Exported: f.Exported,
-			Verdict:  string(f.Verdict),
-			TestRefs: f.TestRefs,
-		})
-	}
-	return out
-}
-
 func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed, drift []baseline.Event, deadSymbols []report.DeadSymbol) {
 	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones, blockSuggestions)}
 	for _, d := range deadSymbols {
@@ -1237,11 +1215,6 @@ func requestedGitFlags(since string, blame bool) (label, verb string) {
 // a name → Provenance map. Untracked files and other recoverable blame
 // errors are silently skipped; the snippet just won't have provenance
 // attached. Catastrophic git errors print a one-line warning.
-func computeProvenance(snippets []scan.Snippet, repo *git.Repo) map[string]*report.Provenance {
-	out, _ := computeProvenanceContext(context.Background(), snippets, repo)
-	return out
-}
-
 func computeProvenanceContext(ctx context.Context, snippets []scan.Snippet, repo *git.Repo) (map[string]*report.Provenance, error) {
 	out := make(map[string]*report.Provenance, len(snippets))
 	for _, s := range snippets {
@@ -1309,42 +1282,6 @@ func snippetIndex(snippets []scan.Snippet) map[string]int {
 // the suggestion and preview builders that need the full value.
 func snippetsByName(snippets []scan.Snippet) map[string]scan.Snippet {
 	return snippetMap(snippets, func(_ int, s scan.Snippet) scan.Snippet { return s })
-}
-
-// snippetTestFlags maps each snippet's name to its test-file
-// classification, shared by markTestPairs and markTestOnlyClusters.
-func snippetTestFlags(snippets []scan.Snippet) map[string]bool {
-	return snippetMap(snippets, func(_ int, s scan.Snippet) bool { return s.IsTest })
-}
-
-// markTestPairs sets each pair's IsTestA/IsTestB from the endpoint
-// snippets' test-file classification (scan.IsTestFile on the scanned
-// path). Presentation metadata only: report.Prepare uses the flags to
-// suppress test↔test pairs by default; scores are untouched.
-func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
-	isTest := snippetTestFlags(snippets)
-	for i := range pairs {
-		pairs[i].IsTestA = isTest[pairs[i].NameA]
-		pairs[i].IsTestB = isTest[pairs[i].NameB]
-	}
-}
-
-// markTestOnlyClusters sets Cluster.TestOnly on clusters whose every
-// member is a test snippet. Runs after buildReportClusters so the flag
-// reflects the final member lists (low-cohesion splitting may have
-// regrouped members). Same presentation-only contract as markTestPairs.
-func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
-	isTest := snippetTestFlags(snippets)
-	for i := range clusters {
-		allTest := len(clusters[i].Members) > 0
-		for _, m := range clusters[i].Members {
-			if !isTest[m] {
-				allTest = false
-				break
-			}
-		}
-		clusters[i].TestOnly = allTest
-	}
 }
 
 // keepTouching is the shared --since filter loop: it keeps the items

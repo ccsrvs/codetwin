@@ -144,10 +144,6 @@ func stripRepoPrefix(name, repo string) string {
 // different git repos would silently produce wrong output — failing
 // fast with a clear message beats that. Roots inside one repo (e.g.
 // `codetwin ./internal ./cmd`) pass.
-func (rm *repoMap) ensureSingleGitRepo(flagLabel string) error {
-	return rm.ensureSingleGitRepoContext(context.Background(), flagLabel)
-}
-
 func (rm *repoMap) ensureSingleGitRepoContext(ctx context.Context, flagLabel string) error {
 	seen := make(map[string]bool)
 	var roots []string

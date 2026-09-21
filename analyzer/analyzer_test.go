@@ -151,6 +151,7 @@ func TestRunRejectsInvalidRequest(t *testing.T) {
 
 func TestRunRejectsNilContextAndInsufficientInput(t *testing.T) {
 	t.Parallel()
+	//lint:ignore SA1012 Run deliberately rejects nil instead of panicking.
 	if _, err := (analyzer.Analyzer{}).Run(nil, analyzer.Request{}); err == nil {
 		t.Fatal("nil context error = nil")
 	}

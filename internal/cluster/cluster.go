@@ -173,11 +173,6 @@ func sortInts(a []int) {
 	}
 }
 
-func neighbors(i, n int, eps float64, dist DistFunc) []int {
-	nb, _ := neighborsContext(context.Background(), i, n, eps, dist)
-	return nb
-}
-
 func neighborsContext(ctx context.Context, i, n int, eps float64, dist DistFunc) ([]int, error) {
 	var nb []int
 	for j := 0; j < n; j++ {
