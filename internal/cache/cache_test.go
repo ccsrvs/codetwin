@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/paircache"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
 
@@ -336,8 +337,35 @@ func TestNilCache_GetPutSaveAreNoops(t *testing.T) {
 		t.Errorf("nil.Get should return zero entry + false, got %+v ok=%v", e, ok)
 	}
 	c.Put("any", Entry{ContentHash: "x"})
+	if snapshot := c.LoadPairScoreSnapshot(); snapshot.Context != "" || snapshot.Documents != nil || snapshot.Scores != nil {
+		t.Errorf("nil.LoadPairScoreSnapshot should return zero snapshot, got %+v", snapshot)
+	}
+	c.SavePairScoreSnapshot(paircache.Snapshot{Context: "ignored"})
 	if err := c.Save(t.TempDir()); err != nil {
 		t.Errorf("nil.Save should be a no-op, got error: %v", err)
+	}
+}
+
+func TestPairScoreSnapshotRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	c := New()
+	want := paircache.Snapshot{
+		Context:   "test-context",
+		Documents: []paircache.DocumentKey{{1}, {2}},
+		Scores: map[paircache.Pair]paircache.Score{
+			{A: 0, B: 1}: {Structural: 0.7, Semantic: 0.8, Combined: 0.75, Lexical: 0.6, LexicalComputed: true},
+		},
+	}
+	c.SavePairScoreSnapshot(want)
+	if err := c.Save(dir); err != nil {
+		t.Fatalf("save pair-score snapshot: %v", err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load pair-score snapshot: %v", err)
+	}
+	if got := loaded.LoadPairScoreSnapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("round-tripped pair-score snapshot = %+v, want %+v", got, want)
 	}
 }
 

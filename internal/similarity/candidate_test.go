@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/scan"
 )
@@ -110,15 +111,27 @@ func TestBuildGraphReportsStructuralAndSemanticCandidateUnion(t *testing.T) {
 
 func TestBuildGraphReportsZeroCandidatesForEmptyInput(t *testing.T) {
 	called := false
+	scoreCalled := false
+	state := cache.New()
 	BuildGraph(nil, nil, 0, 0.50, nil, MatrixOptions{
+		ScoreCache: state,
 		OnCandidates: func(selected, total int64) {
 			called = true
 			if selected != 0 || total != 0 {
 				t.Errorf("empty candidate counts = %d/%d, want 0/0", selected, total)
 			}
 		},
+		OnScoreCache: func(hits, misses int64) {
+			scoreCalled = true
+			if hits != 0 || misses != 0 {
+				t.Errorf("empty score-cache counts = %d/%d, want 0/0", hits, misses)
+			}
+		},
 	})
 	if !called {
 		t.Error("candidate callback was not called")
+	}
+	if !scoreCalled || state.LoadPairScoreSnapshot().Scores == nil {
+		t.Error("score-cache callback/snapshot was not initialized")
 	}
 }

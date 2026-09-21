@@ -6,9 +6,10 @@
 // `.codetwin-cache.bin` in the working directory. On the next run we skip
 // any file whose key still matches.
 //
-// What's NOT cached: TF-IDF vectors (corpus-dependent, must be recomputed)
-// and the n² pair matrix (also corpus-dependent). The cache covers the work
-// that scales with file count, not the work that scales with pair count.
+// TF-IDF vectors remain corpus-dependent and are rebuilt each run. Exact
+// scores for candidate pairs are persisted as an incremental snapshot; their
+// document identities include the rebuilt vector weights, so corpus changes
+// invalidate every affected edge without storing an n² matrix.
 //
 // Cache invalidation is automatic on:
 //   - file content change (content hash mismatch)
@@ -27,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/paircache"
 	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
@@ -126,7 +128,12 @@ type Cache struct {
 	// likewise rejected (they simply miss and get rebuilt).
 	Schema  string
 	Entries map[string]Entry
-	dirty   bool
+	// PairScoreSnapshot persists exact candidate scores for incremental
+	// analysis. Document identities encode every scoring input, so changed
+	// vectors, fingerprints, metadata, or scoring parameters miss
+	// automatically.
+	PairScoreSnapshot paircache.Snapshot
+	dirty             bool
 }
 
 // Load reads a cache from `dir`. Returns an empty cache when the file is
@@ -138,7 +145,11 @@ func Load(dir string) (*Cache, error) {
 
 // New returns a fresh empty cache at the current Version and SchemaTag.
 func New() *Cache {
-	return &Cache{Version: Version, Schema: SchemaTag(), Entries: map[string]Entry{}}
+	return &Cache{
+		Version: Version,
+		Schema:  SchemaTag(),
+		Entries: map[string]Entry{},
+	}
 }
 
 // Get returns the cached entry for key, if any. The returned bool reports
@@ -162,6 +173,28 @@ func (c *Cache) Put(key string, e Entry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Entries[key] = e
+	c.dirty = true
+}
+
+// LoadPairScoreSnapshot implements paircache.Store. Callers treat the
+// returned snapshot as immutable until SavePairScoreSnapshot.
+func (c *Cache) LoadPairScoreSnapshot() paircache.Snapshot {
+	if c == nil {
+		return paircache.Snapshot{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.PairScoreSnapshot
+}
+
+// SavePairScoreSnapshot implements paircache.Store.
+func (c *Cache) SavePairScoreSnapshot(snapshot paircache.Snapshot) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.PairScoreSnapshot = snapshot
 	c.dirty = true
 }
 

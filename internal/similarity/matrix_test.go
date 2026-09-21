@@ -8,8 +8,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/paircache"
+	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
@@ -21,6 +24,7 @@ func makeSnippet(name, path string, tokens []string) scan.Snippet {
 	return scan.Snippet{
 		Name:       name,
 		Path:       path,
+		CacheKey:   cache.HashContent([]byte(fmt.Sprintf("%q", tokens))),
 		Tokens:     tokens,
 		NonBlankLn: 30,
 		Fps:        ps,
@@ -102,16 +106,123 @@ func TestBuildGraph_PreservesBuildMatrixResults(t *testing.T) {
 	}
 }
 
+func TestBuildGraph_ReusesUnchangedPairScoresAndInvalidatesAffectedPairs(t *testing.T) {
+	snips := make([]scan.Snippet, 10)
+	vector := func(unique string) Vector {
+		return Vector{
+			"shared-1": 1, "shared-2": 1, "shared-3": 1, "shared-4": 1,
+			"shared-5": 1, "shared-6": 1, "shared-7": 1, "shared-8": 1,
+			unique: 1,
+		}
+	}
+	vectors := make([]NormalizedVector, len(snips))
+	for i := range snips {
+		name := fmt.Sprintf("%d.go", i)
+		snips[i] = makeSnippet(name, name, []string{name})
+		vectors[i] = Normalize(vector(fmt.Sprintf("unique-%d", i)))
+	}
+	state := cache.New()
+	build := func(vs []NormalizedVector) (Graph, []report.Pair, [][2]int, int64, int64) {
+		var hits, misses int64
+		graph, pairs, blocks := BuildGraph(snips, vs, 0, 0.20, nil, MatrixOptions{
+			ScoreCache: state,
+			OnScoreCache: func(gotHits, gotMisses int64) {
+				hits, misses = gotHits, gotMisses
+			},
+		})
+		return graph, pairs, blocks, hits, misses
+	}
+
+	_, _, _, hits, misses := build(vectors)
+	if hits != 0 || misses != 45 {
+		t.Fatalf("cold score cache = %d hits/%d misses, want 0/45", hits, misses)
+	}
+	warmGraph, warmPairs, warmBlocks, hits, misses := build(vectors)
+	if hits != 45 || misses != 0 {
+		t.Fatalf("warm score cache = %d hits/%d misses, want 45/0", hits, misses)
+	}
+	snapshot := state.LoadPairScoreSnapshot()
+	delete(snapshot.Scores, paircache.Pair{A: 0, B: 1})
+	state.SavePairScoreSnapshot(snapshot)
+	_, _, _, hits, misses = build(vectors)
+	if hits != 44 || misses != 1 {
+		t.Fatalf("incomplete score snapshot = %d hits/%d misses, want 44/1", hits, misses)
+	}
+
+	reorderedVectors := append([]NormalizedVector(nil), vectors...)
+	snips[0], snips[9] = snips[9], snips[0]
+	reorderedVectors[0], reorderedVectors[9] = reorderedVectors[9], reorderedVectors[0]
+	reorderedGraph, reorderedPairs, reorderedBlocks, hits, misses := build(reorderedVectors)
+	if hits != 45 || misses != 0 {
+		t.Fatalf("reordered score cache = %d hits/%d misses, want 45/0", hits, misses)
+	}
+	freshReorderedGraph, freshReorderedPairs, freshReorderedBlocks := BuildGraph(
+		snips, reorderedVectors, 0, 0.20, nil,
+	)
+	if !reflect.DeepEqual(reorderedPairs, freshReorderedPairs) ||
+		!reflect.DeepEqual(reorderedBlocks, freshReorderedBlocks) {
+		t.Fatal("reordered incremental findings differ from fresh scoring")
+	}
+	for i := range snips {
+		for j := range snips {
+			if reorderedGraph.Score(i, j) != freshReorderedGraph.Score(i, j) {
+				t.Fatalf("reordered incremental graph mismatch at (%d,%d)", i, j)
+			}
+		}
+	}
+	snips[0], snips[9] = snips[9], snips[0]
+
+	changed := append([]NormalizedVector(nil), vectors...)
+	changedA := vector("unique-0")
+	changedA["unique-0"] = 3
+	changed[0] = Normalize(changedA)
+	gotGraph, gotPairs, gotBlocks, hits, misses := build(changed)
+	if hits != 36 || misses != 9 {
+		t.Fatalf("changed score cache = %d hits/%d misses, want 36/9", hits, misses)
+	}
+	wantGraph, wantPairs, wantBlocks := BuildGraph(snips, changed, 0, 0.20, nil)
+	if !reflect.DeepEqual(gotPairs, wantPairs) || !reflect.DeepEqual(gotBlocks, wantBlocks) {
+		t.Fatalf("incremental findings differ from fresh scoring:\n got pairs=%#v blocks=%v\nwant pairs=%#v blocks=%v",
+			gotPairs, gotBlocks, wantPairs, wantBlocks)
+	}
+	for i := range snips {
+		for j := range snips {
+			if gotGraph.Score(i, j) != wantGraph.Score(i, j) || warmGraph.Score(i, j) == 0 {
+				t.Fatalf("incremental graph mismatch at (%d,%d): got=%v want=%v warm=%v",
+					i, j, gotGraph.Score(i, j), wantGraph.Score(i, j), warmGraph.Score(i, j))
+			}
+		}
+	}
+	if len(warmPairs) != 45 || len(warmBlocks) != 0 {
+		t.Fatalf("warm findings = %d pairs/%d blocks, want 45/0", len(warmPairs), len(warmBlocks))
+	}
+}
+
+func TestExactPairScoreComputesLexicalEvidenceForStrongPair(t *testing.T) {
+	a := makeSnippet("a.go", "a.go", []string{"shared"})
+	b := makeSnippet("b.go", "b.go", []string{"shared"})
+	a.Fps.Set = fingerprint.Set{1: {}}
+	b.Fps.Set = fingerprint.Set{1: {}}
+	a.LexTerms = []string{"alpha", "common-1", "common-2", "common-3", "common-4", "common-5", "common-6", "terms"}
+	b.LexTerms = []string{"beta", "common-1", "common-2", "common-3", "common-4", "common-5", "common-6", "terms"}
+	vector := Normalize(Vector{"shared": 1})
+	score := exactPairScore(a, b, vector, vector, 0, true)
+	if !score.LexicalComputed || score.Lexical <= 0 {
+		t.Fatalf("strong pair lexical score = %+v, want computed positive evidence", score)
+	}
+}
+
 func BenchmarkSimilarityStoragePipeline(b *testing.B) {
 	const size = 1_000
 	snips := make([]scan.Snippet, size)
 	for i := range snips {
-		// Groups of five model small clone families; groups share no terms,
-		// keeping the representative graph sparse.
-		term := fmt.Sprintf("family_%d", i/5)
-		tokens := make([]string, 20)
+		// Groups of 25 model larger clone families where incremental score
+		// reuse amortizes key validation; groups share no terms, keeping the
+		// representative graph sparse.
+		family := i / 25
+		tokens := make([]string, 60)
 		for j := range tokens {
-			tokens[j] = term
+			tokens[j] = fmt.Sprintf("family_%d_term_%d", family, j)
 		}
 		snips[i] = makeSnippet(fmt.Sprintf("file_%d.go", i), fmt.Sprintf("file_%d.go", i), tokens)
 		snips[i].Lang = tokenizer.Go
@@ -135,6 +246,39 @@ func BenchmarkSimilarityStoragePipeline(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			graph, pairs, candidates := BuildGraph(snips, vectors, 0, 0.50, nil)
+			clusters := cluster.DBSCAN(size, 0.50, 2, func(a, b int) float64 {
+				return 1 - graph.Score(a, b)
+			})
+			runtime.KeepAlive(graph)
+			runtime.KeepAlive(pairs)
+			runtime.KeepAlive(candidates)
+			runtime.KeepAlive(clusters)
+		}
+	})
+	b.Run("incremental-cold", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			state := cache.New()
+			graph, pairs, candidates := BuildGraph(
+				snips, vectors, 0, 0.50, nil, MatrixOptions{ScoreCache: state},
+			)
+			clusters := cluster.DBSCAN(size, 0.50, 2, func(a, b int) float64 {
+				return 1 - graph.Score(a, b)
+			})
+			runtime.KeepAlive(graph)
+			runtime.KeepAlive(pairs)
+			runtime.KeepAlive(candidates)
+			runtime.KeepAlive(clusters)
+		}
+	})
+	state := cache.New()
+	BuildGraph(snips, vectors, 0, 0.50, nil, MatrixOptions{ScoreCache: state})
+	b.Run("incremental-warm", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			graph, pairs, candidates := BuildGraph(
+				snips, vectors, 0, 0.50, nil, MatrixOptions{ScoreCache: state},
+			)
 			clusters := cluster.DBSCAN(size, 0.50, 2, func(a, b int) float64 {
 				return 1 - graph.Score(a, b)
 			})

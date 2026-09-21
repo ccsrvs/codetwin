@@ -37,6 +37,7 @@ import (
 	"github.com/ccsrvs/codetwin/internal/deadcode"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/git"
+	"github.com/ccsrvs/codetwin/internal/paircache"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
 	"github.com/ccsrvs/codetwin/internal/refactor"
 	"github.com/ccsrvs/codetwin/internal/report"
@@ -407,19 +408,6 @@ func main() {
 		fmt.Fprint(os.Stderr, "\rindexing snippets...")
 	}
 
-	if !*noCache {
-		if err := cacheStorage.Save(cacheState); err != nil {
-			if showProgress {
-				fmt.Fprint(os.Stderr, "\r\033[K")
-			}
-			fmt.Fprintf(os.Stderr, "warning: cache save failed: %v\n", err)
-			if showProgress {
-				fmt.Fprint(os.Stderr, "\rindexing snippets...")
-			}
-		}
-		debugf("cache saved")
-	}
-
 	tokenStreams := make([][]string, len(snippets))
 	for i, s := range snippets {
 		tokenStreams[i] = s.Tokens
@@ -450,13 +438,22 @@ func main() {
 		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
 	}
 	var candidatePairs int64
+	var scoreCache paircache.Store
+	if !*noCache {
+		scoreCache = cacheState
+	}
+	var scoreCacheHits, scoreCacheMisses int64
 	graph, pairs, blockCands := similarity.BuildGraph(
 		snippets, vectors, *minConfLines, *threshold,
 		func(d, _ int64) { matrixDone.Store(d) },
 		similarity.MatrixOptions{
 			IncludeWeakPairs: *verbose,
+			ScoreCache:       scoreCache,
 			OnCandidates: func(selected, _ int64) {
 				candidatePairs = selected
+			},
+			OnScoreCache: func(hits, misses int64) {
+				scoreCacheHits, scoreCacheMisses = hits, misses
 			},
 		},
 	)
@@ -471,6 +468,17 @@ func main() {
 			candidatePairs, totalPairs, 100*(1-float64(candidatePairs)/float64(totalPairs)))
 	} else {
 		debugf("candidate retrieval: 0/0 pairs selected")
+	}
+	debugf("incremental scoring: %d reused, %d recomputed", scoreCacheHits, scoreCacheMisses)
+
+	if !*noCache {
+		if err := cacheStorage.Save(cacheState); err != nil {
+			if showProgress {
+				fmt.Fprint(os.Stderr, "\r\033[K")
+			}
+			fmt.Fprintf(os.Stderr, "warning: cache save failed: %v\n", err)
+		}
+		debugf("cache saved")
 	}
 
 	// Tag each pair endpoint with its snippet's test-file classification
