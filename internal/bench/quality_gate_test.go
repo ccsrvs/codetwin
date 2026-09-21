@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/similarity"
 )
@@ -155,11 +156,19 @@ func TestBench_SemanticCandidatesMatchExhaustive(t *testing.T) {
 		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
 	)
 	var selected, total int64
+	scoreState := cache.New()
+	var scoreHits, scoreMisses int64
 	graph, gotPairs, gotBlocks := similarity.BuildGraph(
 		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
-		similarity.MatrixOptions{OnCandidates: func(gotSelected, gotTotal int64) {
-			selected, total = gotSelected, gotTotal
-		}},
+		similarity.MatrixOptions{
+			ScoreCache: scoreState,
+			OnCandidates: func(gotSelected, gotTotal int64) {
+				selected, total = gotSelected, gotTotal
+			},
+			OnScoreCache: func(hits, misses int64) {
+				scoreHits, scoreMisses = hits, misses
+			},
+		},
 	)
 
 	if !reflect.DeepEqual(gotPairs, wantPairs) {
@@ -178,6 +187,32 @@ func TestBench_SemanticCandidatesMatchExhaustive(t *testing.T) {
 	}
 	if total > 0 && selected >= total {
 		t.Errorf("candidate retrieval selected %d/%d pairs; want measurable pruning", selected, total)
+	}
+	if scoreHits != 0 || scoreMisses == 0 {
+		t.Errorf("cold score cache = %d hits/%d misses, want 0/>0", scoreHits, scoreMisses)
+	}
+	var warmHits, warmMisses int64
+	warmGraph, warmPairs, warmBlocks := similarity.BuildGraph(
+		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
+		similarity.MatrixOptions{
+			ScoreCache: scoreState,
+			OnScoreCache: func(hits, misses int64) {
+				warmHits, warmMisses = hits, misses
+			},
+		},
+	)
+	if warmHits != scoreMisses || warmMisses != 0 {
+		t.Errorf("warm score cache = %d hits/%d misses, want %d/0", warmHits, warmMisses, scoreMisses)
+	}
+	if !reflect.DeepEqual(warmPairs, wantPairs) || !reflect.DeepEqual(warmBlocks, wantBlocks) {
+		t.Error("warm incremental findings differ from exhaustive findings")
+	}
+	for i := range matrix {
+		for j := i + 1; j < len(matrix[i]); j++ {
+			if got, want := warmGraph.Score(i, j), graph.Score(i, j); got != want {
+				t.Fatalf("warm incremental score (%d,%d) = %v, cold candidate = %v", i, j, got, want)
+			}
+		}
 	}
 	pruned := 0.0
 	if total > 0 {

@@ -44,6 +44,9 @@ func TestProcessFile_GivenValidJSFile_When_Process_Then_ReturnsSnippetsWithExpec
 	if s.Name == "" {
 		t.Errorf("Name is empty")
 	}
+	if s.CacheKey == "" {
+		t.Errorf("CacheKey is empty")
+	}
 	if len(s.Tokens) == 0 {
 		t.Errorf("Tokens is empty")
 	}
@@ -100,6 +103,9 @@ func TestProcessFile_GivenSecondCall_When_CacheWarm_Then_ReturnsEquivalentSnippe
 		}
 		if first[i].NonBlankLn != second[i].NonBlankLn {
 			t.Errorf("snippet %d: NonBlankLn differs", i)
+		}
+		if first[i].CacheKey == "" || first[i].CacheKey != second[i].CacheKey {
+			t.Errorf("snippet %d: CacheKey differs (first=%q second=%q)", i, first[i].CacheKey, second[i].CacheKey)
 		}
 	}
 }

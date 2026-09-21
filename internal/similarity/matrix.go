@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
+	"github.com/ccsrvs/codetwin/internal/paircache"
 	"github.com/ccsrvs/codetwin/internal/report"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/splitter"
@@ -71,6 +72,12 @@ type MatrixOptions struct {
 	// BuildGraph reports the union of structural and semantic candidates;
 	// BuildMatrix is exhaustive and therefore reports total, total.
 	OnCandidates func(selected, total int64)
+
+	// ScoreCache reuses exact scores whose complete scoring inputs are
+	// unchanged. It affects performance only; cache misses run the normal
+	// exact scorer. OnScoreCache reports cache hits and misses after the run.
+	ScoreCache   paircache.Store
+	OnScoreCache func(hits, misses int64)
 }
 
 // BuildGraph computes a candidate-pruned similarity graph, the
@@ -134,6 +141,8 @@ func buildGraph(
 ) ([]report.Pair, [][2]int) {
 	floor := MaterializationFloor(threshold)
 	var onCandidates func(selected, total int64)
+	var scoreCache paircache.Store
+	var onScoreCache func(hits, misses int64)
 	for _, opt := range options {
 		// Verbose bypasses the threshold-relative band but not the
 		// absolute minimum: a verbose report of a large repo must not
@@ -144,6 +153,12 @@ func buildGraph(
 		if opt.OnCandidates != nil {
 			onCandidates = opt.OnCandidates
 		}
+		if opt.ScoreCache != nil {
+			scoreCache = opt.ScoreCache
+		}
+		if opt.OnScoreCache != nil {
+			onScoreCache = opt.OnScoreCache
+		}
 	}
 	n := len(snippets)
 
@@ -152,7 +167,60 @@ func buildGraph(
 		if onCandidates != nil {
 			onCandidates(0, totalPairs)
 		}
+		if scoreCache != nil {
+			documents := make([]paircache.DocumentKey, n)
+			for i := range snippets {
+				documents[i] = snippetScoreDigest(snippets[i], vectors[i])
+			}
+			scoreCache.SavePairScoreSnapshot(paircache.Snapshot{
+				Context:   pairScoreCacheContext(minConfLines),
+				Documents: documents,
+				Scores:    map[paircache.Pair]paircache.Score{},
+			})
+		}
+		if onScoreCache != nil {
+			onScoreCache(0, 0)
+		}
 		return nil, nil
+	}
+	var scoreDigests []scoreDigest
+	var previousSnapshot paircache.Snapshot
+	var previousIndices []int
+	sameDocuments := false
+	if scoreCache != nil {
+		scoreDigests = make([]scoreDigest, n)
+		for i := range snippets {
+			scoreDigests[i] = snippetScoreDigest(snippets[i], vectors[i])
+		}
+		previousSnapshot = scoreCache.LoadPairScoreSnapshot()
+		previousIndices = make([]int, n)
+		for i := range previousIndices {
+			previousIndices[i] = -1
+		}
+		if previousSnapshot.Context == pairScoreCacheContext(minConfLines) {
+			oldByDocument := make(map[paircache.DocumentKey]int, len(previousSnapshot.Documents))
+			for i, key := range previousSnapshot.Documents {
+				if _, duplicate := oldByDocument[key]; duplicate {
+					oldByDocument[key] = -1
+				} else {
+					oldByDocument[key] = i
+				}
+			}
+			for i := range previousIndices {
+				if old, ok := oldByDocument[scoreDigests[i]]; ok {
+					previousIndices[i] = old
+				}
+			}
+			sameDocuments = len(scoreDigests) == len(previousSnapshot.Documents)
+			if sameDocuments {
+				for i := range scoreDigests {
+					if scoreDigests[i] != previousSnapshot.Documents[i] {
+						sameDocuments = false
+						break
+					}
+				}
+			}
+		}
 	}
 
 	hashIndex := buildHashIndex(snippets)
@@ -169,6 +237,9 @@ func buildGraph(
 	pairsByWorker := make([][]report.Pair, workers)
 	blockCandsByWorker := make([][][2]int, workers)
 	candidatesByWorker := make([]int64, workers)
+	cacheHitsByWorker := make([]int64, workers)
+	cacheMissesByWorker := make([]int64, workers)
+	cacheScoresByWorker := make([]map[paircache.Pair]paircache.Score, workers)
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -177,6 +248,11 @@ func buildGraph(
 			var local []report.Pair
 			var localBlockCands [][2]int
 			var localCandidates int64
+			var localCacheHits, localCacheMisses int64
+			var localCacheScores map[paircache.Pair]paircache.Score
+			if scoreCache != nil && !sameDocuments {
+				localCacheScores = make(map[paircache.Pair]paircache.Score)
+			}
 			batchProgress := int64(0)
 			for i := workerID; i < n; i += workers {
 				// Structural candidates share a fingerprint. Semantic candidates
@@ -226,41 +302,38 @@ func buildGraph(
 						continue
 					}
 
-					var structural float64
-					if _, ok := structuralCands[j]; ok {
-						structural = fingerprint.Jaccard(snippets[i].Fps.Set, snippets[j].Fps.Set)
+					_, structuralCandidate := structuralCands[j]
+					var scores paircache.Score
+					if scoreCache != nil {
+						oldA, oldB := previousIndices[i], previousIndices[j]
+						var hit bool
+						if oldA >= 0 && oldB >= 0 {
+							if oldA > oldB {
+								oldA, oldB = oldB, oldA
+							}
+							scores, hit = previousSnapshot.Scores[paircache.Pair{A: oldA, B: oldB}]
+						}
+						if hit {
+							localCacheHits++
+						} else {
+							localCacheMisses++
+							scores = exactPairScore(
+								snippets[i], snippets[j], vectors[i], vectors[j], minConfLines, structuralCandidate)
+							if localCacheScores == nil {
+								localCacheScores = make(map[paircache.Pair]paircache.Score)
+							}
+						}
+						if !sameDocuments || !hit {
+							localCacheScores[paircache.Pair{A: i, B: j}] = scores
+						}
+					} else {
+						scores = exactPairScore(
+							snippets[i], snippets[j], vectors[i], vectors[j], minConfLines, structuralCandidate)
 					}
-					semantic := CosineFromNormalized(vectors[i], vectors[j])
-					// Unknown↔Unknown counts as SAME language: two files
-					// the tokenizer couldn't classify are more likely the
-					// same (unrecognized) language than different ones, so
-					// they get the even blend and the R3 same-language
-					// corroboration cap. Excluding Unknown here would hand
-					// them the semantic-dominant 0.2/0.8 cross-language
-					// blend AND let them escape the cap — unreachable via
-					// the CLI today (scan gates on supported extensions),
-					// but a trap for future loosening. Note --cross-lang-only
-					// (report.Prepare) independently treats unknown-language
-					// pairs as NOT cross-language.
+					if scores.Combined > 0 {
+						graph.SetScore(i, j, scores.Combined)
+					}
 					sameLang := snippets[i].Lang == snippets[j].Lang
-					combined := CombinedForLangs(structural, semantic, sameLang)
-					// Length-aware confidence: dampen short-snippet matches
-					// before they reach the matrix so DBSCAN sees the same
-					// view of the world the report does. structural and
-					// semantic stay raw — only the combined score is
-					// adjusted, since that's what feeds clustering and
-					// thresholding. Ordering: the same-language evidence cap
-					// (inside CombinedForLangs) applies to the RAW blend,
-					// then LengthDampen discounts the capped value — the two
-					// encode independent evidence deficits (no structural
-					// corroboration; too little length), so a short idiom
-					// pair compounds both. Dampening first would let the cap
-					// mask the dampener (min(x·d, cap) ≥ min(x, cap)·d).
-					combined = LengthDampen(
-						combined, snippets[i].NonBlankLn, snippets[j].NonBlankLn, minConfLines)
-					if combined > 0 {
-						graph.SetScore(i, j, combined)
-					}
 
 					// Block-candidate gray band (review §5.3): the pair
 					// itself won't render (below threshold), but a shared
@@ -276,9 +349,9 @@ func buildGraph(
 					// joined non-contiguous Code would make the block
 					// detector's chunk-relative line arithmetic report
 					// ranges that don't exist in the source.
-					if sameLang && structural > 0 &&
+					if sameLang && scores.Structural > 0 &&
 						snippets[i].Kind != splitter.KindClass &&
-						combined >= BlockCandidateFloor && combined < threshold {
+						scores.Combined >= BlockCandidateFloor && scores.Combined < threshold {
 						localBlockCands = append(localBlockCands, [2]int{i, j})
 					}
 
@@ -286,43 +359,24 @@ func buildGraph(
 					// A pair scoring exactly 0 shares no fingerprint and
 					// no vocabulary: it carries no evidence and is never a
 					// "weak similarity", whatever the floor.
-					if combined < floor || combined <= 0 {
+					if scores.Combined < floor || scores.Combined <= 0 {
 						continue
-					}
-					// Lexical sub-score, computed lazily: only the
-					// exact/near bands (> StructuralTwinMinScore) read
-					// it — the structural-twin label gate — so pairs
-					// below that band skip the term-set merge entirely.
-					// LexicalComputed keeps a measured 0.0 (fully
-					// disjoint vocabulary) distinguishable from "not
-					// computed". Snippets with fewer than
-					// MinLexicalTerms terms carry too little content
-					// evidence to judge either way, so they stay
-					// uncomputed rather than demoting on a noisy
-					// measurement.
-					var lexical float64
-					lexicalComputed := false
-					if combined > report.StructuralTwinMinScore &&
-						len(snippets[i].LexTerms) >= MinLexicalTerms &&
-						len(snippets[j].LexTerms) >= MinLexicalTerms {
-						lexical = LexicalJaccard(snippets[i].LexTerms, snippets[j].LexTerms)
-						lexicalComputed = true
 					}
 					local = append(local, report.Pair{
 						ID:              report.PairID(snippets[i].Name, snippets[j].Name),
 						NameA:           snippets[i].Name,
 						NameB:           snippets[j].Name,
-						Structural:      structural,
-						Semantic:        semantic,
-						Score:           combined,
+						Structural:      scores.Structural,
+						Semantic:        scores.Semantic,
+						Score:           scores.Combined,
 						LinesA:          snippets[i].NonBlankLn,
 						LinesB:          snippets[j].NonBlankLn,
 						LangA:           string(snippets[i].Lang),
 						LangB:           string(snippets[j].Lang),
 						RepoA:           snippets[i].Repo,
 						RepoB:           snippets[j].Repo,
-						Lexical:         lexical,
-						LexicalComputed: lexicalComputed,
+						Lexical:         scores.Lexical,
+						LexicalComputed: scores.LexicalComputed,
 					})
 				}
 				// Flush progress in batches per row to avoid hammering the
@@ -338,6 +392,9 @@ func buildGraph(
 			pairsByWorker[workerID] = local
 			blockCandsByWorker[workerID] = localBlockCands
 			candidatesByWorker[workerID] = localCandidates
+			cacheHitsByWorker[workerID] = localCacheHits
+			cacheMissesByWorker[workerID] = localCacheMisses
+			cacheScoresByWorker[workerID] = localCacheScores
 		}(w)
 	}
 	wg.Wait()
@@ -347,6 +404,42 @@ func buildGraph(
 			selected += count
 		}
 		onCandidates(selected, totalPairs)
+	}
+	if scoreCache != nil {
+		var misses int64
+		for _, count := range cacheMissesByWorker {
+			misses += count
+		}
+		if misses > 0 || !sameDocuments {
+			var currentScores map[paircache.Pair]paircache.Score
+			if sameDocuments {
+				currentScores = make(map[paircache.Pair]paircache.Score, len(previousSnapshot.Scores))
+				for key, score := range previousSnapshot.Scores {
+					currentScores[key] = score
+				}
+			} else {
+				currentScores = make(map[paircache.Pair]paircache.Score)
+			}
+			for _, workerScores := range cacheScoresByWorker {
+				for key, score := range workerScores {
+					currentScores[key] = score
+				}
+			}
+			documents := append([]paircache.DocumentKey(nil), scoreDigests...)
+			scoreCache.SavePairScoreSnapshot(paircache.Snapshot{
+				Context:   pairScoreCacheContext(minConfLines),
+				Documents: documents,
+				Scores:    currentScores,
+			})
+		}
+	}
+	if onScoreCache != nil {
+		var hits, misses int64
+		for i := range cacheHitsByWorker {
+			hits += cacheHitsByWorker[i]
+			misses += cacheMissesByWorker[i]
+		}
+		onScoreCache(hits, misses)
 	}
 
 	total := 0
@@ -374,6 +467,41 @@ func buildGraph(
 		return blockCands[x][1] < blockCands[y][1]
 	})
 	return pairs, blockCands
+}
+
+func exactPairScore(
+	a, b scan.Snippet,
+	va, vb NormalizedVector,
+	minConfLines int,
+	structuralCandidate bool,
+) paircache.Score {
+	var structural float64
+	if structuralCandidate {
+		structural = fingerprint.Jaccard(a.Fps.Set, b.Fps.Set)
+	}
+	semantic := CosineFromNormalized(va, vb)
+	// Unknown↔Unknown counts as the same language. This preserves the
+	// corroboration cap and avoids giving two unclassified files the more
+	// permissive cross-language blend.
+	combined := CombinedForLangs(structural, semantic, a.Lang == b.Lang)
+	combined = LengthDampen(combined, a.NonBlankLn, b.NonBlankLn, minConfLines)
+
+	// The lexical sub-score is needed only by the structural-twin label gate.
+	var lexical float64
+	lexicalComputed := false
+	if combined > report.StructuralTwinMinScore &&
+		len(a.LexTerms) >= MinLexicalTerms &&
+		len(b.LexTerms) >= MinLexicalTerms {
+		lexical = LexicalJaccard(a.LexTerms, b.LexTerms)
+		lexicalComputed = true
+	}
+	return paircache.Score{
+		Structural:      structural,
+		Semantic:        semantic,
+		Combined:        combined,
+		Lexical:         lexical,
+		LexicalComputed: lexicalComputed,
+	}
 }
 
 // BuildMatrix is the compatibility entry point for callers that still need

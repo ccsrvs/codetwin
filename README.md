@@ -804,13 +804,16 @@ builds a `fingerprint-hash → snippet-indices` map and a bounded TF-IDF
 term index. Their union preserves structural and cross-language
 semantic-only candidates without all-pairs cosine scoring.
 
-**Per-file cache.** The expensive per-file work (split → tokenize →
-fingerprint with positions) is persisted to `.codetwin-cache.bin` in
-the working directory. Cache keys are
+**Persistent incremental cache.** The expensive per-file work (split →
+tokenize → fingerprint with positions) and exact candidate-pair scores are
+persisted to `.codetwin-cache.bin` in the working directory. File cache keys are
 `sha256(absPath ‖ contentHash ‖ patternsHash)` so any of those
 changing invalidates the relevant entry automatically. On a warm rerun
-unchanged files skip the entire pipeline. Add `.codetwin-cache.bin` to
-your `.gitignore`. Use `--no-cache` to skip caching entirely or
+unchanged files skip the parsing pipeline and unchanged candidate pairs reuse
+their exact scores. A changed file, corpus-dependent TF-IDF weight, scoring
+parameter, or snippet property invalidates the affected document identity and
+recomputes only incident candidate scores. Add `.codetwin-cache.bin` to your
+`.gitignore`. Use `--no-cache` to skip caching entirely or
 `--rebuild-cache` to force a fresh build. Persistence is behind the
 `cache.Storage` interface; the default CGO-free gob implementation uses a
 synced temporary file plus atomic rename and explicit schema validation.
@@ -841,6 +844,7 @@ codetwin/
     ├── baseline/                # Clone-watchlist snapshots + drift diffing
     ├── config/                  # .codetwin.json loading + ignore matching
     ├── cache/                   # Pluggable cache storage; atomic gob default
+    ├── paircache/               # Persisted exact-score snapshot contract
     ├── scan/                    # Per-file pipeline + parallel orchestrator (split → tokenize → fingerprint)
     ├── git/                     # Optional git integration: repo detection, diff parsing, blame
     ├── bench/                   # Test-only ground-truth benchmark (detection-quality gate)
