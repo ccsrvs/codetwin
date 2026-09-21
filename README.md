@@ -570,7 +570,7 @@ Classification is by path only (no file contents are read):
 | Rust | a `tests/` directory component |
 | Elixir | `*_test.exs`, or a `test/` directory component |
 
-This is presentation-layer only: scores, the similarity matrix, and
+This is presentation-layer only: scores, the similarity graph, and
 clustering are unchanged, and suppression happens after threshold
 filtering (the summary counts only findings that would have rendered)
 and before `--limit` (the limit applies to what remains). Unlike adding
@@ -884,11 +884,13 @@ positions so the renderer can highlight which lines actually matched.
 Builds TF-IDF weighted token vectors across the full corpus and computes
 cosine similarity. This is the **semantic score** — it catches functionally
 similar code even when structure differs (e.g. a Python loop vs a Go loop
-with different control flow patterns).
+with different control flow patterns). Combined nonzero scores are stored as
+edges in a sparse graph; an absent edge has score zero. The legacy
+`BuildMatrix` API remains as a dense compatibility wrapper.
 
 **Blocks** (`internal/blocks`)
 The sub-function partial-clone detector behind `--min-block-lines`.
-`BuildMatrix` hands it the "gray band" — same-language pairs that share
+`BuildGraph` hands it the "gray band" — same-language pairs that share
 fingerprints but score below the report threshold — and for each candidate it
 seeds on shared fingerprint positions, extends them to maximal
 exactly-matching token runs, chains runs across small gaps, and verifies each
@@ -897,7 +899,7 @@ floor on both sides). `cmd/codetwin/blocks.go` dedupes and packages the
 findings for the `PARTIAL CLONES` section / `partial_clones` JSON array.
 
 **Cluster** (`internal/cluster`)
-DBSCAN over the combined similarity matrix. Rather than reporting O(n²) pairs,
+DBSCAN over the combined sparse similarity graph. Rather than reporting O(n²) pairs,
 it groups families of similar snippets into clusters. Each cluster is one
 refactoring task. Noise points (unique snippets) are omitted. DBSCAN links
 transitively, so each cluster header reports both the average internal pair
@@ -934,7 +936,7 @@ five drift event kinds.
 Loads `.codetwin.json` from the working directory. Compiles `ignore_paths`
 into a glob/component matcher, `ignore_patterns` into regexes consumed by
 the tokenizer, and `ignore_pairs` into a post-similarity matcher applied
-between BuildMatrix and DBSCAN.
+between BuildGraph and DBSCAN.
 
 **Scan** (`internal/scan`)
 Per-file pipeline that turns a source file into one or more `Snippet`s

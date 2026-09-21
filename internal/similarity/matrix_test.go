@@ -1,11 +1,14 @@
 package similarity
 
 import (
+	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"sync/atomic"
 	"testing"
 
+	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
@@ -88,6 +91,59 @@ func TestBuildGraph_PreservesBuildMatrixResults(t *testing.T) {
 			}
 		}
 	}
+	denseClusters := cluster.DBSCAN(len(snips), 0.50, 2, func(i, j int) float64 {
+		return 1 - matrix[i][j]
+	})
+	sparseClusters := cluster.DBSCAN(len(snips), 0.50, 2, func(i, j int) float64 {
+		return 1 - graph.Score(i, j)
+	})
+	if !reflect.DeepEqual(sparseClusters, denseClusters) {
+		t.Errorf("DBSCAN results changed through sparse storage: got %#v, want %#v", sparseClusters, denseClusters)
+	}
+}
+
+func BenchmarkSimilarityStoragePipeline(b *testing.B) {
+	const size = 1_000
+	snips := make([]scan.Snippet, size)
+	for i := range snips {
+		// Groups of five model small clone families; groups share no terms,
+		// keeping the representative graph sparse.
+		term := fmt.Sprintf("family_%d", i/5)
+		tokens := make([]string, 20)
+		for j := range tokens {
+			tokens[j] = term
+		}
+		snips[i] = makeSnippet(fmt.Sprintf("file_%d.go", i), fmt.Sprintf("file_%d.go", i), tokens)
+		snips[i].Lang = tokenizer.Go
+	}
+	vectors := vectorsFor(snips)
+
+	b.Run("dense", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			matrix, pairs, candidates := BuildMatrix(snips, vectors, 0, 0.50, nil)
+			clusters := cluster.DBSCAN(size, 0.50, 2, func(a, b int) float64 {
+				return 1 - matrix[a][b]
+			})
+			runtime.KeepAlive(matrix)
+			runtime.KeepAlive(pairs)
+			runtime.KeepAlive(candidates)
+			runtime.KeepAlive(clusters)
+		}
+	})
+	b.Run("sparse", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			graph, pairs, candidates := BuildGraph(snips, vectors, 0, 0.50, nil)
+			clusters := cluster.DBSCAN(size, 0.50, 2, func(a, b int) float64 {
+				return 1 - graph.Score(a, b)
+			})
+			runtime.KeepAlive(graph)
+			runtime.KeepAlive(pairs)
+			runtime.KeepAlive(candidates)
+			runtime.KeepAlive(clusters)
+		}
+	})
 }
 
 func TestBuildMatrix_GivenNestedSnippetsInSameFile_When_Build_Then_PairIsSuppressed(t *testing.T) {

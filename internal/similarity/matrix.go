@@ -75,9 +75,8 @@ type MatrixOptions struct {
 // the user's --threshold value. Work is sharded across
 // runtime.NumCPU() goroutines using a stripe partition (worker w
 // handles rows where i % numWorkers == w), which balances small-row
-// and big-row work. Each worker writes to its own pair buffer and to
-// disjoint matrix cells, so no synchronization is needed beyond the
-// final WaitGroup join.
+// and big-row work. The sparse graph synchronizes shared endpoint rows;
+// each worker owns its pair and block-candidate buffers.
 //
 // Block candidates are indices into snippets ({i, j} with i < j),
 // sorted, so downstream block detection is deterministic and the
@@ -94,7 +93,11 @@ func BuildGraph(
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
 ) (MutableGraph, []report.Pair, [][2]int) {
-	return buildDenseGraph(snippets, vectors, minConfLines, threshold, onPairDone, options...)
+	graph := NewSparseGraph(len(snippets))
+	pairs, blockCands := buildGraph(
+		graph, snippets, vectors, minConfLines, threshold, onPairDone, options...,
+	)
+	return graph, pairs, blockCands
 }
 
 func buildDenseGraph(
@@ -105,6 +108,22 @@ func buildDenseGraph(
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
 ) (*DenseGraph, []report.Pair, [][2]int) {
+	graph := NewDenseGraph(len(snippets))
+	pairs, blockCands := buildGraph(
+		graph, snippets, vectors, minConfLines, threshold, onPairDone, options...,
+	)
+	return graph, pairs, blockCands
+}
+
+func buildGraph(
+	graph MutableGraph,
+	snippets []scan.Snippet,
+	vectors []NormalizedVector,
+	minConfLines int,
+	threshold float64,
+	onPairDone func(done, total int64),
+	options ...MatrixOptions,
+) ([]report.Pair, [][2]int) {
 	floor := MaterializationFloor(threshold)
 	for _, opt := range options {
 		// Verbose bypasses the threshold-relative band but not the
@@ -115,11 +134,10 @@ func buildDenseGraph(
 		}
 	}
 	n := len(snippets)
-	graph := NewDenseGraph(n)
 
 	totalPairs := int64(n) * int64(n-1) / 2
 	if n < 2 {
-		return graph, nil, nil
+		return nil, nil
 	}
 
 	hashIndex := buildHashIndex(snippets)
@@ -207,7 +225,9 @@ func buildDenseGraph(
 					// mask the dampener (min(x·d, cap) ≥ min(x, cap)·d).
 					combined = LengthDampen(
 						combined, snippets[i].NonBlankLn, snippets[j].NonBlankLn, minConfLines)
-					graph.SetScore(i, j, combined)
+					if combined > 0 {
+						graph.SetScore(i, j, combined)
+					}
 
 					// Block-candidate gray band (review §5.3): the pair
 					// itself won't render (below threshold), but a shared
@@ -312,7 +332,7 @@ func buildDenseGraph(
 		}
 		return blockCands[x][1] < blockCands[y][1]
 	})
-	return graph, pairs, blockCands
+	return pairs, blockCands
 }
 
 // BuildMatrix is the compatibility entry point for callers that still need
