@@ -1,9 +1,31 @@
 package cluster
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
+
+func TestDBSCANContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := DBSCANContext(ctx, 2, .5, 2, func(i, j int) float64 { return 0 })
+	if !errors.Is(err, context.Canceled) || got.NumClusters != 0 || got.Labels != nil {
+		t.Fatalf("DBSCANContext = %#v, %v", got, err)
+	}
+}
+
+func TestDBSCANContextCancelsDuringNeighborSearch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	got, err := DBSCANContext(ctx, 3, .5, 2, func(i, j int) float64 {
+		cancel()
+		return 0
+	})
+	if !errors.Is(err, context.Canceled) || got.Labels != nil {
+		t.Fatalf("DBSCANContext = %#v, %v", got, err)
+	}
+}
 
 func TestDBSCAN_AllNoiseWhenSparse(t *testing.T) {
 	// All point pairs far apart → no clusters form

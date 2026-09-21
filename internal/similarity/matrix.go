@@ -1,6 +1,7 @@
 package similarity
 
 import (
+	"context"
 	"runtime"
 	"sort"
 	"sync"
@@ -106,12 +107,29 @@ func BuildGraph(
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
 ) (MutableGraph, []report.Pair, [][2]int) {
-	graph := NewSparseGraph(len(snippets))
-	semanticIndex := NewSemanticCandidateIndex(vectors)
-	pairs, blockCands := buildGraph(
-		graph, snippets, vectors, semanticIndex, minConfLines, threshold, onPairDone, options...,
+	graph, pairs, blockCands, _ := BuildGraphContext(
+		context.Background(), snippets, vectors, minConfLines, threshold, onPairDone, options...,
 	)
 	return graph, pairs, blockCands
+}
+
+// BuildGraphContext is BuildGraph with cooperative cancellation. A canceled
+// run never publishes a partial pair-score snapshot to the incremental cache.
+func BuildGraphContext(
+	ctx context.Context,
+	snippets []scan.Snippet,
+	vectors []NormalizedVector,
+	minConfLines int,
+	threshold float64,
+	onPairDone func(done, total int64),
+	options ...MatrixOptions,
+) (MutableGraph, []report.Pair, [][2]int, error) {
+	graph := NewSparseGraph(len(snippets))
+	semanticIndex := NewSemanticCandidateIndex(vectors)
+	pairs, blockCands, err := buildGraph(
+		ctx, graph, snippets, vectors, semanticIndex, minConfLines, threshold, onPairDone, options...,
+	)
+	return graph, pairs, blockCands, err
 }
 
 func buildDenseGraph(
@@ -123,13 +141,14 @@ func buildDenseGraph(
 	options ...MatrixOptions,
 ) (*DenseGraph, []report.Pair, [][2]int) {
 	graph := NewDenseGraph(len(snippets))
-	pairs, blockCands := buildGraph(
-		graph, snippets, vectors, nil, minConfLines, threshold, onPairDone, options...,
+	pairs, blockCands, _ := buildGraph(
+		context.Background(), graph, snippets, vectors, nil, minConfLines, threshold, onPairDone, options...,
 	)
 	return graph, pairs, blockCands
 }
 
 func buildGraph(
+	ctx context.Context,
 	graph MutableGraph,
 	snippets []scan.Snippet,
 	vectors []NormalizedVector,
@@ -138,7 +157,10 @@ func buildGraph(
 	threshold float64,
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
-) ([]report.Pair, [][2]int) {
+) ([]report.Pair, [][2]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	floor := MaterializationFloor(threshold)
 	var onCandidates func(selected, total int64)
 	var scoreCache paircache.Store
@@ -181,7 +203,7 @@ func buildGraph(
 		if onScoreCache != nil {
 			onScoreCache(0, 0)
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 	var scoreDigests []scoreDigest
 	var previousSnapshot paircache.Snapshot
@@ -255,6 +277,9 @@ func buildGraph(
 			}
 			batchProgress := int64(0)
 			for i := workerID; i < n; i += workers {
+				if ctx.Err() != nil {
+					break
+				}
 				// Structural candidates share a fingerprint. Semantic candidates
 				// share at least one indexed high-weight TF-IDF term. Their union
 				// bounds the work in candidate mode; exhaustive mode (used by
@@ -278,6 +303,9 @@ func buildGraph(
 				}
 
 				for j := i + 1; j < n; j++ {
+					if ctx.Err() != nil {
+						break
+					}
 					if candidates != nil {
 						if _, ok := candidates[j]; !ok {
 							batchProgress++
@@ -398,6 +426,9 @@ func buildGraph(
 		}(w)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	if onCandidates != nil {
 		var selected int64
 		for _, count := range candidatesByWorker {
@@ -466,7 +497,7 @@ func buildGraph(
 		}
 		return blockCands[x][1] < blockCands[y][1]
 	})
-	return pairs, blockCands
+	return pairs, blockCands, nil
 }
 
 func exactPairScore(

@@ -1,6 +1,8 @@
 package similarity
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -16,6 +18,15 @@ import (
 	"github.com/ccsrvs/codetwin/internal/scan"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
+
+func TestBuildGraphContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	graph, pairs, blocks, err := BuildGraphContext(ctx, nil, nil, 1, .5, nil)
+	if !errors.Is(err, context.Canceled) || graph == nil || pairs != nil || blocks != nil {
+		t.Fatalf("BuildGraphContext = %T, %v, %v, %v", graph, pairs, blocks, err)
+	}
+}
 
 // makeSnippet constructs a Snippet with the minimum fields BuildMatrix
 // reads (Name, Path, NonBlankLn, Tokens, Fps).

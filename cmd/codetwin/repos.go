@@ -10,6 +10,7 @@ package main
 // unchanged — no labels, no prefixes, byte-identical output.
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -144,10 +145,14 @@ func stripRepoPrefix(name, repo string) string {
 // fast with a clear message beats that. Roots inside one repo (e.g.
 // `codetwin ./internal ./cmd`) pass.
 func (rm *repoMap) ensureSingleGitRepo(flagLabel string) error {
+	return rm.ensureSingleGitRepoContext(context.Background(), flagLabel)
+}
+
+func (rm *repoMap) ensureSingleGitRepoContext(ctx context.Context, flagLabel string) error {
 	seen := make(map[string]bool)
 	var roots []string
 	for i, d := range rm.dirs {
-		r, err := git.Open(d)
+		r, err := git.OpenContext(ctx, d)
 		if err != nil {
 			return fmt.Errorf("%s with multiple roots: root %q (%s): %w",
 				flagLabel, d, rm.labels[i], err)

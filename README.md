@@ -827,8 +827,9 @@ force off.
 
 ```
 codetwin/
+├── analyzer/                    # Public cancellable analysis API
 ├── cmd/codetwin/
-│   ├── main.go                  # CLI: flag parsing, file collection, orchestration
+│   ├── main.go                  # Thin CLI adapter: flags, file collection, rendering
 │   ├── blocks.go                # Partial-clone orchestration + partial_clones JSON schema
 │   ├── repos.go                 # Cross-repo mode: repo labels + snippet namespacing
 │   └── baseline.go              # Clone-watchlist CLI glue (--update-baseline / --baseline)
@@ -850,6 +851,37 @@ codetwin/
     ├── bench/                   # Test-only ground-truth benchmark (detection-quality gate)
     └── pathutil/                # Lexical path helpers (Dedupe, Contains)
 ```
+
+### Reusable Go API
+
+`analyzer.Analyzer` runs the compute pipeline without CLI globals. Callers
+provide an explicit file set and `context.Context`; cancellation propagates
+through parallel scanning, exact scoring, block detection, clustering, and
+the context-aware git helpers used by the CLI.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+
+result, err := (analyzer.Analyzer{}).Run(ctx, analyzer.Request{
+    Files:              []string{"service/a.go", "service/b.go"},
+    MinLines:           5,
+    Threshold:          0.50,
+    Epsilon:            0.35,
+    MinPoints:          2,
+    MinConfidenceLines: 10,
+    Granularity:        analyzer.GranularityFunction,
+})
+if err != nil {
+    return err
+}
+fmt.Printf("%d pairs in %d clusters\n", len(result.Pairs), len(result.Clusters))
+```
+
+`Result` also exposes snippets, partial clones, dead-code findings, warnings,
+and candidate/cache statistics. `Request.OnProgress` receives structured stage
+updates for IDE, daemon, or agent integrations. `Analyzer` is stateless and
+safe for concurrent use; each run owns its cache lifecycle.
 
 ### How each layer works
 
