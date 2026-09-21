@@ -3,6 +3,7 @@ package git
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -37,6 +38,14 @@ type BlameRange struct {
 // Other failure modes (bad path, broken git, invalid range) propagate
 // as plain errors.
 func (r *Repo) Blame(absPath string, start, end int) (BlameRange, error) {
+	return r.BlameContext(context.Background(), absPath, start, end)
+}
+
+// BlameContext is Blame with cancellation propagated to git.
+func (r *Repo) BlameContext(ctx context.Context, absPath string, start, end int) (BlameRange, error) {
+	if err := ctx.Err(); err != nil {
+		return BlameRange{}, err
+	}
 	if start < 1 || end < start {
 		return BlameRange{}, fmt.Errorf("invalid blame range [%d, %d]", start, end)
 	}
@@ -45,7 +54,7 @@ func (r *Repo) Blame(absPath string, start, end int) (BlameRange, error) {
 		return BlameRange{}, fmt.Errorf("path outside repo: %s", absPath)
 	}
 
-	out, err := r.run("blame", "--line-porcelain",
+	out, err := r.runContext(ctx, "blame", "--line-porcelain",
 		"-L", fmt.Sprintf("%d,%d", start, end), "--", rel)
 	if err != nil {
 		// `git blame` complains with a fatal error containing

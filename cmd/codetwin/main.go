@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -22,22 +23,19 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/ccsrvs/codetwin/analyzer"
 	"github.com/ccsrvs/codetwin/internal/baseline"
 	"github.com/ccsrvs/codetwin/internal/blocks"
-	"github.com/ccsrvs/codetwin/internal/cache"
 	"github.com/ccsrvs/codetwin/internal/cluster"
 	"github.com/ccsrvs/codetwin/internal/config"
-	"github.com/ccsrvs/codetwin/internal/deadcode"
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 	"github.com/ccsrvs/codetwin/internal/git"
-	"github.com/ccsrvs/codetwin/internal/paircache"
 	"github.com/ccsrvs/codetwin/internal/pathutil"
 	"github.com/ccsrvs/codetwin/internal/refactor"
 	"github.com/ccsrvs/codetwin/internal/report"
@@ -262,6 +260,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: need at least 1 source file to scan")
 		os.Exit(1)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	// Resolve git up-front when --since or --blame are on so we fail
 	// fast (before any file processing) when git is missing or we're
@@ -271,7 +271,7 @@ func main() {
 	var gitRepo *git.Repo
 	var sinceDiff git.DiffMap
 	if *since != "" || *blame {
-		gitRepo, err = git.Open(".")
+		gitRepo, err = git.OpenContext(ctx, ".")
 		if err != nil {
 			label, verb := requestedGitFlags(*since, *blame)
 			switch {
@@ -290,14 +290,14 @@ func main() {
 		// Fail fast instead (documented limitation).
 		if repos.MultiRepo() {
 			label, _ := requestedGitFlags(*since, *blame)
-			if err := repos.ensureSingleGitRepo(label); err != nil {
+			if err := repos.ensureSingleGitRepoContext(ctx, label); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				os.Exit(1)
 			}
 		}
 	}
 	if *since != "" {
-		sinceDiff, err = gitRepo.ChangedSince(*since)
+		sinceDiff, err = gitRepo.ChangedSinceContext(ctx, *since)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: --since %q: %v\n", *since, err)
 			os.Exit(1)
@@ -306,199 +306,82 @@ func main() {
 	}
 
 	showProgress := !*noProgress && isTTY
-
-	// Cache stores per-file tokenize+fingerprint output keyed by content
-	// hash + ignore_patterns hash + tokenizer version. Hits skip the
-	// expensive splitter+tokenizer+fingerprint work on unchanged files.
-	var cacheStorage cache.Storage = cache.NewGobStorage(".")
-	var cacheState *cache.Cache
-	if *noCache || *rebuildCache {
-		cacheState = cache.New()
-	} else {
-		cacheState, err = cacheStorage.Load()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: cache load failed: %v\n", err)
-			cacheState = cache.New()
-		}
-	}
-	patternsHash := cache.PatternsHash(stripPatternStrings(cfg))
-	debugf("cache loaded: %d entries", len(cacheState.Entries))
-
-	var done atomic.Int64
-	totalFiles := int64(len(files))
-	var progStop chan struct{}
-	var progWg sync.WaitGroup
-	if showProgress && totalFiles > 0 {
-		progStop = make(chan struct{})
-		progWg.Add(1)
-		go reportProgress(&done, totalFiles, progStop, &progWg, "processing files")
-	}
-	// Dead-code liveness is a whole-corpus property: a 2-line helper
-	// nothing calls is just as dead as a 40-line one, so the scan keeps
-	// every definition when --dead-code is on and the --min-lines gate
-	// is applied to the similarity pipeline afterwards instead.
-	scanMinLines := *minLines
-	if *deadCode {
-		scanMinLines = 1
-	}
-	snippets, fileWarnings := scan.ProcessFiles(
-		files, scanMinLines, stripPatterns, cacheState, patternsHash,
-		granularity,
-		func() { done.Add(1) },
-	)
-	if progStop != nil {
-		close(progStop)
-		progWg.Wait()
-	}
-	debugf("scan.ProcessFiles: %d snippets from %d files (%d warnings)",
-		len(snippets), len(files), len(fileWarnings))
-	// Cross-repo namespacing: with two or more directory roots, each
-	// snippet gets its root's repo label and a "label:" name prefix.
-	// Runs before the sort so every downstream surface (pair IDs,
-	// clusters, previews) sees one consistent set of names. Single-root
-	// and file-argument invocations skip this entirely.
-	if repos.MultiRepo() {
-		namespaceSnippets(snippets, repos)
-		debugf("multi-repo: %d roots, labels %v", len(repos.dirs), repos.labels)
-	}
-	// Workers complete in nondeterministic order; sort by name so snippet
-	// indices (and therefore pair construction order, cluster IDs, and any
-	// equal-score tie ordering) are stable across runs.
-	sort.Slice(snippets, func(i, j int) bool {
-		return snippets[i].Name < snippets[j].Name
+	var progressStage analyzer.Stage
+	var lastProgress time.Time
+	result, err := (analyzer.Analyzer{}).Run(ctx, analyzer.Request{
+		Files: files, MinLines: *minLines, Threshold: *threshold,
+		Epsilon: *eps, MinPoints: *minPts, MinConfidenceLines: *minConfLines,
+		MinBlockLines: *minBlockLines, Granularity: granularity,
+		IncludeWeakPairs: *verbose, DeadCode: *deadCode, DeadCodeLimit: *limit,
+		CompiledStripPatterns: stripPatterns, PatternIdentity: stripPatternStrings(cfg),
+		IgnorePair: pairIgnoreMatcher.Match,
+		Transform: func(snippets []analyzer.Snippet) {
+			if repos.MultiRepo() {
+				namespaceSnippets(snippets, repos)
+			}
+		},
+		NoCache: *noCache, RebuildCache: *rebuildCache, CacheDir: ".",
+		OnProgress: func(progress analyzer.Progress) {
+			if !showProgress {
+				return
+			}
+			now := time.Now()
+			if progress.Stage == progressStage && progress.Completed != progress.Total && now.Sub(lastProgress) < 80*time.Millisecond {
+				return
+			}
+			progressStage, lastProgress = progress.Stage, now
+			label := string(progress.Stage)
+			switch progress.Stage {
+			case analyzer.StageScan:
+				label = "processing files"
+			case analyzer.StageScore:
+				label = "comparing snippets"
+			case analyzer.StageBlocks:
+				label = "detecting blocks"
+			case analyzer.StageCluster:
+				label = "clustering snippets"
+			}
+			percent := 100
+			if progress.Total > 0 {
+				percent = progress.Completed * 100 / progress.Total
+			}
+			fmt.Fprintf(os.Stderr, "\r%s: %d/%d (%d%%)", label, progress.Completed, progress.Total, percent)
+		},
 	})
-	for _, w := range fileWarnings {
-		fmt.Fprintln(os.Stderr, "warning:", w)
-	}
-
-	if len(snippets) < 2 && !*deadCode {
-		fmt.Fprintln(os.Stderr, "error: not enough parseable snippets to compare")
+	if err != nil {
+		if showProgress {
+			fmt.Fprint(os.Stderr, "\r\033[K")
+		}
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "error: analysis canceled")
+			os.Exit(130)
+		}
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
-	// Dead-code analysis runs over the full snippet set, independent of
-	// the similarity matrix, threshold, and --since filtering: liveness
-	// is a whole-corpus property, so a --since scan still reports
-	// against every scanned file.
-	var deadSymbols []report.DeadSymbol
-	if *deadCode {
-		deadFindings, deadWarnings := deadcode.Analyze(snippets, files...)
-		for _, w := range deadWarnings {
-			fmt.Fprintln(os.Stderr, "warning:", w)
-		}
-		deadSymbols = toReportDeadSymbols(deadFindings, *limit)
-		debugf("--dead-code: %d findings (%d shown)", len(deadFindings), len(deadSymbols))
-		// Now apply the --min-lines gate the scan skipped above.
-		kept := snippets[:0]
-		for _, s := range snippets {
-			if s.NonBlankLn >= *minLines {
-				kept = append(kept, s)
-			}
-		}
-		snippets = kept
-		debugf("--dead-code: %d snippets survive --min-lines %d for similarity", len(snippets), *minLines)
-	}
-
-	// Static placeholder so the user has a visible indicator during the
-	// silent gap between phase 1 ("processing files") and phase 2
-	// ("comparing snippets"). Covers cache save + corpus build +
-	// vectorize + matrix alloc + hash-index build. The matrix progress
-	// bar's first \r-prefixed tick overwrites this line cleanly.
 	if showProgress {
-		fmt.Fprint(os.Stderr, "\rindexing snippets...")
+		fmt.Fprint(os.Stderr, "\r\033[K")
 	}
-
-	tokenStreams := make([][]string, len(snippets))
-	for i, s := range snippets {
-		tokenStreams[i] = s.Tokens
+	for _, warning := range result.Warnings {
+		fmt.Fprintln(os.Stderr, "warning:", warning)
 	}
-	corpus := similarity.NewCorpus(tokenStreams)
-	debugf("corpus built")
-
-	// NormalizedVector precomputes each vector's L2 norm so the inner-loop
-	// cosine is just one dot-product map-walk plus a divide.
-	vectors := make([]similarity.NormalizedVector, len(snippets))
-	for i, s := range snippets {
-		vectors[i] = similarity.Normalize(corpus.Vectorize(s.Tokens))
-	}
-	debugf("vectorized %d snippets", len(vectors))
-
-	n := len(snippets)
-	debugf("initializing sparse similarity graph for %d snippets", n)
-
-	totalPairs := int64(n) * int64(n-1) / 2
-	debugf("comparing %d × %d = %d pairs", n, n, totalPairs)
-
-	var matrixDone atomic.Int64
-	var matrixProgStop chan struct{}
-	var matrixProgWg sync.WaitGroup
-	if showProgress && totalPairs > 0 {
-		matrixProgStop = make(chan struct{})
-		matrixProgWg.Add(1)
-		go reportProgress(&matrixDone, totalPairs, matrixProgStop, &matrixProgWg, "comparing snippets")
-	}
-	var candidatePairs int64
-	var scoreCache paircache.Store
-	if !*noCache {
-		scoreCache = cacheState
-	}
-	var scoreCacheHits, scoreCacheMisses int64
-	graph, pairs, blockCands := similarity.BuildGraph(
-		snippets, vectors, *minConfLines, *threshold,
-		func(d, _ int64) { matrixDone.Store(d) },
-		similarity.MatrixOptions{
-			IncludeWeakPairs: *verbose,
-			ScoreCache:       scoreCache,
-			OnCandidates: func(selected, _ int64) {
-				candidatePairs = selected
-			},
-			OnScoreCache: func(hits, misses int64) {
-				scoreCacheHits, scoreCacheMisses = hits, misses
-			},
-		},
-	)
-	if matrixProgStop != nil {
-		close(matrixProgStop)
-		matrixProgWg.Wait()
-	}
-	debugf("similarity.BuildGraph: %d materialized pairs, %d block candidates in gray band",
-		len(pairs), len(blockCands))
-	if totalPairs > 0 {
+	snippets, pairs := result.Snippets, result.Pairs
+	partialClones, clusters := result.PartialClones, result.Clusters
+	deadSymbols := result.DeadSymbols
+	debugf("Analyzer.Run: %d snippets, %d materialized pairs, %d clusters, %d partial clones",
+		len(snippets), len(pairs), len(clusters), len(partialClones))
+	if result.Stats.TotalPairs > 0 {
 		debugf("candidate retrieval: %d/%d pairs selected (%.1f%% pruned)",
-			candidatePairs, totalPairs, 100*(1-float64(candidatePairs)/float64(totalPairs)))
+			result.Stats.CandidatePairs, result.Stats.TotalPairs,
+			100*(1-float64(result.Stats.CandidatePairs)/float64(result.Stats.TotalPairs)))
 	} else {
 		debugf("candidate retrieval: 0/0 pairs selected")
 	}
-	debugf("incremental scoring: %d reused, %d recomputed", scoreCacheHits, scoreCacheMisses)
-
-	if !*noCache {
-		if err := cacheStorage.Save(cacheState); err != nil {
-			if showProgress {
-				fmt.Fprint(os.Stderr, "\r\033[K")
-			}
-			fmt.Fprintf(os.Stderr, "warning: cache save failed: %v\n", err)
-		}
-		debugf("cache saved")
-	}
-
-	// Tag each pair endpoint with its snippet's test-file classification
-	// so report.Prepare can segregate test↔test findings by default.
-	// Metadata only — no score or matrix changes.
-	markTestPairs(pairs, snippets)
-
-	if pairIgnoreMatcher != nil {
-		var ignored int
-		pairs, ignored = applyPairIgnores(pairs, graph, snippets, pairIgnoreMatcher)
-		debugf("ignore_pairs: dropped %d pairs", ignored)
-	}
-
-	// Block-level partial clones (review §5.3): a second detection
-	// channel over the gray-band candidates — pairs too diluted to
-	// render at function level that may still hide a copied block.
-	var partialClones []report.BlockClone
-	if *minBlockLines > 0 && len(blockCands) > 0 {
-		partialClones = detectBlockClones(blockCands, snippets, *minBlockLines, pairIgnoreMatcher)
-		debugf("blocks: %d partial clones from %d candidates", len(partialClones), len(blockCands))
+	debugf("incremental scoring: %d reused, %d recomputed",
+		result.Stats.CacheHits, result.Stats.Recomputed)
+	debugf("ignore_pairs: dropped %d pairs", result.Stats.IgnoredPairs)
+	if repos.MultiRepo() {
+		debugf("multi-repo: %d roots, labels %v", len(repos.dirs), repos.labels)
 	}
 
 	if *since != "" {
@@ -511,33 +394,14 @@ func main() {
 	}
 
 	if *blame {
-		provs := computeProvenance(snippets, gitRepo)
+		provs, provenanceErr := computeProvenanceContext(ctx, snippets, gitRepo)
+		if provenanceErr != nil {
+			fmt.Fprintln(os.Stderr, "error: analysis canceled")
+			os.Exit(130)
+		}
 		attachProvenance(pairs, provs)
 		debugf("--blame: provenance attached to %d snippets", len(provs))
 	}
-
-	distFn := func(i, j int) float64 { return 1.0 - graph.Score(i, j) }
-	clusterResult := cluster.DBSCAN(n, *eps, *minPts, distFn)
-	debugf("DBSCAN: %d clusters", clusterResult.NumClusters)
-	groups := cluster.Groups(clusterResult)
-
-	snippetNames := make([]string, len(snippets))
-	for i, s := range snippets {
-		snippetNames[i] = s.Name
-	}
-	// Per-member repo labels feed cluster grouping and the cross-repo
-	// tag. nil on single-root scans so Cluster.MemberRepos stays nil and
-	// rendering / JSON are untouched.
-	var snippetRepos []string
-	if repos.MultiRepo() {
-		snippetRepos = make([]string, len(snippets))
-		for i, s := range snippets {
-			snippetRepos[i] = s.Repo
-		}
-	}
-	clusters := buildReportClusters(groups, graph, snippetNames, snippetRepos, *threshold)
-	markTestOnlyClusters(clusters, snippets)
-	debugf("clusters built: %d (from %d DBSCAN groups)", len(clusters), len(groups))
 
 	if *since != "" {
 		before := len(clusters)
@@ -1089,27 +953,6 @@ type jsonDeadSymbol struct {
 	TestRefs int    `json:"test_refs,omitempty"`
 }
 
-// toReportDeadSymbols converts analysis findings to the display type,
-// applying --limit the same way the pair and cluster sections do.
-func toReportDeadSymbols(findings []deadcode.Finding, limit int) []report.DeadSymbol {
-	if limit > 0 && len(findings) > limit {
-		findings = findings[:limit]
-	}
-	out := make([]report.DeadSymbol, 0, len(findings))
-	for _, f := range findings {
-		out = append(out, report.DeadSymbol{
-			Name:     f.Name,
-			Symbol:   f.Symbol,
-			Kind:     string(f.Kind),
-			Lang:     string(f.Lang),
-			Exported: f.Exported,
-			Verdict:  string(f.Verdict),
-			TestRefs: f.TestRefs,
-		})
-	}
-	return out
-}
-
 func printJSON(pairs []report.Pair, clusters []report.Cluster, blockClones []report.BlockClone, previews map[string]report.Preview, suggestions, blockSuggestions map[string]jsonPatch, suppressed report.Suppressed, drift []baseline.Event, deadSymbols []report.DeadSymbol) {
 	out := jsonOutput{PartialClones: toJSONBlockClones(blockClones, blockSuggestions)}
 	for _, d := range deadSymbols {
@@ -1258,27 +1101,6 @@ func stripPatternStrings(cfg *config.Config) []string {
 	return cfg.IgnorePatterns
 }
 
-// reportProgress prints a one-line progress indicator to stderr until stop
-// is closed. The line is cleared before returning so it doesn't bleed into
-// the report output. label appears at the start of every tick (e.g.
-// "processing files" or "comparing snippets").
-func reportProgress(done *atomic.Int64, total int64, stop <-chan struct{}, wg *sync.WaitGroup, label string) {
-	defer wg.Done()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			fmt.Fprint(os.Stderr, "\r\033[K")
-			return
-		case <-ticker.C:
-			d := done.Load()
-			pct := float64(d) / float64(total) * 100
-			fmt.Fprintf(os.Stderr, "\r%s: %d/%d (%.1f%%)", label, d, total, pct)
-		}
-	}
-}
-
 // stderrIsTTY reports whether stderr is connected to a terminal. Used to
 // auto-suppress the progress indicator when the caller is piping output
 // into a file or running in CI.
@@ -1393,14 +1215,20 @@ func requestedGitFlags(since string, blame bool) (label, verb string) {
 // a name → Provenance map. Untracked files and other recoverable blame
 // errors are silently skipped; the snippet just won't have provenance
 // attached. Catastrophic git errors print a one-line warning.
-func computeProvenance(snippets []scan.Snippet, repo *git.Repo) map[string]*report.Provenance {
+func computeProvenanceContext(ctx context.Context, snippets []scan.Snippet, repo *git.Repo) (map[string]*report.Provenance, error) {
 	out := make(map[string]*report.Provenance, len(snippets))
 	for _, s := range snippets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, seen := out[s.Name]; seen {
 			continue
 		}
-		br, err := repo.Blame(s.Path, s.StartLine, s.EndLine)
+		br, err := repo.BlameContext(ctx, s.Path, s.StartLine, s.EndLine)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
 			if !errors.Is(err, git.ErrFileNotTracked) {
 				fmt.Fprintf(os.Stderr, "warning: blame %s: %v\n", s.Name, err)
 			}
@@ -1415,7 +1243,7 @@ func computeProvenance(snippets []scan.Snippet, repo *git.Repo) map[string]*repo
 			LastTime:    br.LastTime,
 		}
 	}
-	return out
+	return out, nil
 }
 
 // attachProvenance copies entries from a snippet-name keyed map onto
@@ -1454,42 +1282,6 @@ func snippetIndex(snippets []scan.Snippet) map[string]int {
 // the suggestion and preview builders that need the full value.
 func snippetsByName(snippets []scan.Snippet) map[string]scan.Snippet {
 	return snippetMap(snippets, func(_ int, s scan.Snippet) scan.Snippet { return s })
-}
-
-// snippetTestFlags maps each snippet's name to its test-file
-// classification, shared by markTestPairs and markTestOnlyClusters.
-func snippetTestFlags(snippets []scan.Snippet) map[string]bool {
-	return snippetMap(snippets, func(_ int, s scan.Snippet) bool { return s.IsTest })
-}
-
-// markTestPairs sets each pair's IsTestA/IsTestB from the endpoint
-// snippets' test-file classification (scan.IsTestFile on the scanned
-// path). Presentation metadata only: report.Prepare uses the flags to
-// suppress test↔test pairs by default; scores are untouched.
-func markTestPairs(pairs []report.Pair, snippets []scan.Snippet) {
-	isTest := snippetTestFlags(snippets)
-	for i := range pairs {
-		pairs[i].IsTestA = isTest[pairs[i].NameA]
-		pairs[i].IsTestB = isTest[pairs[i].NameB]
-	}
-}
-
-// markTestOnlyClusters sets Cluster.TestOnly on clusters whose every
-// member is a test snippet. Runs after buildReportClusters so the flag
-// reflects the final member lists (low-cohesion splitting may have
-// regrouped members). Same presentation-only contract as markTestPairs.
-func markTestOnlyClusters(clusters []report.Cluster, snippets []scan.Snippet) {
-	isTest := snippetTestFlags(snippets)
-	for i := range clusters {
-		allTest := len(clusters[i].Members) > 0
-		for _, m := range clusters[i].Members {
-			if !isTest[m] {
-				allTest = false
-				break
-			}
-		}
-		clusters[i].TestOnly = allTest
-	}
 }
 
 // keepTouching is the shared --since filter loop: it keeps the items

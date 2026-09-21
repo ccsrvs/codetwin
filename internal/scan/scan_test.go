@@ -1,6 +1,8 @@
 package scan
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +16,17 @@ import (
 	"github.com/ccsrvs/codetwin/internal/splitter"
 	"github.com/ccsrvs/codetwin/internal/tokenizer"
 )
+
+func TestProcessFilesContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, warnings, err := ProcessFilesContext(
+		ctx, []string{"unused.go"}, 1, nil, cache.New(), "", GranularityFunction, nil,
+	)
+	if !errors.Is(err, context.Canceled) || got != nil || warnings != nil {
+		t.Fatalf("ProcessFilesContext = %v, %v, %v", got, warnings, err)
+	}
+}
 
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()

@@ -3,6 +3,8 @@
 // snippets into clusters — each cluster is one refactoring opportunity.
 package cluster
 
+import "context"
+
 const noise = -1
 
 // Result holds the cluster label for each input point.
@@ -20,6 +22,16 @@ type DistFunc func(i, j int) float64
 //	eps     — maximum distance for two points to be considered neighbors
 //	minPts  — minimum number of neighbors to form a core point
 func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
+	result, _ := DBSCANContext(context.Background(), n, eps, minPts, dist)
+	return result
+}
+
+// DBSCANContext is DBSCAN with cooperative cancellation during neighbor
+// discovery and cluster expansion.
+func DBSCANContext(ctx context.Context, n int, eps float64, minPts int, dist DistFunc) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
 	labels := make([]int, n)
 	for i := range labels {
 		labels[i] = noise
@@ -28,11 +40,17 @@ func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 	clusterID := 0
 
 	for i := 0; i < n; i++ {
+		if err := ctx.Err(); err != nil {
+			return Result{}, err
+		}
 		if labels[i] != noise {
 			continue
 		}
 
-		nb := neighbors(i, n, eps, dist)
+		nb, err := neighborsContext(ctx, i, n, eps, dist)
+		if err != nil {
+			return Result{}, err
+		}
 		if len(nb) < minPts-1 { // -1 because neighbors excludes i itself
 			continue // remains noise for now
 		}
@@ -56,6 +74,9 @@ func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 		}
 
 		for len(seeds) > 0 {
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
 			j := seeds[0]
 			seeds = seeds[1:]
 
@@ -67,7 +88,10 @@ func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 			}
 			labels[j] = clusterID
 
-			nb2 := neighbors(j, n, eps, dist)
+			nb2, err := neighborsContext(ctx, j, n, eps, dist)
+			if err != nil {
+				return Result{}, err
+			}
 			if len(nb2) >= minPts-1 {
 				for _, k := range nb2 {
 					if !inSeeds[k] {
@@ -81,7 +105,7 @@ func DBSCAN(n int, eps float64, minPts int, dist DistFunc) Result {
 		clusterID++
 	}
 
-	return Result{Labels: labels, NumClusters: clusterID}
+	return Result{Labels: labels, NumClusters: clusterID}, nil
 }
 
 // Groups returns a map from cluster ID → slice of point indices.
@@ -149,12 +173,15 @@ func sortInts(a []int) {
 	}
 }
 
-func neighbors(i, n int, eps float64, dist DistFunc) []int {
+func neighborsContext(ctx context.Context, i, n int, eps float64, dist DistFunc) ([]int, error) {
 	var nb []int
 	for j := 0; j < n; j++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if i != j && dist(i, j) <= eps {
 			nb = append(nb, j)
 		}
 	}
-	return nb
+	return nb, nil
 }

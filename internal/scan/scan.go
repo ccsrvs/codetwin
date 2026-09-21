@@ -5,6 +5,7 @@
 package scan
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,9 +109,32 @@ func ProcessFiles(
 	granularity Granularity,
 	onFileDone func(),
 ) ([]Snippet, []string) {
+	snippets, warnings, _ := ProcessFilesContext(
+		context.Background(), files, minLines, stripPatterns, cacheState,
+		patternsHash, granularity, onFileDone,
+	)
+	return snippets, warnings
+}
+
+// ProcessFilesContext is ProcessFiles with cooperative cancellation. It stops
+// dispatching new files as soon as ctx is done and waits for active workers to
+// exit before returning, so callers never receive callbacks after Run returns.
+func ProcessFilesContext(
+	ctx context.Context,
+	files []string,
+	minLines int,
+	stripPatterns []*regexp.Regexp,
+	cacheState *cache.Cache,
+	patternsHash string,
+	granularity Granularity,
+	onFileDone func(),
+) ([]Snippet, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	n := len(files)
 	if n == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	workers := runtime.NumCPU()
 	if workers > n {
@@ -120,11 +144,17 @@ func ProcessFiles(
 		workers = 1
 	}
 
-	workCh := make(chan string, n)
-	for _, p := range files {
-		workCh <- p
-	}
-	close(workCh)
+	workCh := make(chan string)
+	go func() {
+		defer close(workCh)
+		for _, p := range files {
+			select {
+			case workCh <- p:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	type result struct {
 		snippets []Snippet
@@ -137,17 +167,26 @@ func ProcessFiles(
 		go func() {
 			defer wg.Done()
 			var local result
-			for path := range workCh {
-				snips, warn := ProcessFile(path, minLines, stripPatterns, cacheState, patternsHash, granularity)
-				local.snippets = append(local.snippets, snips...)
-				if warn != "" {
-					local.warnings = append(local.warnings, warn)
-				}
-				if onFileDone != nil {
-					onFileDone()
+			for {
+				select {
+				case <-ctx.Done():
+					resultsCh <- local
+					return
+				case path, ok := <-workCh:
+					if !ok {
+						resultsCh <- local
+						return
+					}
+					snips, warn := ProcessFile(path, minLines, stripPatterns, cacheState, patternsHash, granularity)
+					local.snippets = append(local.snippets, snips...)
+					if warn != "" {
+						local.warnings = append(local.warnings, warn)
+					}
+					if onFileDone != nil {
+						onFileDone()
+					}
 				}
 			}
-			resultsCh <- local
 		}()
 	}
 	wg.Wait()
@@ -159,7 +198,10 @@ func ProcessFiles(
 		allSnippets = append(allSnippets, r.snippets...)
 		allWarnings = append(allWarnings, r.warnings...)
 	}
-	return allSnippets, allWarnings
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return allSnippets, allWarnings, nil
 }
 
 // ProcessFile is the per-file pipeline (cache lookup, splitter, tokenizer,

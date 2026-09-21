@@ -7,6 +7,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -41,14 +42,25 @@ type Repo struct {
 // dir is not inside a working tree. Both cases are recoverable —
 // callers should fall back to a git-less code path rather than aborting.
 func Open(dir string) (*Repo, error) {
+	return OpenContext(context.Background(), dir)
+}
+
+// OpenContext is Open with cancellation propagated to git.
+func OpenContext(ctx context.Context, dir string) (*Repo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := exec.LookPath(gitBin); err != nil {
 		return nil, ErrGitNotInstalled
 	}
-	cmd := exec.Command(gitBin, "-C", dir, "rev-parse", "--show-toplevel")
+	cmd := exec.CommandContext(ctx, gitBin, "-C", dir, "rev-parse", "--show-toplevel")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		// `git rev-parse --show-toplevel` exits non-zero when not in a
 		// repo. We collapse every failure mode to ErrNotARepo because
 		// that's the only actionable outcome for callers — there's no
@@ -87,13 +99,19 @@ func relWithinRoot(root, absPath string) (string, bool) {
 // run executes a git subcommand inside the repo and returns its stdout
 // on success. Stderr is folded into the returned error so callers don't
 // have to thread two streams through their handlers.
-func (r *Repo) run(args ...string) ([]byte, error) {
+func (r *Repo) runContext(ctx context.Context, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	full := append([]string{"-C", r.Root}, args...)
-	cmd := exec.Command(gitBin, full...)
+	cmd := exec.CommandContext(ctx, gitBin, full...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("git %s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil

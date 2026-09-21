@@ -1,12 +1,28 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func TestContextAPIsReturnCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := OpenContext(ctx, "."); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenContext error = %v", err)
+	}
+	repo := &Repo{Root: t.TempDir()}
+	if _, err := repo.ChangedSinceContext(ctx, "HEAD"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ChangedSinceContext error = %v", err)
+	}
+	if _, err := repo.BlameContext(ctx, "x.go", 1, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("BlameContext error = %v", err)
+	}
+}
 
 // withGitBin temporarily swaps the package-level git binary path so a
 // test can simulate "git not installed" without mutating PATH.

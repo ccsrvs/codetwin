@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,7 +28,12 @@ type DiffMap map[string][]LineRange
 // snippet. Renames are reported under their new path because git's
 // post-image header uses the new name.
 func (r *Repo) ChangedSince(ref string) (DiffMap, error) {
-	out, err := r.run("diff", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", ref, "--")
+	return r.ChangedSinceContext(context.Background(), ref)
+}
+
+// ChangedSinceContext is ChangedSince with cancellation propagated to git.
+func (r *Repo) ChangedSinceContext(ctx context.Context, ref string) (DiffMap, error) {
+	out, err := r.runContext(ctx, "diff", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/", ref, "--")
 	if err != nil {
 		return nil, err
 	}
