@@ -33,7 +33,8 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
-          version: latest
+          # Keep this aligned with GOLANGCI_LINT_VERSION in the Makefile.
+          version: v2.13.2
 
       - name: Build
         run: go build ./...
@@ -43,6 +44,11 @@ jobs:
 
       - name: Tests + coverage
         run: gotestsum --junitfile junit.xml -- -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Enforce coverage floor
+        run: |
+          go tool cover -func=coverage.out | tee coverage.txt
+          bash scripts/check-coverage.sh coverage.txt 80.0
 
       # ---- PR-only signals -----------------------------------------------
       # These steps post comments / annotations only when triggered by a PR.
@@ -62,7 +68,7 @@ jobs:
             echo "no coverage.out — skipping coverage comment"
             exit 0
           fi
-          TOTAL=$(go tool cover -func=coverage.out | grep "^total:" | awk '{print $3}')
+          TOTAL=$(awk '$1 == "total:" {print $3}' coverage.txt)
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO" \
             --body "## Go Coverage — ${TOTAL}"
@@ -80,7 +86,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: coverage-report
-          path: coverage.out
+          path: |
+            coverage.out
+            coverage.txt
 
   govulncheck:
     # Go vulnerability scan. Runs in BINARY mode (reachability on the built

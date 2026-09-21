@@ -1038,9 +1038,17 @@ language-agnostic — they don't need changes for a new language.
 make test                  # all packages
 make test-verbose          # with per-test names (good during TDD)
 make test-coverage         # generates coverage.html
+make coverage-check        # race tests + enforced 80% project coverage floor
+make lint                  # the same pinned golangci-lint version used by CI
+make performance-check     # representative benchmark + relative regression gate
 go test -run TestNormalize # single test by name
 go test ./internal/bench -run 'QualityMetricsGate' -v # precision/recall/F1 gates
 ```
+
+Pull requests enforce the coverage floor. The performance gate compares the
+sparse and incremental paths with the dense reference from the same machine;
+it runs weekly and on demand so routine pull requests do not spend benchmark
+minutes or depend on absolute hosted-runner timing.
 
 The labeled quality gate currently requires at least 0.95 precision, recall,
 and F1 for function-level detection, perfect cross-language recall, and
