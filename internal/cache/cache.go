@@ -22,11 +22,8 @@ package cache
 
 import (
 	"crypto/sha256"
-	"encoding/gob"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
@@ -136,39 +133,7 @@ type Cache struct {
 // missing or its version doesn't match the current code. Any other I/O
 // error is returned.
 func Load(dir string) (*Cache, error) {
-	path := filepath.Join(dir, Filename)
-	f, err := os.Open(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return New(), nil
-		}
-		return nil, fmt.Errorf("cache open: %w", err)
-	}
-	defer f.Close()
-
-	var c Cache
-	if err := gob.NewDecoder(f).Decode(&c); err != nil {
-		// Corrupt cache → start fresh rather than fail the run.
-		return New(), nil
-	}
-	if c.Version != Version || c.Schema != SchemaTag() || c.Entries == nil {
-		return New(), nil
-	}
-	// Defense-in-depth behind the SchemaTag check: entries whose chunks
-	// were fingerprinted under a different k-gram size than the current
-	// fingerprint.DefaultK are stale (their hashes cover differently
-	// sized token windows) and must miss. SchemaTag should already have
-	// rejected such caches wholesale; this guards hand-carried or
-	// tag-collided files at per-entry granularity.
-	for key, e := range c.Entries {
-		for _, ch := range e.Chunks {
-			if ch.K != fingerprint.DefaultK {
-				delete(c.Entries, key)
-				break
-			}
-		}
-	}
-	return &c, nil
+	return NewGobStorage(dir).Load()
 }
 
 // New returns a fresh empty cache at the current Version and SchemaTag.
@@ -204,36 +169,7 @@ func (c *Cache) Put(key string, e Entry) {
 // rename) so a crash mid-write doesn't leave a corrupt file. No-op if
 // nothing has been Put since Load.
 func (c *Cache) Save(dir string) error {
-	if c == nil {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.dirty {
-		return nil
-	}
-
-	path := filepath.Join(dir, Filename)
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return fmt.Errorf("cache create: %w", err)
-	}
-	if err := gob.NewEncoder(f).Encode(c); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return fmt.Errorf("cache encode: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("cache close: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("cache rename: %w", err)
-	}
-	c.dirty = false
-	return nil
+	return NewGobStorage(dir).Save(c)
 }
 
 // HashContent returns a hex-encoded SHA-256 of the given byte slice.

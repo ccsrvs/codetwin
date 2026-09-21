@@ -795,16 +795,14 @@ that shift line numbers.
 codetwin is designed to handle large repositories. A few mechanisms in
 play:
 
-**Parallel matrix.** The all-pairs similarity computation shards rows
-across `runtime.NumCPU()` goroutines. On an 8-core machine that's
-roughly an 8x speedup on the dominant cost.
+**Parallel candidate scoring.** Similarity work shards candidate rows across
+`runtime.NumCPU()` goroutines. Exact scoring runs only for the union of
+structural and semantic candidates.
 
 **Inverted-index pair pruning.** Before computing scores, codetwin
-builds a `fingerprint-hash → snippet-indices` map. Pairs that share
-zero fingerprints get structural=0 without paying for a Jaccard call —
-on a typical big repo, most pairs are in that bucket. Cosine still
-runs for every pair so cross-language semantic-only matches still
-surface.
+builds a `fingerprint-hash → snippet-indices` map and a bounded TF-IDF
+term index. Their union preserves structural and cross-language
+semantic-only candidates without all-pairs cosine scoring.
 
 **Per-file cache.** The expensive per-file work (split → tokenize →
 fingerprint with positions) is persisted to `.codetwin-cache.bin` in
@@ -813,7 +811,9 @@ the working directory. Cache keys are
 changing invalidates the relevant entry automatically. On a warm rerun
 unchanged files skip the entire pipeline. Add `.codetwin-cache.bin` to
 your `.gitignore`. Use `--no-cache` to skip caching entirely or
-`--rebuild-cache` to force a fresh build.
+`--rebuild-cache` to force a fresh build. Persistence is behind the
+`cache.Storage` interface; the default CGO-free gob implementation uses a
+synced temporary file plus atomic rename and explicit schema validation.
 
 **Live progress.** While the matrix is computing, codetwin prints a
 counter to stderr (`comparing snippets: N/M (X%)`). Auto-suppressed
@@ -840,7 +840,7 @@ codetwin/
     ├── refactor/                # --suggest pipeline: align → synthesize → place → patch
     ├── baseline/                # Clone-watchlist snapshots + drift diffing
     ├── config/                  # .codetwin.json loading + ignore matching
-    ├── cache/                   # .codetwin-cache.bin persistence
+    ├── cache/                   # Pluggable cache storage; atomic gob default
     ├── scan/                    # Per-file pipeline + parallel orchestrator (split → tokenize → fingerprint)
     ├── git/                     # Optional git integration: repo detection, diff parsing, blame
     ├── bench/                   # Test-only ground-truth benchmark (detection-quality gate)
