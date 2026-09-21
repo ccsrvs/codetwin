@@ -309,11 +309,12 @@ func main() {
 	// Cache stores per-file tokenize+fingerprint output keyed by content
 	// hash + ignore_patterns hash + tokenizer version. Hits skip the
 	// expensive splitter+tokenizer+fingerprint work on unchanged files.
+	var cacheStorage cache.Storage = cache.NewGobStorage(".")
 	var cacheState *cache.Cache
 	if *noCache || *rebuildCache {
 		cacheState = cache.New()
 	} else {
-		cacheState, err = cache.Load(".")
+		cacheState, err = cacheStorage.Load()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cache load failed: %v\n", err)
 			cacheState = cache.New()
@@ -407,7 +408,7 @@ func main() {
 	}
 
 	if !*noCache {
-		if err := cacheState.Save("."); err != nil {
+		if err := cacheStorage.Save(cacheState); err != nil {
 			if showProgress {
 				fmt.Fprint(os.Stderr, "\r\033[K")
 			}
