@@ -91,12 +91,23 @@ func TestBuildGraphReportsStructuralAndSemanticCandidateUnion(t *testing.T) {
 
 	var selected, total int64
 	BuildGraph(snippets, vectors, 0, 0.50, nil, MatrixOptions{
+		ApproximateCandidates: true,
 		OnCandidates: func(gotSelected, gotTotal int64) {
 			selected, total = gotSelected, gotTotal
 		},
 	})
 	if selected != 2 || total != 3 {
 		t.Errorf("candidate union selected %d/%d pairs, want 2/3", selected, total)
+	}
+
+	// Retrieval is opt-in: by default every comparable pair is scored.
+	BuildGraph(snippets, vectors, 0, 0.50, nil, MatrixOptions{
+		OnCandidates: func(gotSelected, gotTotal int64) {
+			selected, total = gotSelected, gotTotal
+		},
+	})
+	if selected != 3 || total != 3 {
+		t.Errorf("default scoring selected %d/%d pairs, want every pair 3/3", selected, total)
 	}
 
 	BuildMatrix(snippets, vectors, 0, 0.50, nil, MatrixOptions{

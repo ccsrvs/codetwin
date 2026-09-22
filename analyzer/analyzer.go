@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -78,8 +79,18 @@ type Request struct {
 
 	NoCache      bool
 	RebuildCache bool
-	CacheDir     string
-	OnProgress   func(Progress)
+	// ReuseScores persists exact candidate-pair scores in the cache and
+	// reuses them on the next run. The table grows with the square of
+	// the snippet count, so decoding it only beats recomputing on small
+	// corpora; it is off by default, and a run without it drops any
+	// table an earlier run stored.
+	ReuseScores bool
+	// ApproximateCandidates enables lossy semantic candidate retrieval
+	// (see similarity.MatrixOptions.ApproximateCandidates). Leave it off
+	// unless the corpus is too large to score every pair.
+	ApproximateCandidates bool
+	CacheDir              string
+	OnProgress            func(Progress)
 }
 
 type Stats struct {
@@ -150,6 +161,11 @@ func (Analyzer) Run(ctx context.Context, req Request) (Result, error) {
 	patternIdentity := req.PatternIdentity
 	if patternIdentity == nil {
 		patternIdentity = req.StripPatterns
+		// Compiled patterns strip tokens too, so they must be part of
+		// the cache identity when the caller gave no explicit one.
+		for _, re := range req.CompiledStripPatterns {
+			patternIdentity = append(patternIdentity[:len(patternIdentity):len(patternIdentity)], re.String())
+		}
 	}
 	scanMinLines := req.MinLines
 	if req.DeadCode {
@@ -212,7 +228,11 @@ func (Analyzer) Run(ctx context.Context, req Request) (Result, error) {
 	stats := Stats{Files: len(req.Files), Snippets: len(snippets), TotalPairs: totalPairs}
 	var scoreStore paircache.Store
 	if !req.NoCache {
-		scoreStore = cacheState
+		if req.ReuseScores {
+			scoreStore = cacheState
+		} else {
+			cacheState.DropPairScoreSnapshot()
+		}
 	}
 	graph, pairs, blockCandidates, err := similarity.BuildGraphContext(
 		ctx, snippets, vectors, req.MinConfidenceLines, req.Threshold,
@@ -220,8 +240,9 @@ func (Analyzer) Run(ctx context.Context, req Request) (Result, error) {
 			reportProgress(Progress{Stage: StageScore, Completed: int(done), Total: int(total)})
 		},
 		similarity.MatrixOptions{
-			IncludeWeakPairs: req.IncludeWeakPairs,
-			ScoreCache:       scoreStore,
+			IncludeWeakPairs:      req.IncludeWeakPairs,
+			ApproximateCandidates: req.ApproximateCandidates,
+			ScoreCache:            scoreStore,
 			OnCandidates: func(selected, _ int64) {
 				stats.CandidatePairs = selected
 			},
@@ -333,33 +354,110 @@ func detectBlockClones(
 	ignore func(string, string) bool,
 	progress func(Progress),
 ) ([]report.BlockClone, error) {
+	return detectBlockClonesWorkers(ctx, candidates, snippets, minLines, ignore, progress, runtime.GOMAXPROCS(0))
+}
+
+// detectBlockClonesWorkers runs block detection over the gray-band
+// candidates on a worker pool. Each candidate's matches land in their
+// own slot and are concatenated in candidate order afterwards, so the
+// result is identical for any worker count.
+func detectBlockClonesWorkers(
+	ctx context.Context,
+	candidates [][2]int,
+	snippets []scan.Snippet,
+	minLines int,
+	ignore func(string, string) bool,
+	progress func(Progress),
+	workers int,
+) ([]report.BlockClone, error) {
 	if minLines <= 0 || len(candidates) == 0 {
 		return nil, nil
 	}
-	var out []report.BlockClone
-	for i, candidate := range candidates {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		a, b := snippets[candidate[0]], snippets[candidate[1]]
-		if ignore != nil && ignore(stripRepoPrefix(a.Name, a.Repo), stripRepoPrefix(b.Name, b.Repo)) {
-			continue
-		}
-		fileA, symbolA := splitChunkName(a.Name)
-		fileB, symbolB := splitChunkName(b.Name)
-		for _, match := range blocks.Detect(a, b, minLines) {
-			clone := report.BlockClone{
-				FileA: fileA, SymbolA: symbolA, PathA: a.Path, ChunkA: a.Name,
-				AStartLine: match.AStartLine, AEndLine: match.AEndLine,
-				FileB: fileB, SymbolB: symbolB, PathB: b.Path, ChunkB: b.Name,
-				BStartLine: match.BStartLine, BEndLine: match.BEndLine,
-				Containment: match.Containment, LinesA: match.ALines, LinesB: match.BLines,
-				IsTestA: a.IsTest, IsTestB: b.IsTest, RepoA: a.Repo, RepoB: b.Repo,
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(candidates) {
+		workers = len(candidates)
+	}
+
+	// Parse each snippet name once rather than twice per candidate:
+	// a snippet typically sits in many gray-band candidates.
+	type nameParts struct{ file, symbol string }
+	parts := make([]nameParts, len(snippets))
+	parsed := make([]bool, len(snippets))
+	for _, candidate := range candidates {
+		for _, index := range candidate {
+			if !parsed[index] {
+				file, symbol := splitChunkName(snippets[index].Name)
+				parts[index] = nameParts{file, symbol}
+				parsed[index] = true
 			}
-			clone.ID = report.PairID(clone.RangeNameA(), clone.RangeNameB())
-			out = append(out, clone)
 		}
-		progress(Progress{Stage: StageBlocks, Completed: i + 1, Total: len(candidates)})
+	}
+
+	results := make([][]report.BlockClone, len(candidates))
+	var next, done atomic.Int64
+	var progressMu sync.Mutex
+	reported := 0
+	reportDone := func(n int) {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		if n > reported { // keep Completed monotonic across workers
+			reported = n
+			progress(Progress{Stage: StageBlocks, Completed: n, Total: len(candidates)})
+		}
+	}
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				i := int(next.Add(1) - 1)
+				if i >= len(candidates) {
+					return
+				}
+				ia, ib := candidates[i][0], candidates[i][1]
+				a, b := &snippets[ia], &snippets[ib]
+				if ignore == nil || !ignore(stripRepoPrefix(a.Name, a.Repo), stripRepoPrefix(b.Name, b.Repo)) {
+					matches := blocks.Detect(*a, *b, minLines)
+					if len(matches) > 0 {
+						out := make([]report.BlockClone, 0, len(matches))
+						for _, match := range matches {
+							clone := report.BlockClone{
+								FileA: parts[ia].file, SymbolA: parts[ia].symbol, PathA: a.Path, ChunkA: a.Name,
+								AStartLine: match.AStartLine, AEndLine: match.AEndLine,
+								FileB: parts[ib].file, SymbolB: parts[ib].symbol, PathB: b.Path, ChunkB: b.Name,
+								BStartLine: match.BStartLine, BEndLine: match.BEndLine,
+								Containment: match.Containment, LinesA: match.ALines, LinesB: match.BLines,
+								IsTestA: a.IsTest, IsTestB: b.IsTest, RepoA: a.Repo, RepoB: b.Repo,
+							}
+							clone.ID = report.PairID(clone.RangeNameA(), clone.RangeNameB())
+							out = append(out, clone)
+						}
+						results[i] = out
+					}
+				}
+				reportDone(int(done.Add(1)))
+			}
+		}()
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	total := 0
+	for _, r := range results {
+		total += len(r)
+	}
+	out := make([]report.BlockClone, 0, total)
+	for _, r := range results {
+		out = append(out, r...)
 	}
 	return dedupeBlockClones(out), nil
 }
@@ -372,20 +470,28 @@ func splitChunkName(name string) (string, string) {
 	return match[1], match[4]
 }
 
+// dedupeBlockClones keeps, in BlockLess order, each clone that does not
+// overlap an already-kept clone of the same file pair on both sides.
+// Kept clones are bucketed by file pair, so each clone is compared only
+// against its own pair's survivors rather than every survivor.
 func dedupeBlockClones(clones []report.BlockClone) []report.BlockClone {
 	sort.SliceStable(clones, func(i, j int) bool { return report.BlockLess(clones[i], clones[j]) })
+	type filePair struct{ a, b string }
+	keptByPair := make(map[filePair][]int)
 	kept := clones[:0:0]
 	for _, clone := range clones {
+		key := filePair{clone.FileA, clone.FileB}
 		duplicate := false
-		for _, existing := range kept {
-			if existing.FileA == clone.FileA && existing.FileB == clone.FileB &&
-				overlaps(existing.AStartLine, existing.AEndLine, clone.AStartLine, clone.AEndLine) &&
+		for _, k := range keptByPair[key] {
+			existing := &kept[k]
+			if overlaps(existing.AStartLine, existing.AEndLine, clone.AStartLine, clone.AEndLine) &&
 				overlaps(existing.BStartLine, existing.BEndLine, clone.BStartLine, clone.BEndLine) {
 				duplicate = true
 				break
 			}
 		}
 		if !duplicate {
+			keptByPair[key] = append(keptByPair[key], len(kept))
 			kept = append(kept, clone)
 		}
 	}

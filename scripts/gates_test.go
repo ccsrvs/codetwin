@@ -92,7 +92,7 @@ BenchmarkSimilarityStoragePipeline/incremental-warm-8 3 46000000 ns/op 14700000 
 		{name: "passes healthy relative performance", report: good, wantOutput: "performance gate passed"},
 		{
 			name:       "fails sparse runtime regression",
-			report:     strings.ReplaceAll(strings.ReplaceAll(good, "50000000 ns/op", "90000000 ns/op"), "52000000 ns/op", "92000000 ns/op"),
+			report:     strings.ReplaceAll(strings.ReplaceAll(good, "50000000 ns/op", "140000000 ns/op"), "52000000 ns/op", "142000000 ns/op"),
 			wantErr:    true,
 			wantOutput: "sparse time ratio",
 		},
@@ -101,6 +101,12 @@ BenchmarkSimilarityStoragePipeline/incremental-warm-8 3 46000000 ns/op 14700000 
 			report:     strings.ReplaceAll(good, "15000000 B/op", "19000000 B/op"),
 			wantErr:    true,
 			wantOutput: "sparse memory ratio",
+		},
+		{
+			// GOMAXPROCS=1 runners print benchmark names with no -N suffix.
+			name:       "accepts single-CPU benchmark names",
+			report:     strings.ReplaceAll(good, "-8 3 ", " 3 "),
+			wantOutput: "performance gate passed",
 		},
 		{
 			name:       "rejects incomplete benchmark output",

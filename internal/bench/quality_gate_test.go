@@ -161,7 +161,10 @@ func TestBench_SemanticCandidatesMatchExhaustive(t *testing.T) {
 	graph, gotPairs, gotBlocks := similarity.BuildGraph(
 		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
 		similarity.MatrixOptions{
-			ScoreCache: scoreState,
+			// This gate checks the opt-in retrieval path; default
+			// scoring is exhaustive and needs no equivalence check.
+			ApproximateCandidates: true,
+			ScoreCache:            scoreState,
 			OnCandidates: func(gotSelected, gotTotal int64) {
 				selected, total = gotSelected, gotTotal
 			},
@@ -195,7 +198,8 @@ func TestBench_SemanticCandidatesMatchExhaustive(t *testing.T) {
 	warmGraph, warmPairs, warmBlocks := similarity.BuildGraph(
 		snippets, vectors, similarity.DefaultMinConfidenceLines, defaultThreshold, nil,
 		similarity.MatrixOptions{
-			ScoreCache: scoreState,
+			ApproximateCandidates: true,
+			ScoreCache:            scoreState,
 			OnScoreCache: func(hits, misses int64) {
 				warmHits, warmMisses = hits, misses
 			},

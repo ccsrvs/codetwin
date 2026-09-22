@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -155,5 +157,39 @@ func TestSyncDirectoryOpenFailureIsWrapped(t *testing.T) {
 	err := syncDirectory(filepath.Join(t.TempDir(), "missing"))
 	if err == nil || !strings.HasPrefix(err.Error(), "cache directory open:") {
 		t.Fatalf("syncDirectory error = %v", err)
+	}
+}
+
+// The cache file must get ordinary file permissions (0666 less the
+// umask), like any file the user creates, not the private 0600 that
+// os.CreateTemp gives the temporary file it is renamed from: CI
+// containers and teammates sharing a checkout need to read it.
+func TestGobStorageSaveUsesUmaskPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	dir := t.TempDir()
+	reference := filepath.Join(dir, "reference")
+	f, err := os.Create(reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	want, err := os.Stat(reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := New()
+	c.Put("k", Entry{})
+	if err := NewGobStorage(dir).Save(c); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Stat(filepath.Join(dir, Filename))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Mode().Perm() != want.Mode().Perm() {
+		t.Errorf("cache file mode %v, want %v (0666 less umask)", got.Mode().Perm(), want.Mode().Perm())
 	}
 }

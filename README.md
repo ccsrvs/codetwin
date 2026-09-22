@@ -204,6 +204,7 @@ codetwin --dead-code --json ./src | jq '.dead_symbols[] | select(.verdict == "de
 | `--dead-code` | false | Report definitions nothing in the scan references, tiered by confidence. Requires `--granularity function`. See [Dead code detection](#dead-code-detection---dead-code). |
 | `--no-progress` | false | Suppress the live progress indicator on stderr |
 | `--no-cache` | false | Skip reading and writing `.codetwin-cache.bin` |
+| `--reuse-scores` | false | Also cache candidate-pair scores and reuse them next run; helps only small repos |
 | `--rebuild-cache` | false | Ignore any existing cache and rebuild from scratch |
 | `--debug` | false | Print phase checkpoints with elapsed time to stderr |
 | `--cross-lang-only` | false | Report only pairs whose two snippets are in different languages |

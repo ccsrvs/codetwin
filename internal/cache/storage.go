@@ -1,12 +1,17 @@
 package cache
 
 import (
+	"crypto/rand"
 	"encoding/gob"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/ccsrvs/codetwin/internal/fingerprint"
 )
@@ -41,17 +46,35 @@ type gobStorageOps struct {
 
 func defaultGobStorageOps() gobStorageOps {
 	return gobStorageOps{
-		createTemp: func(dir, pattern string) (syncWriteCloser, string, error) {
-			f, err := os.CreateTemp(dir, pattern)
-			if err != nil {
-				return nil, "", err
-			}
-			return f, f.Name(), nil
-		},
-		remove:  os.Remove,
-		rename:  os.Rename,
-		syncDir: syncDirectory,
+		createTemp: createUmaskTemp,
+		remove:     os.Remove,
+		rename:     os.Rename,
+		syncDir:    syncDirectory,
 	}
+}
+
+// createUmaskTemp is os.CreateTemp with ordinary permissions: it opens
+// with mode 0666 so the umask decides, as for any file the user makes.
+// os.CreateTemp forces 0600, and the rename would carry that private
+// mode onto the cache file itself.
+func createUmaskTemp(dir, pattern string) (syncWriteCloser, string, error) {
+	prefix, suffix, _ := strings.Cut(pattern, "*")
+	for attempt := 0; attempt < 16; attempt++ {
+		var random [8]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return nil, "", err
+		}
+		name := filepath.Join(dir, prefix+hex.EncodeToString(random[:])+suffix)
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return f, name, nil
+	}
+	return nil, "", fmt.Errorf("create temporary cache file in %s: too many name collisions", dir)
 }
 
 // NewGobStorage returns a gob-backed cache store rooted at dir.
