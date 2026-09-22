@@ -135,10 +135,20 @@ func (s segment) bEnd() int { return s.bStart + s.length - 1 }
 func matchedSegments(ta, tb []string, posA, posB map[uint32][]int, k int) []segment {
 	seen := make(map[[2]int]struct{})
 	var segs []segment
-	for h, pas := range posA {
-		pbs, ok := posB[h]
+	// Probe from the smaller position map: the seeds found are the same
+	// either way, and the result is sorted below.
+	probe, other, swapped := posA, posB, false
+	if len(posB) < len(posA) {
+		probe, other, swapped = posB, posA, true
+	}
+	for h, ps := range probe {
+		qs, ok := other[h]
 		if !ok {
 			continue
+		}
+		pas, pbs := ps, qs
+		if swapped {
+			pas, pbs = qs, ps
 		}
 		if len(pas) > maxSeedPositions || len(pbs) > maxSeedPositions {
 			continue

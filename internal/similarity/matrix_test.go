@@ -641,3 +641,41 @@ func TestBuildMatrix_IncludeWeakPairs_ReachesMinimumFloorButSkipsZeroEvidence(t 
 		}
 	}
 }
+
+// A cross-language pair whose shared logic differs only in syntax
+// shares no fingerprint, and its shared vocabulary is spread over many
+// mid-weight terms rather than either side's heaviest ones. It scores
+// well above threshold, and BuildGraph must report it exactly as the
+// exhaustive oracle does.
+func TestBuildGraph_KeepsCrossLanguagePairsSharingOnlyMidWeightTerms(t *testing.T) {
+	var a, b []string
+	for i := 0; i < 18; i++ { // each side's heaviest, unshared terms
+		a = append(a, fmt.Sprintf("ua%02d", i))
+		b = append(b, fmt.Sprintf("ub%02d", i))
+	}
+	for i := 0; i < 150; i++ { // shared words, different punctuation
+		word := fmt.Sprintf("w%03d", i)
+		a = append(a, word, "(")
+		b = append(b, word, ";")
+	}
+	snipA := makeSnippet("a.go:1-300 A", "/a.go", a)
+	snipA.Lang = tokenizer.Go
+	snipB := makeSnippet("b.py:1-300 B", "/b.py", b)
+	snipB.Lang = tokenizer.Python
+	filler := makeSnippet("c.go:1-60 C", "/c.go", seqTokensSim(60, "zz"))
+	filler.Lang = tokenizer.Go
+	snips := []scan.Snippet{snipA, snipB, filler}
+	vectors := vectorsFor(snips)
+
+	_, want, _ := buildDenseGraph(snips, vectors, 0, 0.50, nil)
+	if len(want) != 1 || want[0].Score < 0.60 || want[0].Structural != 0 {
+		t.Fatalf("fixture should give one fingerprint-free pair above 0.60 exhaustively: %+v", want)
+	}
+	graph, got, _ := BuildGraph(snips, vectors, 0, 0.50, nil)
+	if len(got) != 1 || got[0].Score != want[0].Score {
+		t.Fatalf("BuildGraph reported %+v, exhaustive scoring %.3f", got, want[0].Score)
+	}
+	if graph.Score(0, 1) != want[0].Score {
+		t.Errorf("graph score %.3f, want %.3f (clustering reads the graph)", graph.Score(0, 1), want[0].Score)
+	}
+}

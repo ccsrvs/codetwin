@@ -79,9 +79,19 @@ type MatrixOptions struct {
 	// exact scorer. OnScoreCache reports cache hits and misses after the run.
 	ScoreCache   paircache.Store
 	OnScoreCache func(hits, misses int64)
+
+	// ApproximateCandidates skips semantic scoring for pairs that share
+	// neither a fingerprint nor one of each side's 16 heaviest TF-IDF
+	// terms. It is lossy: cross-language pairs whose shared vocabulary is
+	// spread over mid-weight terms are dropped even above threshold. On
+	// real repositories it pruned under 10% of pairs and saved no time,
+	// so it is off by default and meant only for corpora too large to
+	// score exhaustively.
+	ApproximateCandidates bool
 }
 
-// BuildGraph computes a candidate-pruned similarity graph, the
+// BuildGraph computes the similarity graph (exhaustive unless
+// MatrixOptions.ApproximateCandidates is set), the
 // materialized pair list above MaterializationFloor(threshold), and
 // the block-candidate index pairs (same-language pairs in the gray
 // band [BlockCandidateFloor, threshold) with nonzero structural
@@ -124,12 +134,23 @@ func BuildGraphContext(
 	onPairDone func(done, total int64),
 	options ...MatrixOptions,
 ) (MutableGraph, []report.Pair, [][2]int, error) {
-	graph := NewSparseGraph(len(snippets))
-	semanticIndex := NewSemanticCandidateIndex(vectors)
+	builder := newCompactGraphBuilder(len(snippets))
+	var semanticIndex *SemanticCandidateIndex
+	for _, opt := range options {
+		if opt.ApproximateCandidates {
+			semanticIndex = NewSemanticCandidateIndex(vectors)
+		}
+	}
 	pairs, blockCands, err := buildGraph(
-		ctx, graph, snippets, vectors, semanticIndex, minConfLines, threshold, onPairDone, options...,
+		ctx, builder, snippets, vectors, semanticIndex, minConfLines, threshold, onPairDone, options...,
 	)
-	return graph, pairs, blockCands, err
+	return builder.freeze(layoutAuto), pairs, blockCands, err
+}
+
+// scoreSink receives each scored pair. buildGraph calls SetScore(i, j)
+// with i < j only from the worker that owns row i, in ascending j.
+type scoreSink interface {
+	SetScore(a, b int, score float64)
 }
 
 func buildDenseGraph(
@@ -149,7 +170,7 @@ func buildDenseGraph(
 
 func buildGraph(
 	ctx context.Context,
-	graph MutableGraph,
+	graph scoreSink,
 	snippets []scan.Snippet,
 	vectors []NormalizedVector,
 	semanticIndex *SemanticCandidateIndex,

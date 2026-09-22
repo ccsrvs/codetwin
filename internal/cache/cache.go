@@ -198,6 +198,22 @@ func (c *Cache) SavePairScoreSnapshot(snapshot paircache.Snapshot) {
 	c.dirty = true
 }
 
+// DropPairScoreSnapshot discards any persisted pair scores so the next
+// Save writes a cache without them. It marks the cache dirty only when
+// there was something to drop.
+func (c *Cache) DropPairScoreSnapshot() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.PairScoreSnapshot.Context == "" && len(c.PairScoreSnapshot.Documents) == 0 && len(c.PairScoreSnapshot.Scores) == 0 {
+		return
+	}
+	c.PairScoreSnapshot = paircache.Snapshot{}
+	c.dirty = true
+}
+
 // Save writes the cache to `dir/Filename` atomically (write to .tmp, then
 // rename) so a crash mid-write doesn't leave a corrupt file. No-op if
 // nothing has been Put since Load.

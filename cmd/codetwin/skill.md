@@ -159,6 +159,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --no-progress           suppress the live progress indicator on stderr
 --no-cache              skip reading and writing .codetwin-cache.bin
 --rebuild-cache         ignore any existing cache and rebuild from scratch
+--reuse-scores          also cache candidate-pair scores and reuse them next run;
+                        off by default because the table grows with snippets²
 --debug                 print phase checkpoints with elapsed time to stderr
 --skill                 print this skill guide and exit
 --guide                 print the report interpretation guide and exit

@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/ccsrvs/codetwin/analyzer"
@@ -219,4 +221,40 @@ func iForName(snippets []scan.Snippet, name string) int {
 		}
 	}
 	return -1
+}
+
+// A caller passing only compiled strip patterns (no PatternIdentity)
+// must not be served tokens cached by a run without those patterns.
+func TestRunCompiledPatternsDoNotReuseUnpatternedCache(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	body := "package sample\nfunc Same() int {\n\tlog.Debug(\"x\")\n\tlog.Debug(\"y\")\n\treturn 1\n}\n"
+	files := []string{
+		writeSource(t, dir, "a.go", body),
+		writeSource(t, dir, "b.go", strings.ReplaceAll(body, "Same", "Other")),
+	}
+	base := analyzer.Request{
+		Files: files, MinLines: 1, Threshold: .1, Epsilon: .7, MinPoints: 2,
+		MinConfidenceLines: 1, Granularity: analyzer.GranularityFunction, CacheDir: dir,
+	}
+	if _, err := (analyzer.Analyzer{}).Run(context.Background(), base); err != nil {
+		t.Fatalf("unpatterned Run: %v", err)
+	}
+
+	patterned := base
+	patterned.CompiledStripPatterns = []*regexp.Regexp{regexp.MustCompile(`log\.Debug\([^)]*\)`)}
+	warm, err := (analyzer.Analyzer{}).Run(context.Background(), patterned)
+	if err != nil {
+		t.Fatalf("patterned Run: %v", err)
+	}
+	patterned.NoCache = true
+	cold, err := (analyzer.Analyzer{}).Run(context.Background(), patterned)
+	if err != nil {
+		t.Fatalf("uncached patterned Run: %v", err)
+	}
+	for i := range cold.Snippets {
+		if !reflect.DeepEqual(warm.Snippets[i].Tokens, cold.Snippets[i].Tokens) {
+			t.Fatalf("snippet %s: cached tokens %v, uncached %v", cold.Snippets[i].Name, warm.Snippets[i].Tokens, cold.Snippets[i].Tokens)
+		}
+	}
 }

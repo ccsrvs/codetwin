@@ -105,6 +105,7 @@ func main() {
 	noProgress := flag.Bool("no-progress", false, "suppress progress output on stderr")
 	noCache := flag.Bool("no-cache", false, "do not read or write .codetwin-cache.bin")
 	rebuildCache := flag.Bool("rebuild-cache", false, "ignore any existing cache and rebuild it from scratch")
+	reuseScores := flag.Bool("reuse-scores", false, "also persist candidate-pair scores in the cache and reuse them next run (helps only small repos; the table grows with snippets²)")
 	debug := flag.Bool("debug", false, "print phase checkpoints with elapsed time to stderr")
 	crossLangOnly := flag.Bool("cross-lang-only", false, "only report pairs whose two snippets are in different languages")
 	crossRepoOnly := flag.Bool("cross-repo-only", false, "only report findings whose endpoints are in different repos; requires two or more directory roots (each root is a repo)")
@@ -320,7 +321,7 @@ func main() {
 				namespaceSnippets(snippets, repos)
 			}
 		},
-		NoCache: *noCache, RebuildCache: *rebuildCache, CacheDir: ".",
+		NoCache: *noCache, RebuildCache: *rebuildCache, ReuseScores: *reuseScores, CacheDir: ".",
 		OnProgress: func(progress analyzer.Progress) {
 			if !showProgress {
 				return
@@ -1443,6 +1444,7 @@ FLAGS:
   --no-progress        suppress the live progress indicator on stderr
   --no-cache           skip reading and writing .codetwin-cache.bin
   --rebuild-cache      ignore any existing cache and rebuild it from scratch
+  --reuse-scores       also cache candidate-pair scores for reuse (small repos only)
   --debug              print phase checkpoints with elapsed time to stderr
   --cross-lang-only    report only pairs whose two snippets are in different languages
                        (e.g. duplicate logic across Go service + TS dashboard)
