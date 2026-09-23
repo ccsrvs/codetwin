@@ -42,7 +42,10 @@ import (
 // are no longer chunked with the next function's body.
 //
 // v6: assembly files are split into routines.
-const SchemaVersion = 6
+//
+// v7: HLASM files are split into macros, sections, and called
+// subroutines (they were previously read as MASM or GAS).
+const SchemaVersion = 7
 
 // ChunkKind classifies the granularity of a chunk. Downstream scoring
 // only compares chunks of the same kind: a class span weakly resembling
@@ -150,6 +153,8 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 		chunks = splitElixir(code)
 	case tokenizer.C:
 		chunks = splitC(code)
+	case tokenizer.AsmHLASM:
+		chunks = splitHLASM(code)
 	case tokenizer.AsmGAS, tokenizer.AsmNASM, tokenizer.AsmMASM, tokenizer.AsmPlan9:
 		chunks = splitAsm(code, lang)
 	}

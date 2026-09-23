@@ -61,6 +61,8 @@ var blockCases = []blockCase{
 	{name: "errcheck-chain-c"},
 	{name: "verbatim-asm-gas", positive: true, a: lineRange{11, 22}, b: lineRange{13, 24}},
 	{name: "frame-boilerplate-asm-gas"},
+	{name: "verbatim-asm-hlasm", positive: true, a: lineRange{15, 27}, b: lineRange{14, 26}},
+	{name: "equates-linkage-asm-hlasm"},
 }
 
 func blockCaseDir(c blockCase) string {

@@ -15,7 +15,7 @@ import (
 // the token stream produced for unchanged source. It is folded into
 // cache.SchemaTag so any bump auto-invalidates cached tokenization —
 // no manual cache.Version bump required.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // Language represents a supported source language.
 type Language string
@@ -51,6 +51,9 @@ type langPatterns struct {
 	// asm, when set, replaces keyword-set identifier normalization with
 	// assembly's position-based rules (see asmSyntax).
 	asm *asmSyntax
+	// strip, when set, replaces regex comment stripping: HLASM's remarks
+	// and continuations need its statement normalizer.
+	strip func(string) string
 }
 
 var patterns = map[Language]*langPatterns{
@@ -228,6 +231,9 @@ func init() {
 
 // stripComments preserves literals verbatim and keeps source line numbers.
 func stripComments(code string, p *langPatterns) string {
+	if p.strip != nil {
+		return p.strip(code)
+	}
 	var b strings.Builder
 	last := 0
 	for _, loc := range p.stringsOrComments.FindAllStringSubmatchIndex(code, -1) {
@@ -272,6 +278,15 @@ func Detect(filename, code string) Language {
 		return Elixir
 	case strings.HasSuffix(filename, ".c") || strings.HasSuffix(filename, ".h"):
 		return C
+	case hasSuffixFold(filename, hlasmExts):
+		return AsmHLASM
+	case hasSuffixFold(filename, hlasmContentExts):
+		// Claimed only when the content is HLASM; without content (a
+		// caller that re-reads the file later) assume it is.
+		if code == "" || hlasmContent(code) {
+			return AsmHLASM
+		}
+		return Unknown
 	case strings.HasSuffix(filename, ".s") || strings.HasSuffix(filename, ".S") ||
 		strings.HasSuffix(strings.ToLower(filename), ".asm"):
 		return asmDialect(filename, code)

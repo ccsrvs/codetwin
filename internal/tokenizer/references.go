@@ -1,6 +1,9 @@
 package tokenizer
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // Ref is one identifier-shaped occurrence in comment-stripped source:
 // the word as written and the 1-based line it appears on.
@@ -31,7 +34,7 @@ func References(code string, lang Language) []Ref {
 	start := 0
 	for i := 0; i <= len(stripped); i++ {
 		if i == len(stripped) || stripped[i] == '\n' {
-			for _, m := range refWordRe.FindAllString(stripped[start:i], -1) {
+			for _, m := range ReferenceWords(stripped[start:i], lang) {
 				refs = append(refs, Ref{Word: m, Line: line})
 			}
 			line++
@@ -39,4 +42,20 @@ func References(code string, lang Language) []Ref {
 		}
 	}
 	return refs
+}
+
+var hlasmRefWordRe = regexp.MustCompile(`[A-Za-z@#$_][A-Za-z0-9@#$_]*`)
+
+// ReferenceWords returns the identifier-shaped words of one line of
+// comment-stripped source. HLASM symbols contain @ # $ and are
+// case-insensitive, so they are returned uppercased.
+func ReferenceWords(line string, lang Language) []string {
+	if lang != AsmHLASM {
+		return refWordRe.FindAllString(line, -1)
+	}
+	words := hlasmRefWordRe.FindAllString(line, -1)
+	for i, w := range words {
+		words[i] = strings.ToUpper(w)
+	}
+	return words
 }

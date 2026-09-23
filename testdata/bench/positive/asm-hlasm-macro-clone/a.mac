@@ -1,0 +1,25 @@
+         MACRO
+&LABEL   EDNUM &REG,&FIELD,&LEN=8
+.*--------------------------------------------------------------------*
+.* EDNUM: store the binary value of register &REG in &FIELD as &LEN  *
+.* printable decimal digits, using an inline doubleword work area.   *
+.*--------------------------------------------------------------------*
+         LCLC  &WORK,&SKIP
+&WORK    SETC  'EDW&SYSNDX'
+&SKIP    SETC  'EDS&SYSNDX'
+         AIF   ('&REG' EQ '').NOREG
+         AIF   ('&FIELD' EQ '').NOFLD
+         AIF   (&LEN LT 1 OR &LEN GT 15).BADLEN
+&LABEL   CVD   &REG,&WORK
+         UNPK  &FIELD.(&LEN),&WORK
+         OI    &FIELD+&LEN-1,X'F0'
+         B     &SKIP
+&WORK    DS    D
+&SKIP    DS    0H
+         MEXIT
+.NOREG   MNOTE 8,'EDNUM: the register operand is required'
+         MEXIT
+.NOFLD   MNOTE 8,'EDNUM: the field operand is required'
+         MEXIT
+.BADLEN  MNOTE 8,'EDNUM: LEN=&LEN must be 1 to 15'
+         MEND

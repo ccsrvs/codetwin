@@ -81,8 +81,12 @@ GNU-style and K&R headers, `#ifdef` variants, and `extern "C"` wrappers
 split correctly without running a preprocessor. Assembly is split into
 routines by each dialect's markers (GAS exported labels and
 `ENTRY`/`endfunc`-style macros, NASM `cglobal`/`global`, MASM
-`PROC`/`ENDP`, Go's `TEXT`); the tokenizer keeps instructions,
-directives, and registers as tokens and normalizes labels and symbols.
+`PROC`/`ENDP`, Go's `TEXT`, HLASM `MACRO`/`MEND` and control sections
+split at the labels that `BAL`-family instructions call); the tokenizer
+keeps instructions, directives, and registers as tokens and normalizes
+labels and symbols. HLASM is first rewritten to one logical statement
+per line: the fixed-format columns are read, continuations joined, and
+remarks and sequence numbers dropped, so layout never reaches a token.
 Each chunk is then compared independently. A 500-line
 module with one duplicated 20-line helper now scores high on that helper
 instead of being washed out by 480 lines of unrelated code. For the

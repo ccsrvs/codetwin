@@ -1,0 +1,68 @@
+* Block-clone NEGATIVE fixture (negative/equates-linkage-asm-hlasm).
+* Two unrelated programs written to one shop standard: a title, the
+* textbook linkage, EXTRN lists, R0-R15 register equates, and flag and
+* limit equates. Only the linkage is code, and it is under 8 lines.
+         TITLE 'PAYCALC - GROSS PAY WITH OVERTIME'
+         PRINT NOGEN
+PAYCALC  CSECT
+         EXTRN TAXCALC,PAYLOG
+         STM   R14,R12,12(R13)
+         BALR  R12,0
+         USING *,R12
+         ST    R13,SAVEAREA+4
+         LA    R13,SAVEAREA
+         L     R2,0(,R1)          A(employee record)
+         USING EMPREC,R2
+         ZAP   HOURS,EMPHRS       hours worked, 2 decimals
+         ZAP   GROSS,EMPHRS
+         MP    GROSS,EMPRATE      hours x rate
+         SRP   GROSS,64-2,5       drop 2 decimals, rounded
+         CP    HOURS,=P'4000'     over 40.00 hours?
+         BNH   STORE
+         ZAP   OVERTIME,HOURS
+         SP    OVERTIME,=P'4000'
+         MP    OVERTIME,EMPRATE
+         MP    OVERTIME,=P'5'     time and a half: x 0.5 ...
+         SRP   OVERTIME,64-3,5    ... and drop 3 decimals
+         AP    GROSS,OVERTIME
+STORE    ZAP   EMPGROSS,GROSS
+         L     R15,=V(TAXCALC)
+         BALR  R14,R15
+         L     R13,SAVEAREA+4
+         LM    R14,R12,12(R13)
+         SR    R15,R15
+         BR    R14
+         EJECT
+SAVEAREA DS    18F
+HOURS    DS    PL4
+GROSS    DS    PL8
+OVERTIME DS    PL8
+         LTORG
+R0       EQU   0
+R1       EQU   1
+R2       EQU   2
+R3       EQU   3
+R4       EQU   4
+R5       EQU   5
+R6       EQU   6
+R7       EQU   7
+R8       EQU   8
+R9       EQU   9
+R10      EQU   10
+R11      EQU   11
+R12      EQU   12
+R13      EQU   13
+R14      EQU   14
+R15      EQU   15
+FLAGOT   EQU   X'80'              overtime was paid
+FLAGTAX  EQU   X'40'              tax was withheld
+FLAGBON  EQU   X'20'              bonus included
+MAXHRS   EQU   80
+STDHRS   EQU   40
+EMPLEN   EQU   EMPEND-EMPREC
+EMPREC   DSECT
+EMPHRS   DS    PL3
+EMPRATE  DS    PL3
+EMPGROSS DS    PL6
+EMPEND   EQU   *
+         END   PAYCALC

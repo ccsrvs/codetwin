@@ -23,7 +23,9 @@ import (
 //	         testing/, or selftests/ directory component; .h files follow
 //	         the same rule
 //	Asm      a test/, tests/, testing/, or selftests/ directory component
-//	         (.s, .S, .asm); file names alone are not a signal
+//	         (.s, .S, .asm, and HLASM's .hlasm, .mlc, .assemble, .asmpgm,
+//	         .asmmac, .mac, .macro); file names alone are not a signal
+//	         (TESTAUTH is a production HLASM macro)
 //
 // Paths in unsupported extensions are never classified as tests.
 func IsTestFile(path string) bool {
@@ -54,7 +56,7 @@ func IsTestFile(path string) bool {
 	case ".c", ".h":
 		return cTestStem(strings.TrimSuffix(base, filepath.Ext(base))) ||
 			cTestDir(p)
-	case ".s", ".asm":
+	case ".s", ".asm", ".hlasm", ".mlc", ".assemble", ".asmpgm", ".asmmac", ".mac", ".macro":
 		return cTestDir(p)
 	}
 	return false

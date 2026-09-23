@@ -1,0 +1,26 @@
+* ADDCNTS - total the counters in a fullword array.
+*   Parameters (R1): A(array), A(entry count), A(sum).
+*   Returns 8 when the sum overflows, otherwise 0.
+ADDCNTS  CSECT
+ADDCNTS  AMODE 31
+ADDCNTS  RMODE ANY
+         STM   14,12,12(13)       save registers
+         LR    12,15              base register
+         USING ADDCNTS,12
+         LM    2,4,0(1)           array, A(entries), A(sum)
+         L     3,0(,3)            entry count
+         SR    5,5                running sum
+         LTR   3,3                empty array?
+         BNP   STORE              yes, the sum is zero
+NEXTCNT  A     5,0(,2)            accumulate
+         BO    TOOBIG             overflowed
+         LA    2,4(,2)            next counter
+         BCT   3,NEXTCNT
+STORE    ST    5,0(,4)            pass the sum back
+         SR    15,15              rc 0
+         B     EXIT
+TOOBIG   LA    15,8               rc 8
+EXIT     L     14,12(,13)
+         LM    0,12,20(13)
+         BR    14
+         END   ADDCNTS

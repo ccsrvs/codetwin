@@ -1,0 +1,25 @@
+         MACRO
+&NAME    CVTDEC &R,&OUT,&DIGITS=8,&SIGN=NO
+.* CVTDEC - convert register &R to &DIGITS zoned decimal digits at
+.*          &OUT. SIGN=YES keeps the sign in the last digit.
+         LCLC  &DW,&PAST
+&DW      SETC  'CVW&SYSNDX'
+&PAST    SETC  'CVP&SYSNDX'
+         AIF   ('&R' EQ '').MISSR
+         AIF   ('&OUT' EQ '').MISSO
+         AIF   (&DIGITS LT 1 OR &DIGITS GT 15).BADDIG
+&NAME    CVD   &R,&DW
+         UNPK  &OUT.(&DIGITS),&DW
+         AIF   ('&SIGN' EQ 'YES').SIGNED
+         OI    &OUT+&DIGITS-1,X'F0'
+.SIGNED  ANOP
+         B     &PAST
+&DW      DS    D
+&PAST    DS    0H
+         MEXIT
+.MISSR   MNOTE 8,'CVTDEC: no register was given'
+         MEXIT
+.MISSO   MNOTE 8,'CVTDEC: no output field was given'
+         MEXIT
+.BADDIG  MNOTE 8,'CVTDEC: DIGITS=&DIGITS is out of range'
+         MEND

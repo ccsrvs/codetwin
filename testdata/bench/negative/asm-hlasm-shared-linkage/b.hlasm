@@ -1,0 +1,34 @@
+* HEXLINE: format one hex dump line. R1 -> A(data),A(line),A(offset).
+* The line gets the offset in hex, then 16 bytes as hex pairs.
+HEXLINE  CSECT
+         STM   14,12,12(13)
+         LR    12,15
+         USING HEXLINE,12
+         LA    15,SAVEAREA
+         ST    13,4(,15)          chain the save areas
+         ST    15,8(,13)
+         LR    13,15
+         LM    2,4,0(1)           data, print line, A(offset)
+         MVI   0(3),C' '          blank the print line
+         MVC   1(120,3),0(3)
+         MVC   FWORK(4),0(4)      offset of this line
+         UNPK  WORK(9),FWORK(5)   one nibble per byte
+         TR    WORK(8),HEXTAB-C'0' X'F0'-X'FF' -> hex digits
+         MVC   1(8,3),WORK
+         LA    3,11(,3)           first data column
+         LA    5,16               bytes per line
+NEXTBYTE UNPK  WORK(3),0(2,2)
+         TR    WORK(2),HEXTAB-C'0'
+         MVC   0(2,3),WORK
+         LA    2,1(,2)
+         LA    3,3(,3)            two digits and a blank
+         BCT   5,NEXTBYTE
+         L     13,4(,13)
+         LM    14,12,12(13)
+         SR    15,15
+         BR    14
+SAVEAREA DS    18F
+FWORK    DS    F,X                offset plus a pad byte for UNPK
+WORK     DS    CL9
+HEXTAB   DC    C'0123456789ABCDEF'
+         END   HEXLINE

@@ -4,7 +4,7 @@ description: >
   Run codetwin — a multi-language code similarity and duplicate detection CLI — via bash_tool.
   Use this skill whenever the user asks to find duplicate code, detect clones, identify refactoring
   opportunities, check for similar functions across files, or scan a codebase for copy-paste across
-  Go, JavaScript, TypeScript, Python, Java, Rust, Elixir, C, or assembly. Also trigger when the user says things
+  Go, JavaScript, TypeScript, Python, Java, Rust, Elixir, C, or assembly (including IBM HLASM). Also trigger when the user says things
   like "find repeated code", "what can be refactored", "check for duplicates", "scan my project
   for similar functions", "watch/track clone drift" (baseline snapshots + CI drift gating via
   --update-baseline / --baseline), "did this PR add duplication" (--since), "who introduced this
@@ -15,7 +15,8 @@ description: >
 # codetwin Skill
 
 `codetwin` is a CLI that finds duplicate and structurally similar code across
-Go, JavaScript/TypeScript, Python, Java, Rust, Elixir, C, and assembly. Function-level
+Go, JavaScript/TypeScript, Python, Java, Rust, Elixir, C, and assembly
+(GAS, NASM, MASM/armasm, Go, and IBM HLASM). Function-level
 chunks (plus class-kind chunks for Python/Java/JS classes, Elixir
 defmodules, Rust impl blocks, and Go struct+methodset groups, matched
 class↔class only),

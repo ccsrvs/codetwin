@@ -69,7 +69,7 @@ func synthesizeByLang(a, b scan.Snippet, pairID string, al Alignment) Suggestion
 		return synthesizeElixir(a, b, pairID, al)
 	case tokenizer.C:
 		return synthesizeC(a, b, pairID, al)
-	case tokenizer.AsmGAS, tokenizer.AsmNASM, tokenizer.AsmMASM, tokenizer.AsmPlan9:
+	case tokenizer.AsmGAS, tokenizer.AsmNASM, tokenizer.AsmMASM, tokenizer.AsmPlan9, tokenizer.AsmHLASM:
 		return Suggestion{Note: "rejected: --suggest does not generate assembly helpers; " +
 			"factor the shared instructions into an assembler macro (or a shared routine) by hand"}
 	default:
