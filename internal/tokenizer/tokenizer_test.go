@@ -18,6 +18,8 @@ func TestDetect_FromExtension(t *testing.T) {
 		"foo.rs":   Rust,
 		"foo.ex":   Elixir,
 		"foo.exs":  Elixir,
+		"foo.c":    C,
+		"foo.h":    C,
 	}
 	for name, want := range cases {
 		if got := Detect(name, ""); got != want {
@@ -43,6 +45,8 @@ func TestDetect_FromHeuristic(t *testing.T) {
 		{"elixir shorthand def", "def hello(x), do: x", Elixir},
 		{"javascript function keyword", "function foo() { return 1; }", JavaScript},
 		{"javascript const + arrow", "const f = () => 1;", JavaScript},
+		{"c via #include", "#include <stdio.h>\nint main(void) { return 0; }", C},
+		{"c #ifdef with do loop is not elixir", "#include \"x.h\"\n#ifdef DEBUG\nint f(int x) { do { x--; } while (x); return x; }\n#endif", C},
 		{"unknown short text", "hello world", Unknown},
 	}
 	for _, c := range cases {

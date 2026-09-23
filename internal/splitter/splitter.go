@@ -34,7 +34,10 @@ import (
 // struct+methodset groups are emitted as synthetic KindClass chunks;
 // entries cached under v2 lack both and would drop container↔container
 // findings for those languages.
-const SchemaVersion = 3
+//
+// v4: C files are split into function chunks (they previously fell back
+// to one whole-file chunk under a heuristically detected language).
+const SchemaVersion = 4
 
 // ChunkKind classifies the granularity of a chunk. Downstream scoring
 // only compares chunks of the same kind: a class span weakly resembling
@@ -140,6 +143,8 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 		chunks = splitJava(code)
 	case tokenizer.Elixir:
 		chunks = splitElixir(code)
+	case tokenizer.C:
+		chunks = splitC(code)
 	}
 	if len(chunks) == 0 {
 		chunks = []Chunk{WholeFile(path, code)}

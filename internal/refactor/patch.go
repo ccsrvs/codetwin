@@ -261,8 +261,38 @@ func buildPlacedPatch(pathA, fileContent string, s Suggestion) string {
 			return buildInsertBeforePatch(pathA, fileContent, helper, line)
 		}
 		return buildAppendPatch(pathA, fileContent, elixirFileScopeNote+s.HelperSrc)
+	case tokenizer.C:
+		// C needs a declaration before use: land the helper above A's
+		// function — and above A's doc comment, which keeps describing A.
+		return buildInsertBeforePatchSep(pathA, fileContent, s.HelperSrc,
+			cLeadingCommentStart(fileContent, s.SourceStartLine), true)
 	}
 	return buildAppendPatch(pathA, fileContent, s.HelperSrc)
+}
+
+// cLeadingCommentStart returns the 1-based line where the comment block
+// directly above line (a function's first line) begins, or line itself
+// when no comment touches it: a /* … */ block ending on the line above,
+// or a run of // lines.
+func cLeadingCommentStart(fileContent string, line int) int {
+	lines := strings.Split(fileContent, "\n")
+	i := line - 2 // 0-based index of the line above
+	if i < 0 || i >= len(lines) {
+		return line
+	}
+	if strings.HasSuffix(strings.TrimSpace(lines[i]), "*/") {
+		for j := i; j >= 0; j-- {
+			if strings.Contains(lines[j], "/*") {
+				return j + 1
+			}
+		}
+		return line
+	}
+	j := i
+	for j >= 0 && strings.HasPrefix(strings.TrimSpace(lines[j]), "//") {
+		j--
+	}
+	return j + 2
 }
 
 // buildInsertBeforePatch returns a unified diff that inserts helperSrc
@@ -273,6 +303,14 @@ func buildPlacedPatch(pathA, fileContent string, s Suggestion) string {
 // buildAppendPatch for mid-file insertion; insertion points past the
 // end of the file degrade to a plain append.
 func buildInsertBeforePatch(pathA, fileContent, helperSrc string, insertBefore int) string {
+	return buildInsertBeforePatchSep(pathA, fileContent, helperSrc, insertBefore, false)
+}
+
+// buildInsertBeforePatchSep is buildInsertBeforePatch with an optional
+// blank line between the helper and a non-blank line below it, for
+// helpers inserted above another definition rather than above a
+// closing brace or `end`.
+func buildInsertBeforePatchSep(pathA, fileContent, helperSrc string, insertBefore int, trailingSep bool) string {
 	trimmed := strings.TrimSuffix(fileContent, "\n")
 	var fileLines []string
 	if fileContent != "" {
@@ -298,6 +336,9 @@ func buildInsertBeforePatch(pathA, fileContent, helperSrc string, insertBefore i
 	trail := fileLines[insIdx:trailEnd]
 
 	helperLines := strings.Split(strings.TrimRight(helperSrc, "\n"), "\n")
+	if trailingSep && len(trail) > 0 && strings.TrimSpace(trail[0]) != "" {
+		helperLines = append(helperLines, "")
+	}
 	needSep := len(lead) > 0 && strings.TrimSpace(lead[len(lead)-1]) != ""
 
 	oldStart := leadStart + 1

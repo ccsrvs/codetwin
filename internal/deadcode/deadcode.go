@@ -14,6 +14,7 @@ package deadcode
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -123,9 +124,13 @@ func Analyze(snippets []scan.Snippet, files ...string) ([]Finding, []string) {
 		}
 		isTest := fileIsTest[path]
 		bySym := selfSpans[path]
+		declared := declarationSites(string(data), lang)
 		for _, ref := range tokenizer.References(string(data), lang) {
 			if _, defined := defs[ref.Word]; !defined {
 				continue
+			}
+			if declared[ref.Line][ref.Word] {
+				continue // a prototype or directive names it without using it
 			}
 			if inAnySpan(bySym[ref.Word], ref.Line) {
 				continue
@@ -211,6 +216,44 @@ func firstLine(code string) string {
 	return code
 }
 
+// declarationSites returns, by 1-based line, the words a file mentions
+// without using them: C prototypes and forward declarations.
+func declarationSites(code string, lang tokenizer.Language) map[int]map[string]bool {
+	if lang == tokenizer.C {
+		return splitter.CDeclarations(code)
+	}
+	return nil
+}
+
+var (
+	cStaticRe   = regexp.MustCompile(`\bstatic\b`)
+	cCtorDtorRe = regexp.MustCompile(`__attribute__\s*\(\(\s*(?:constructor|destructor)\b`)
+)
+
+// cSpecifiers returns the part of a C definition in front of its name:
+// storage class, attributes, and return type. It falls back to the
+// first line when the name cannot be found.
+func cSpecifiers(code, sym string) string {
+	for from := 0; ; {
+		k := strings.Index(code[from:], sym)
+		if k < 0 {
+			return firstLine(code)
+		}
+		k += from
+		end := k + len(sym)
+		before := k == 0 || !isIdentByte(code[k-1])
+		rest := strings.TrimLeft(code[end:], " \t\r\n")
+		if before && (end == len(code) || !isIdentByte(code[end])) && strings.HasPrefix(rest, "(") {
+			return code[:k]
+		}
+		from = k + 1
+	}
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+
 // isExported reports whether a definition is visible outside its own
 // file/module/package under the language's convention. Exported symbols
 // may have consumers outside the scanned roots, so they are reported in
@@ -230,6 +273,14 @@ func isExported(sym string, s *scan.Snippet) bool {
 		return strings.Contains(firstLine(s.Code), "export")
 	case tokenizer.Elixir:
 		return !strings.HasPrefix(strings.TrimSpace(firstLine(s.Code)), "defp")
+	case tokenizer.C:
+		// Only `static` gives a C function internal linkage — except in
+		// a header, where a static inline helper is part of what every
+		// includer (possibly outside the scan) can call.
+		if strings.EqualFold(filepath.Ext(s.Path), ".h") {
+			return true
+		}
+		return !cStaticRe.MatchString(cSpecifiers(s.Code, sym))
 	}
 	return true // unknown language: assume exported, stay advisory
 }
@@ -256,6 +307,12 @@ func suppressed(sym string, s *scan.Snippet) bool {
 		// Dunder methods are dispatched by the runtime (__init__,
 		// __repr__, __enter__, ...).
 		if strings.HasPrefix(sym, "__") && strings.HasSuffix(sym, "__") {
+			return true
+		}
+	case tokenizer.C:
+		// __attribute__((constructor/destructor)) functions run around
+		// main without ever being called by name.
+		if cCtorDtorRe.MatchString(cSpecifiers(s.Code, sym)) {
 			return true
 		}
 	}

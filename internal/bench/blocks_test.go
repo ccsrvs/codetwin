@@ -57,6 +57,8 @@ var blockCases = []blockCase{
 	{name: "errcheck-chain-go"},
 	{name: "logging-block-js"},
 	{name: "import-adjacent-python"},
+	{name: "verbatim-c", positive: true, a: lineRange{13, 25}, b: lineRange{16, 28}},
+	{name: "errcheck-chain-c"},
 }
 
 func blockCaseDir(c blockCase) string {

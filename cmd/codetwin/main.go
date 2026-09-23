@@ -60,6 +60,7 @@ var guideBody string
 var supportedExts = map[string]bool{
 	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
+	".c": true, ".h": true,
 }
 
 // buildVersion is stamped by the release workflow via

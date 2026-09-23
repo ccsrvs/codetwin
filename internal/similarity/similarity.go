@@ -40,6 +40,7 @@ var crossLangCanon = map[string]string{
 	"func": "FN", "def": "FN", "fn": "FN", "function": "FN", "defp": "FN",
 	"elif": "ELIF", "elsif": "ELIF",
 	"nil": "NIL", "None": "NIL", "null": "NIL", "undefined": "NIL",
+	"NULL": "NIL", "nullptr": "NIL",
 	"True": "true", "False": "false",
 	"raise": "THROW", "throw": "THROW", "panic": "THROW",
 	"except": "CATCH", "catch": "CATCH", "rescue": "CATCH",
