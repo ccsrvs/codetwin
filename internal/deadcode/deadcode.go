@@ -230,6 +230,28 @@ var (
 	cCtorDtorRe = regexp.MustCompile(`__attribute__\s*\(\(\s*(?:constructor|destructor)\b`)
 )
 
+// pyFixtureRe matches a pytest fixture decorator: @pytest.fixture,
+// @pytest_asyncio.fixture, or a bare imported @fixture, with or without
+// arguments.
+var pyFixtureRe = regexp.MustCompile(`^@(?:pytest\.|pytest_asyncio\.)?fixture\b`)
+
+// pyFixtureDecorated reports whether a Python definition's own
+// decorators — the lines above its def/class line — include a pytest
+// fixture decorator. Decorators on methods inside a class chunk do not
+// count for the class.
+func pyFixtureDecorated(code string) bool {
+	for _, line := range strings.Split(code, "\n") {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, "@") {
+			return false
+		}
+		if pyFixtureRe.MatchString(t) {
+			return true
+		}
+	}
+	return false
+}
+
 // cSpecifiers returns the part of a C definition in front of its name:
 // storage class, attributes, and return type. It falls back to the
 // first line when the name cannot be found.
@@ -309,10 +331,25 @@ func suppressed(sym string, s *scan.Snippet) bool {
 		if strings.HasPrefix(sym, "__") && strings.HasSuffix(sym, "__") {
 			return true
 		}
+		// pytest and unittest collect tests by name, call pytest_* hooks,
+		// and inject fixtures — none of them has a call site. Collection
+		// only happens in test files; hooks and fixtures also live in a
+		// root conftest.py, which is not one.
+		if s.IsTest && (strings.HasPrefix(sym, "test") || strings.HasPrefix(sym, "Test")) {
+			return true
+		}
+		if strings.HasPrefix(sym, "pytest_") || pyFixtureDecorated(s.Code) {
+			return true
+		}
 	case tokenizer.C:
 		// __attribute__((constructor/destructor)) functions run around
 		// main without ever being called by name.
 		if cCtorDtorRe.MatchString(cSpecifiers(s.Code, sym)) {
+			return true
+		}
+		// Unit-test harnesses reach test functions through a dispatcher
+		// that is often generated (curl's tests/unit) or outside the scan.
+		if s.IsTest && strings.HasPrefix(sym, "test") {
 			return true
 		}
 	}

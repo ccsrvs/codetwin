@@ -322,6 +322,9 @@ alive:
   trait impls and operator overloads (Rust), OTP/Phoenix callbacks
   including `start_link` (Elixir), `main`/`WinMain`/`DllMain`, fuzzer
   hooks, and constructor/destructor functions (C).
+- Test entry points a harness finds by name are never reported:
+  `test*` functions in C and Python test files, Python `Test*` classes,
+  `pytest_*` hooks, and `@pytest.fixture` functions.
 - A C **prototype** or forward declaration names a function without
   using it, so it never keeps the definition alive. Only `static` makes
   a C function file-local; a `static inline` helper in a header stays in

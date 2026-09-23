@@ -73,9 +73,11 @@ var patterns = map[Language]*langPatterns{
 		// ('"', '\'') cannot open a string region in stripComments. An
 		// escaped newline (backslash continuation) stays inside the literal.
 		strings: regexp.MustCompile(`"(?:[^"\\\n]|\\[\s\S])*"|'(?:[^'\\\n]|\\[\s\S])+'`),
-		// Hex with integer suffixes, then decimal/octal integers and
-		// floats with optional fraction, exponent, and u/l/f suffixes.
-		numbers: regexp.MustCompile(`\b0[xX][0-9a-fA-F]+[uUlL]*\b|\b\d+(?:\.\d*)?(?:[eE][+-]?\d+)?[uUlLfF]*`),
+		// Hex integers and hex floats (0x1.8p-2), binary (0b1010), then
+		// decimal/octal integers and floats with optional fraction and
+		// exponent — each with u/l/f and C23 z suffixes — so no literal
+		// leaves a trailing word like "p3" or "b1010" behind.
+		numbers: regexp.MustCompile(`\b(?:0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?\d+)?|0[bB][01]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)[uUlLfFzZ]*`),
 	},
 	JavaScript: {
 		keywords: []string{

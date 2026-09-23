@@ -57,3 +57,30 @@ func TestCTestMacroDefinitionsAreNotDeadCode(t *testing.T) {
 		t.Errorf("macro-generated test definitions must not be findings: %+v", findings)
 	}
 }
+
+// Test entry points that a harness finds by name — curl's generated
+// unit-test dispatcher, pytest collection, pytest fixtures and hooks —
+// have no call site in the scanned code, so they must not be reported.
+// Other unreferenced definitions in test files still are.
+func TestNameDiscoveredTestEntryPointsAreNotDead(t *testing.T) {
+	snippets := scanDir(t, map[string]string{
+		"tests/unit/unit1300.c": "static void test_Curl_llist_dtor(void *key, void *value)\n{\n  (void)key;\n  (void)value;\n}\n\n" +
+			"static int test_unit1300(const char *arg)\n{\n  return arg != 0;\n}\n\n" +
+			"static int orphan_c_helper(void)\n{\n  return 1;\n}\n",
+		"tests/test_download.py": "import pytest\n\n\nclass TestDownload:\n\n    @pytest.fixture(autouse=True, scope='class')\n    def _class_scope(self, env):\n        env.prepare()\n\n    def test_small_file(self, env):\n        assert env.get('/small')\n\n\ndef test_top_level(env):\n    assert env\n\n\ndef _orphan_py_helper():\n    return 1\n",
+		"conftest.py":            "import pytest\n\n\ndef pytest_configure(config):\n    config.addinivalue_line('markers', 'slow')\n\n\n@pytest.fixture\ndef env():\n    return object()\n",
+	})
+	findings, _ := Analyze(snippets)
+	got := findingsBySymbol(findings)
+	for _, entry := range []string{"test_Curl_llist_dtor", "test_unit1300", "TestDownload", "_class_scope",
+		"test_small_file", "test_top_level", "pytest_configure", "env"} {
+		if f, ok := got[entry]; ok {
+			t.Errorf("test entry point %s reported: %+v", entry, f)
+		}
+	}
+	for _, orphan := range []string{"orphan_c_helper", "_orphan_py_helper"} {
+		if f, ok := got[orphan]; !ok || f.Verdict != VerdictDead {
+			t.Errorf("unreferenced test-file helper %s: want dead, got %+v (present=%v)", orphan, f, ok)
+		}
+	}
+}

@@ -30,6 +30,10 @@ func TestIsTestFile_TableDriven(t *testing.T) {
 		{"tools/speed-test.c", true},
 		{"src/crc64_unittest.c", true},
 		{"tests/helpers.h", true},
+		{"drivers/base/test/property_kunit.c", true},
+		{"lib/list_kunit.c", true},
+		{"tools/testing/selftests/net/tcp_mmap.c", true},
+		{"tools/testing/radix-tree/main.c", true},
 		{"src/latest.c", false}, // "test" inside a word is not a convention
 		{"src/contest.c", false},
 		{"src/testing_mode.c", false}, // test_ prefix needs the underscore right after "test"

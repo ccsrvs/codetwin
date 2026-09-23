@@ -16,14 +16,25 @@ func TestNormalize_StripsCIncludes(t *testing.T) {
 }
 
 func TestTokenize_CNumberLiteralsBecomeNUM(t *testing.T) {
-	tokens := Tokenize("x = 0x1Fu + 0XffUL + 10UL + 1.5f + 2e-3 + 017 + 3.;", C)
+	tokens := Tokenize("x = 0x1Fu + 0XffUL + 10UL + 1.5f + 2e-3 + 017 + 3. + 0x1p3 + 0x1.8p-2f + 0b1010u + 10uz + .5f;", C)
 	for _, tok := range tokens {
 		if tok != "NUM" && strings.ContainsAny(tok, "0123456789") {
 			t.Errorf("raw numeric token %q survived in %v", tok, tokens)
 		}
 	}
-	if n := strings.Count(strings.Join(tokens, " "), "NUM"); n != 7 {
-		t.Errorf("got %d NUM tokens, want 7: %v", n, tokens)
+	if n := strings.Count(strings.Join(tokens, " "), "NUM"); n != 12 {
+		t.Errorf("got %d NUM tokens, want 12: %v", n, tokens)
+	}
+	for _, tok := range tokens {
+		if tok == "VAR" {
+			continue
+		}
+		if len(tok) > 1 && (tok[0] == 'p' || tok[0] == 'b' || tok[0] == 'x') {
+			t.Errorf("literal split into a trailing word %q: %v", tok, tokens)
+		}
+	}
+	if n := strings.Count(strings.Join(tokens, " "), "VAR"); n != 1 {
+		t.Errorf("only x may normalize to VAR, got %d VAR tokens: %v", n, tokens)
 	}
 }
 

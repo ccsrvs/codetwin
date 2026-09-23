@@ -526,7 +526,7 @@ Classification is by path only (no file contents are read):
 | Java | a `src/test/` path component sequence |
 | Rust | a `tests/` directory component |
 | Elixir | `*_test.exs`, or a `test/` directory component |
-| C | `test_*`, `*_test`, `*_tests`, `test-*`, `*-test`, `tst-*`, `*_unittest`, `test.c`/`testN.c`, or a `test/` / `tests/` directory component (`.h` too) |
+| C | `test_*`, `*_test`, `*_tests`, `test-*`, `*-test`, `tst-*`, `*_unittest`, `*_kunit`, `test.c`/`testN.c`, or a `test/`, `tests/`, `testing/`, or `selftests/` directory component (`.h` too) |
 
 This is presentation-layer only: scores, the similarity graph, and
 clustering are unchanged, and suppression happens after threshold
@@ -567,7 +567,10 @@ points and implicitly-dispatched methods are never reported — `main`,
 methods, Java's `equals`/`hashCode`, Rust trait impls and operator
 overloads, Elixir OTP/Phoenix callbacks including `start_link`, and C
 `main`/`WinMain`/`DllMain`, libFuzzer hooks, and
-`__attribute__((constructor))`/`destructor` functions.
+`__attribute__((constructor))`/`destructor` functions. Test entry points
+that a harness finds by name are never reported either: `test*`
+functions in C and Python test files, Python `Test*` classes, pytest
+`pytest_*` hooks, and `@pytest.fixture` functions.
 Per-language visibility conventions drive the `exported` split: Go
 capitalization, Python leading underscore, Rust `pub`, Java `public`,
 JS `export`, Elixir `def` vs `defp`, C `static` (a `static inline`
