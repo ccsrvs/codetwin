@@ -17,6 +17,7 @@ func TestCommentMarkersInsideStrings(t *testing.T) {
 		{Rust, `"https://aliveHelper"`, "// ignoredHelper"},
 		{Python, `"#aliveHelper"`, "# ignoredHelper"},
 		{Elixir, `"#aliveHelper"`, "# ignoredHelper"},
+		{C, `"/* aliveHelper */"`, "// ignoredHelper"},
 	} {
 		t.Run(string(tc.lang), func(t *testing.T) {
 			source := "call(" + tc.literal + "); afterHelper() " + tc.comment + "\nnextHelper()"
@@ -65,6 +66,9 @@ func TestCharLiteralsDoNotOpenStrings(t *testing.T) {
 		{Rust,
 			"fn is_quote(c: char) -> bool {\n\tc == '\\'' || c == '\"' // ghostHelper\n}\n\nfn first<'a>(s: &'a str) -> &'a str {\n\ts // ghostHelper\n}\n\nfn greet() -> String {\n\t\"hi\".to_string()\n}\n",
 			"fn is_quote(c: char) -> bool {\n\tc == '\\'' || c == '\"'\n}\n\nfn first<'a>(s: &'a str) -> &'a str {\n\ts\n}\n\nfn greet() -> String {\n\t\"hi\".to_string()\n}\n"},
+		{C,
+			"int is_quote(char c) {\n\treturn c == '\\'' || c == '\"'; // ghostHelper\n}\n\nconst char *greet(void) {\n\treturn \"hi\";\n}\n",
+			"int is_quote(char c) {\n\treturn c == '\\'' || c == '\"';\n}\n\nconst char *greet(void) {\n\treturn \"hi\";\n}\n"},
 	} {
 		t.Run(string(tc.lang), func(t *testing.T) {
 			got, lines := TokenizeWithLines(tc.withComment, tc.lang)

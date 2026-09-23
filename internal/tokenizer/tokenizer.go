@@ -15,7 +15,7 @@ import (
 // the token stream produced for unchanged source. It is folded into
 // cache.SchemaTag so any bump auto-invalidates cached tokenization —
 // no manual cache.Version bump required.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // Language represents a supported source language.
 type Language string
@@ -27,6 +27,7 @@ const (
 	Go         Language = "go"
 	Rust       Language = "rust"
 	Elixir     Language = "elixir"
+	C          Language = "c"
 	Unknown    Language = "unknown"
 )
 
@@ -46,6 +47,38 @@ type langPatterns struct {
 }
 
 var patterns = map[Language]*langPatterns{
+	C: {
+		// C11 plus the C23 spellings; bool/true/false/NULL are included
+		// because code bases spell them either as keywords or as the
+		// ubiquitous <stdbool.h>/<stddef.h> macros.
+		keywords: []string{
+			"auto", "break", "case", "char", "const", "continue", "default",
+			"do", "double", "else", "enum", "extern", "float", "for", "goto",
+			"if", "inline", "int", "long", "register", "restrict", "return",
+			"short", "signed", "sizeof", "static", "struct", "switch",
+			"typedef", "union", "unsigned", "void", "volatile", "while",
+			"_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex",
+			"_Generic", "_Imaginary", "_Noreturn", "_Static_assert",
+			"_Thread_local", "alignas", "alignof", "bool", "constexpr",
+			"false", "nullptr", "static_assert", "thread_local", "true",
+			"typeof", "typeof_unqual", "NULL",
+		},
+		comments: regexp.MustCompile(`//[^\n]*|/\*[\s\S]*?\*/`),
+		imports: []*regexp.Regexp{
+			// #include <x.h>, #include "x.h", #include_next, and the
+			// Objective-C #import that some C headers carry.
+			regexp.MustCompile(`(?m)^[ \t]*#[ \t]*(?:include(?:_next)?|import)\b[^\n]*`),
+		},
+		// Char literals are listed alongside strings so a quote inside one
+		// ('"', '\'') cannot open a string region in stripComments. An
+		// escaped newline (backslash continuation) stays inside the literal.
+		strings: regexp.MustCompile(`"(?:[^"\\\n]|\\[\s\S])*"|'(?:[^'\\\n]|\\[\s\S])+'`),
+		// Hex integers and hex floats (0x1.8p-2), binary (0b1010), then
+		// decimal/octal integers and floats with optional fraction and
+		// exponent — each with u/l/f and C23 z suffixes — so no literal
+		// leaves a trailing word like "p3" or "b1010" behind.
+		numbers: regexp.MustCompile(`\b(?:0[xX][0-9a-fA-F]+(?:\.[0-9a-fA-F]*)?(?:[pP][+-]?\d+)?|0[bB][01]+|\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)[uUlLfFzZ]*`),
+	},
 	JavaScript: {
 		keywords: []string{
 			"function", "const", "let", "var", "return", "if", "else",
@@ -215,10 +248,16 @@ func Detect(filename, code string) Language {
 		return Rust
 	case strings.HasSuffix(filename, ".ex") || strings.HasSuffix(filename, ".exs"):
 		return Elixir
+	case strings.HasSuffix(filename, ".c") || strings.HasSuffix(filename, ".h"):
+		return C
 	}
 
 	// Heuristic fallback from code content
 	switch {
+	// #include only occurs in C-family source, and C's #ifdef/#ifndef
+	// would otherwise read as Elixir or Python "def".
+	case cIncludeRe.MatchString(code):
+		return C
 	case strings.Contains(code, "package main") || strings.Contains(code, "func "):
 		return Go
 	case strings.Contains(code, "fn ") && strings.Contains(code, "let mut"):
@@ -241,6 +280,8 @@ func Detect(filename, code string) Language {
 }
 
 var elixirDoRe = regexp.MustCompile(`\bdo\b`)
+
+var cIncludeRe = regexp.MustCompile(`(?m)^[ \t]*#[ \t]*include[ \t]*[<"]`)
 
 // Normalize strips comments, replaces literals and identifiers with canonical
 // tokens, and collapses whitespace. Returns the normalized string.

@@ -9,7 +9,7 @@ codetwin operates in five internal stages — all handled automatically:
 
 1. **Chunk** — split each file into per-definition chunks (Python `def`,
    Go `func`, JS `function`/arrow/class method, Rust `fn`, Java method,
-   Elixir `def`). A 500-line module with one duplicated 20-line helper
+   Elixir `def`, C function definitions). A 500-line module with one duplicated 20-line helper
    scores high on the helper rather than getting washed out by 480
    lines of unrelated code. Python/Java/JS classes, Elixir defmodules
    (with 2+ defs), Rust impl blocks, and Go struct+methodset groups
@@ -151,8 +151,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
                         --update-baseline.
 --suggest string        print a unified diff that adds a starter helper extracted from the
                         matching pair or partial-clone block (look up the 8-char ID in
-                        --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir;
-                        blocks: Go and Python. Other languages print a 'note'
+                        --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir,
+                        C; blocks: Go and Python. Other languages print a 'note'
                         explaining why.
 --suggest-all           with --json: populate `suggested_patch` on every visible pair
                         and partial clone
@@ -269,7 +269,7 @@ divergence comment block listing exactly how snippet B differs.
 # 1. Run with --json to discover pair IDs.
 codetwin --json --threshold 0.85 ./pkg | jq '.pairs[] | {id, file_a, file_b}'
 
-# 2. Pick a same-language pair (any of the six languages) and emit its suggestion.
+# 2. Pick a same-language pair (Go, Python, Java, JS/TS, Rust, Elixir, or C) and emit its suggestion.
 codetwin --suggest <pair-id> ./pkg > suggest.diff
 
 # 3. Review, then apply.
@@ -277,8 +277,9 @@ git apply suggest.diff
 ```
 
 The diff is *additive only* — it adds the helper to A's file (at the
-end of the file, or inside the enclosing class/defmodule for
-Java/Elixir — see below) without rewriting either call site. The
+end of the file, inside the enclosing class/defmodule for
+Java/Elixir, or above A's function for C — see below) without
+rewriting either call site. The
 reviewer (or a Claude skill consuming the JSON output) finishes the
 refactor by hand. Codetwin deliberately stops short of full
 parameterization: doing it without a language AST would be unsafe.
@@ -291,13 +292,14 @@ Rejection cases (printed as a `note:` line on stderr; exit 1):
   functions/methods; run `--suggest` on the method pairs inside
 - Cross-language pairs (v1 doesn't transpile)
 - Unsupported language (v1 supports Go, Python, Java,
-  JavaScript/TypeScript, Rust, and Elixir — every language with a
-  splitter)
+  JavaScript/TypeScript, Rust, Elixir, and C)
+- Macro-generated definitions (C `TEST(suite, name) { … }` and
+  similar) — the helper would have to be a macro too
 - Holes where one side has a control-flow keyword (`return`/`break`/
   `continue`, plus `raise`/`yield` for Python, `throw`/`yield` for
-  Java and JavaScript/TypeScript, `panic` for Rust, and
-  `raise`/`throw`/`exit` for Elixir) and the other doesn't — that
-  asymmetry signals semantically different snippets
+  Java and JavaScript/TypeScript, `panic` for Rust,
+  `raise`/`throw`/`exit` for Elixir, and `goto` for C) and the other
+  doesn't — that asymmetry signals semantically different snippets
 
 For Java specifically, the diff inserts the helper inside the
 innermost class/interface/enum/record enclosing the source method —
@@ -352,6 +354,14 @@ fall back to a file-scope append with a `# NOTE: appended at file
 scope…` comment. Real-world idioms exercised in fixtures: GenServer callbacks
 with `@impl`, Phoenix-style multi-line headers, multi-clause pattern-
 matched defs, and `defmacro` DSL builders.
+
+For C, the helper keeps A's storage class, attributes, return type, and
+parameter list verbatim — GNU-style line breaks, K&R parameter
+declarations, and `#ifdef` header variants included — with every
+occurrence of the name in the header renamed. Because C needs a
+declaration before use, the diff inserts the helper *above* A's
+function (and above A's doc comment, which keeps describing A),
+followed by a blank line.
 
 `--suggest-all` with `--json` populates `suggested_patch` on every
 pair *and* every visible partial clone, so a single run produces
@@ -574,7 +584,8 @@ codebases; pass `--min-confidence-lines 0` for raw scores.
 Files matching each language's test convention (Go `*_test.go`; Python
 `test_*.py` / `*_test.py` / `tests|test/` dirs; JS/TS `*.spec.*` /
 `*.test.*` / `__tests__/`; Java `src/test/`; Rust `tests/`; Elixir
-`*_test.exs` / `test/`) are classified as test code by path. By default,
+`*_test.exs` / `test/`; C `test_*` / `*_test` / `test-*` / `tst-*` /
+`test/` / `tests/`) are classified as test code by path. By default,
 test↔test pairs and clusters whose members are ALL test snippets are
 suppressed and summarized in one line each, e.g.
 `1,874 test↔test pairs suppressed (--include-tests to show)` — test
@@ -643,6 +654,7 @@ never collide with a whole-chunk preview of the same snippet.
 | Java | `.java` |
 | Rust | `.rs` |
 | Elixir | `.ex` `.exs` |
+| C | `.c` `.h` |
 
 ## Running tests
 

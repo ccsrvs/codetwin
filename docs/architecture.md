@@ -73,8 +73,13 @@ duplicated lines.
 **Splitter** (`internal/splitter`)
 Breaks each file into per-definition chunks: every Python `def`, Go `func`
 (including closures/goroutines/defers), JS / TS / JSX / TSX `function` /
-`const arrow` / class method, Rust `fn`, Java method/constructor, and
-Elixir `def`/`defp`. Each chunk is then compared independently. A 500-line
+`const arrow` / class method, Rust `fn`, Java method/constructor,
+Elixir `def`/`defp`, and C function definition. The C splitter masks
+comments, literals, and preprocessor lines, then makes one linear pass
+that follows `#if`/`#else` branches with saved and restored state, so
+GNU-style and K&R headers, `#ifdef` variants, and `extern "C"` wrappers
+split correctly without running a preprocessor. Each chunk is then
+compared independently. A 500-line
 module with one duplicated 20-line helper now scores high on that helper
 instead of being washed out by 480 lines of unrelated code. For the
 container languages (Python, Java, JS/TS, Elixir, Rust) the splitter ALSO
@@ -136,8 +141,9 @@ LCS alignment over the raw source (common spans + divergence "holes"),
 `synth.go` dispatches to a per-language emitter that produces a starter
 helper (a literal copy of A's body with a divergence comment block),
 `place.go` finds the innermost enclosing class/defmodule for Java/Elixir
-placement, and `patch.go` wraps the helper in a unified diff. All six
-languages have pair emitters (blocks: Go and Python); synthesis is rejected
+placement (C helpers go above A's function and its doc comment), and
+`patch.go` wraps the helper in a unified diff. Go, Python, Java,
+JS/TS, Rust, Elixir, and C have pair emitters (blocks: Go and Python); synthesis is rejected
 with a structured note for cross-language pairs, class-level pairs,
 control-flow-asymmetric holes, and chunks without a recognisable header.
 

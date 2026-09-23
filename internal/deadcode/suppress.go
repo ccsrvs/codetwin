@@ -66,6 +66,13 @@ var suppressedNames = map[tokenizer.Language]map[string]bool{
 		"next", "into_iter", "from_iter", "from_str", "from", "into",
 		"try_from", "try_into", "clone", "as_ref", "as_mut", "borrow",
 	),
+	tokenizer.C: nameSet(
+		// Process and library entry points the C runtime or loader calls.
+		"main", "wmain", "WinMain", "wWinMain", "DllMain",
+		// libFuzzer / AFL++ harness hooks, found by symbol name.
+		"LLVMFuzzerTestOneInput", "LLVMFuzzerInitialize",
+		"LLVMFuzzerCustomMutator", "LLVMFuzzerCustomCrossOver",
+	),
 	tokenizer.Elixir: nameSet(
 		// OTP / GenServer / Supervisor callbacks: invoked by the runtime,
 		// and start_link is called via `{Mod, arg}` child specs without
