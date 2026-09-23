@@ -9,7 +9,7 @@ codetwin operates in five internal stages — all handled automatically:
 
 1. **Chunk** — split each file into per-definition chunks (Python `def`,
    Go `func`, JS `function`/arrow/class method, Rust `fn`, Java method,
-   Elixir `def`, C function definitions). A 500-line module with one duplicated 20-line helper
+   Elixir `def`, C function definitions, assembly routines). A 500-line module with one duplicated 20-line helper
    scores high on the helper rather than getting washed out by 480
    lines of unrelated code. Python/Java/JS classes, Elixir defmodules
    (with 2+ defs), Rust impl blocks, and Go struct+methodset groups
@@ -293,7 +293,8 @@ Rejection cases (printed as a `note:` line on stderr; exit 1):
   functions/methods; run `--suggest` on the method pairs inside
 - Cross-language pairs (v1 doesn't transpile)
 - Unsupported language (v1 supports Go, Python, Java,
-  JavaScript/TypeScript, Rust, Elixir, and C)
+  JavaScript/TypeScript, Rust, Elixir, and C; assembly pairs are
+  rejected with a note to factor the instructions into a macro)
 - Macro-generated definitions (C `TEST(suite, name) { … }` and
   similar) — the helper would have to be a macro too
 - Holes where one side has a control-flow keyword (`return`/`break`/
@@ -586,7 +587,8 @@ Files matching each language's test convention (Go `*_test.go`; Python
 `test_*.py` / `*_test.py` / `tests|test/` dirs; JS/TS `*.spec.*` /
 `*.test.*` / `__tests__/`; Java `src/test/`; Rust `tests/`; Elixir
 `*_test.exs` / `test/`; C `test_*` / `*_test` / `test-*` / `tst-*` /
-`test/` / `tests/`) are classified as test code by path. By default,
+`test/` / `tests/`; assembly `test/` / `tests/` directories) are
+classified as test code by path. By default,
 test↔test pairs and clusters whose members are ALL test snippets are
 suppressed and summarized in one line each, e.g.
 `1,874 test↔test pairs suppressed (--include-tests to show)` — test
@@ -656,6 +658,7 @@ never collide with a whole-chunk preview of the same snippet.
 | Rust | `.rs` |
 | Elixir | `.ex` `.exs` |
 | C | `.c` `.h` |
+| Assembly (GAS, NASM, MASM/armasm, Go) | `.s` `.S` `.asm` — dialect detected from content |
 
 ## Running tests
 

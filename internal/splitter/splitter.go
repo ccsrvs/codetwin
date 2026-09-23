@@ -40,7 +40,9 @@ import (
 //
 // v5: Go functions declared without a body (implemented in assembly)
 // are no longer chunked with the next function's body.
-const SchemaVersion = 5
+//
+// v6: assembly files are split into routines.
+const SchemaVersion = 6
 
 // ChunkKind classifies the granularity of a chunk. Downstream scoring
 // only compares chunks of the same kind: a class span weakly resembling
@@ -148,6 +150,8 @@ func Split(path, code string, lang tokenizer.Language) []Chunk {
 		chunks = splitElixir(code)
 	case tokenizer.C:
 		chunks = splitC(code)
+	case tokenizer.AsmGAS, tokenizer.AsmNASM, tokenizer.AsmMASM, tokenizer.AsmPlan9:
+		chunks = splitAsm(code, lang)
 	}
 	if len(chunks) == 0 {
 		chunks = []Chunk{WholeFile(path, code)}

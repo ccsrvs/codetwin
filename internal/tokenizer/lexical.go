@@ -37,6 +37,9 @@ func LexicalTerms(code string, lang Language) []string {
 	}
 
 	s := stripComments(code, p)
+	if p.prepare != nil {
+		s = p.prepare(s)
+	}
 	for _, im := range p.imports {
 		s = im.ReplaceAllString(s, " ")
 	}
@@ -62,7 +65,18 @@ func LexicalTerms(code string, lang Language) []string {
 		harvest(m)
 		return " "
 	})
-	harvest(s)
+	if p.asm != nil {
+		// Assembly has no keyword list: harvest only the words its
+		// position rules treat as names (labels, symbols), not
+		// mnemonics, directives, or registers.
+		for _, line := range strings.Split(s, "\n") {
+			for _, w := range p.asm.names(line) {
+				harvest(w)
+			}
+		}
+	} else {
+		harvest(s)
+	}
 
 	if len(set) == 0 {
 		return nil

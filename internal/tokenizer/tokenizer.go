@@ -15,7 +15,7 @@ import (
 // the token stream produced for unchanged source. It is folded into
 // cache.SchemaTag so any bump auto-invalidates cached tokenization —
 // no manual cache.Version bump required.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // Language represents a supported source language.
 type Language string
@@ -44,6 +44,13 @@ type langPatterns struct {
 	imports []*regexp.Regexp
 	strings *regexp.Regexp
 	numbers *regexp.Regexp
+
+	// prepare, when set, rewrites comment-stripped code before imports,
+	// strings, and numbers are normalized (GAS numeric label references).
+	prepare func(string) string
+	// asm, when set, replaces keyword-set identifier normalization with
+	// assembly's position-based rules (see asmSyntax).
+	asm *asmSyntax
 }
 
 var patterns = map[Language]*langPatterns{
@@ -236,6 +243,16 @@ func stripComments(code string, p *langPatterns) string {
 	return b.String()
 }
 
+// StripComments blanks lang's comments while keeping string literals
+// and every newline, so line numbers still match the source.
+func StripComments(code string, lang Language) string {
+	p, ok := patterns[lang]
+	if !ok {
+		p = patterns[JavaScript]
+	}
+	return stripComments(code, p)
+}
+
 // Detect infers the language from file extension or code heuristics.
 func Detect(filename, code string) Language {
 	// Extension-based detection first
@@ -255,6 +272,9 @@ func Detect(filename, code string) Language {
 		return Elixir
 	case strings.HasSuffix(filename, ".c") || strings.HasSuffix(filename, ".h"):
 		return C
+	case strings.HasSuffix(filename, ".s") || strings.HasSuffix(filename, ".S") ||
+		strings.HasSuffix(strings.ToLower(filename), ".asm"):
+		return asmDialect(filename, code)
 	}
 
 	// Heuristic fallback from code content
@@ -300,6 +320,9 @@ func Normalize(code string, lang Language) string {
 
 	// 1. Strip comments
 	s = stripComments(s, p)
+	if p.prepare != nil {
+		s = p.prepare(s)
+	}
 
 	// 1b. Strip import / use / package statements (language-specific). Order
 	// matters within the slice — list multi-line patterns first so they consume
@@ -314,6 +337,16 @@ func Normalize(code string, lang Language) string {
 
 	// 3. Normalize numeric literals
 	s = p.numbers.ReplaceAllString(s, "NUM")
+
+	// Assembly normalizes identifiers by their position in each
+	// statement, so it must run before newlines collapse.
+	if p.asm != nil {
+		lines := strings.Split(s, "\n")
+		for i, line := range lines {
+			lines[i] = p.asm.normalizeLine(line)
+		}
+		return strings.TrimSpace(collapseWhitespace(strings.Join(lines, "\n")))
+	}
 
 	// 4. Collapse whitespace
 	s = collapseWhitespace(s)
@@ -388,12 +421,17 @@ func TokenizeWithLines(code string, lang Language, opts ...Option) ([]string, []
 	var lineNums []int
 	for i, line := range strings.Split(preprocessed, "\n") {
 		// Replace non-keyword identifiers with VAR
-		normalizedLine := ident.ReplaceAllStringFunc(line, func(m string) string {
-			if kwSet[m] || m == "STR" || m == "NUM" {
-				return m
-			}
-			return "VAR"
-		})
+		var normalizedLine string
+		if p.asm != nil {
+			normalizedLine = p.asm.normalizeLine(line)
+		} else {
+			normalizedLine = ident.ReplaceAllStringFunc(line, func(m string) string {
+				if kwSet[m] || m == "STR" || m == "NUM" {
+					return m
+				}
+				return "VAR"
+			})
+		}
 		// Emit word runs (identifiers, keywords, STR/NUM/VAR) and each
 		// punctuation rune as its own token; whitespace only separates.
 		// Formatting never changes the token stream — `f(x)`, `f( x )`,
@@ -438,6 +476,9 @@ func TokenizeWithLines(code string, lang Language, opts ...Option) ([]string, []
 // import/string passes.
 func preprocessKeepLines(code string, p *langPatterns, userStrip []*regexp.Regexp) string {
 	s := stripComments(code, p)
+	if p.prepare != nil {
+		s = p.prepare(s)
+	}
 	for _, re := range userStrip {
 		s = replacePreservingNewlines(s, re, " ")
 	}

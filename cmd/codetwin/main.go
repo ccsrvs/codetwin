@@ -61,6 +61,7 @@ var supportedExts = map[string]bool{
 	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
 	".c": true, ".h": true,
+	".s": true, ".S": true, ".asm": true, ".ASM": true,
 }
 
 // buildVersion is stamped by the release workflow via
@@ -1402,7 +1403,7 @@ USAGE:
                                  CODETWIN_NO_UPDATE_CHECK=1)
 
   Paths can be files or directories (scanned recursively).
-  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h
+  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h .s .S .asm
 
   Two or more DIRECTORY roots switch on cross-repo mode: each root is a
   "repo" (labelled by its base name; duplicates become name~2, name~3 …

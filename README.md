@@ -2,7 +2,7 @@
 
 Multi-language code similarity detector — finds duplicate and refactorable code
 across `.go`, `.js`, `.ts`, `.jsx`, `.tsx`, `.py`, `.java`, `.rs`,
-`.ex`/`.exs`, and `.c`/`.h` files. Function-level chunking, semantic + structural scoring,
+`.ex`/`.exs`, `.c`/`.h`, and assembly (`.s`, `.S`, `.asm`) files. Function-level chunking, semantic + structural scoring,
 DBSCAN clustering, no external dependencies.
 
 What sets codetwin apart from other clone detectors:
@@ -355,6 +355,41 @@ are configuration rather than code, so they are left out of similarity
 scaffolding still match. Dead-code analysis still reads them, because a
 `#define` body can call a function.
 
+## Assembly
+
+Assembly comes in four dialects with different comment, string, and
+routine syntax, and file extensions do not tell them apart (`.asm`
+holds NASM, MASM, armasm, and even GAS; `.s` holds GAS or Go's
+assembler). codetwin picks the dialect from each file's content and
+reports it as the pair's language:
+
+| Language | Dialect | Routines are found by |
+|---|---|---|
+| `asm-gas` | GNU as: AT&T x86, AArch64, ARM, RISC-V, … | labels named by `.globl` or `.type x, @function`; `ENTRY()`/`END()`, `SYM_FUNC_START`, dav1d's `function`/`endfunc`, COFF `.def` |
+| `asm-nasm` | NASM/YASM, including x86inc | `cglobal`, or a label named by `global` |
+| `asm-masm` | MASM and armasm | `name PROC` … `ENDP` |
+| `asm-plan9` | Go's assembler | `TEXT sym(SB)` up to the next `TEXT`, `DATA`, or `GLOBL` |
+
+A routine ends at its dialect's end marker (`.size`, `endfunc`, `ENDP`,
+…) or where the next one starts. Local labels never start a routine,
+data tables declared as objects are not routines, and a file with no
+routine is compared as a whole.
+
+Instructions, directives, and registers are the structure of assembly,
+so they are kept as tokens (lowercased), while labels and symbols
+normalize like identifiers: a routine copied with renamed labels is an
+exact clone, and changing one instruction or register changes the
+score. AArch64 arrangements (`.16b`, `.8h`) normalize, so 8- and 16-bit
+variants of a NEON routine match. Numbers normalize as everywhere else,
+and GAS numeric label references (`1b`, `2f`) are treated as labels.
+The same routine written in two dialects (MASM vs AT&T) has almost no
+tokens in common and is not reported.
+
+`--suggest` does not generate assembly helpers; factor shared
+instructions into an assembler macro by hand.
+
+## Class-level matching
+
 ## Class-level matching
 
 For the class-based languages the splitter emits **class-span chunks in
@@ -532,6 +567,7 @@ Classification is by path only (no file contents are read):
 | Rust | a `tests/` directory component |
 | Elixir | `*_test.exs`, or a `test/` directory component |
 | C | `test_*`, `*_test`, `*_tests`, `test-*`, `*-test`, `tst-*`, `*_unittest`, `*_kunit`, `test.c`/`testN.c`, or a `test/`, `tests/`, `testing/`, or `selftests/` directory component (`.h` too) |
+| Assembly | a `test/`, `tests/`, `testing/`, or `selftests/` directory component (file names alone are not a signal) |
 
 This is presentation-layer only: scores, the similarity graph, and
 clustering are unchanged, and suppression happens after threshold
@@ -581,7 +617,14 @@ capitalization, Python leading underscore, Rust `pub`, Java `public`,
 JS `export`, Elixir `def` vs `defp`, C `static` (a `static inline`
 helper in a header stays exported: every includer can call it). A C
 prototype or forward declaration names a function without using it, so
-it never keeps a definition alive.
+it never keeps a definition alive. For assembly, declaration directives
+(`.globl`, `.type`, `.size`, `global`, `PUBLIC`, `ENTRY()`, …) likewise
+name a routine without calling it; `foo` and `_foo` are the same symbol
+(macOS and 32-bit Windows prefix C names with `_`); every assembly
+finding stays in the advisory `unused-in-scan` tier, since exported
+routines are called from outside the scan; and routines whose names are
+pasted together by a macro (x86inc's `cglobal`, dav1d's `function`) are
+never reported, because the literal name never appears at a call site.
 
 What it cannot see — verify before deleting: consumers outside the
 scanned roots (the whole `unused-in-scan` tier exists because of them),
