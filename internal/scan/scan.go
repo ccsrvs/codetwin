@@ -234,7 +234,7 @@ func ProcessFile(
 	if entry, ok := cacheState.Get(key); ok {
 		var out []Snippet
 		for _, c := range entry.Chunks {
-			if c.NonBlankLn < minLines {
+			if codeLines(c.Lines) < minLines {
 				continue
 			}
 			out = append(out, Snippet{
@@ -296,7 +296,7 @@ func ProcessFile(
 			LexTerms:   lexTerms,
 		})
 
-		if nonBlank < minLines {
+		if codeLines(lines) < minLines {
 			continue
 		}
 		out = append(out, Snippet{
@@ -343,4 +343,21 @@ func positionalFromCache(c cache.Chunk) fingerprint.PositionalSet {
 		set[h] = struct{}{}
 	}
 	return fingerprint.PositionalSet{Set: set, Positions: c.Positions, K: c.K}
+}
+
+// codeLines counts the distinct source lines that produced tokens: the
+// lines --min-lines measures. Comments, blank lines, and stripped
+// imports produce no tokens, so a one-line wrapper under a license
+// header — or a short function padded with comments — stays below the
+// floor. (NonBlankLn, shown in reports and used by the length
+// dampener, still counts every non-blank line.)
+func codeLines(tokenLines []int) int {
+	n, last := 0, -1
+	for _, l := range tokenLines {
+		if l != last {
+			n++
+			last = l
+		}
+	}
+	return n
 }

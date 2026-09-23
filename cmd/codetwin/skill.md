@@ -86,7 +86,8 @@ codetwin --threshold 0.40 <TARGET_PATH>
 --plain                 no ANSI colors — use for piping or file output
 --json                  JSON output
 --verbose               show all pairs including weak similarities
---min-lines int         skip chunks shorter than N non-blank lines (default 5)
+--min-lines int         skip chunks with fewer than N code lines (default 5; comments,
+                        blank lines, imports, and C preprocessor lines do not count)
 --ignore pattern        skip paths matching an ignore_paths-style pattern (repeatable;
                         merged with .codetwin.json ignore_paths). node_modules and
                         vendor directories below a scan root are always skipped.

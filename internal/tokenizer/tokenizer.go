@@ -15,7 +15,7 @@ import (
 // the token stream produced for unchanged source. It is folded into
 // cache.SchemaTag so any bump auto-invalidates cached tokenization —
 // no manual cache.Version bump required.
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // Language represents a supported source language.
 type Language string
@@ -65,9 +65,14 @@ var patterns = map[Language]*langPatterns{
 		},
 		comments: regexp.MustCompile(`//[^\n]*|/\*[\s\S]*?\*/`),
 		imports: []*regexp.Regexp{
-			// #include <x.h>, #include "x.h", #include_next, and the
-			// Objective-C #import that some C headers carry.
-			regexp.MustCompile(`(?m)^[ \t]*#[ \t]*(?:include(?:_next)?|import)\b[^\n]*`),
+			// Every preprocessor line, with its backslash continuations:
+			// #include, conditional compilation, #define constants and
+			// macro bodies. They configure the code rather than being
+			// it (PMD CPD drops them too), so functions that differ only
+			// in #ifdef scaffolding still match, and a wrapper file of
+			// macro boilerplate keeps little code. References() does not
+			// apply imports, so #define bodies still count as uses.
+			regexp.MustCompile(`(?m)^[ \t]*#(?:[^\n\\]|\\[\s\S])*`),
 		},
 		// Char literals are listed alongside strings so a quote inside one
 		// ('"', '\'') cannot open a string region in stripComments. An

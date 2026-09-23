@@ -387,3 +387,32 @@ func TestProcessFile_CacheRespectsPatternOrder(t *testing.T) {
 		}
 	}
 }
+
+// --min-lines measures code, not commentary: a wrapper file whose only
+// code is one line under a license header, or a three-line function
+// padded with comments, is too short to report, however many comment
+// lines surround it.
+func TestProcessFile_MinLinesCountsCodeLinesNotComments(t *testing.T) {
+	dir := t.TempDir()
+	license := "/* Multiple versions of vectorized cosh.\n   Copyright (C) 2024 The Authors.\n   This file is part of the library.\n\n   It is free software; you can redistribute it\n   under the terms of the license.  */\n\n"
+	wrapper := writeFile(t, dir, "cosh4_core.c", license+"#define SYMBOL_NAME cosh4\n#include \"ifunc-avx2.h\"\nredirect (REDIRECT_NAME, SYMBOL_NAME, SELECTOR ());\n")
+	padded := writeFile(t, dir, "padded.c", "int tiny(int x)\n{\n\t/* step one */\n\t/* step two */\n\t/* step three */\n\treturn x + 1;\n}\n")
+	real := writeFile(t, dir, "real.c", "int sum(const int *xs, int n)\n{\n\tint s = 0;\n\tfor (int i = 0; i < n; i++)\n\t\ts += xs[i];\n\treturn s;\n}\n")
+	for _, tc := range []struct {
+		path string
+		want int
+	}{{wrapper, 0}, {padded, 0}, {real, 1}} {
+		for _, state := range []*cache.Cache{nil, cache.New()} {
+			if state != nil {
+				ProcessFile(tc.path, 1, nil, state, "", GranularityFunction) // warm the cache
+			}
+			got, warning := ProcessFile(tc.path, 5, nil, state, "", GranularityFunction)
+			if warning != "" {
+				t.Fatal(warning)
+			}
+			if len(got) != tc.want {
+				t.Errorf("%s (cached=%v): %d snippets, want %d", filepath.Base(tc.path), state != nil, len(got), tc.want)
+			}
+		}
+	}
+}

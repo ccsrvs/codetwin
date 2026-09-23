@@ -354,6 +354,9 @@ func cParse(code string) ([]Chunk, map[int]map[string]bool) {
 // or take the address of functions, so it declares nothing here.
 func cDeclaredFunctions(toks []cTok) []cTok {
 	toks = cAfterLastBlock(toks)
+	if len(toks) > 0 && toks[0].text == "typedef" {
+		return nil // declares a type name, not a function
+	}
 	paren := 0
 	for _, t := range toks {
 		switch t.text {
@@ -377,7 +380,7 @@ func cDeclaredFunctions(toks []cTok) []cTok {
 			paren--
 		default:
 			if paren == 0 && t.isIdent() && k+1 < len(toks) && toks[k+1].text == "(" &&
-				!cReservedNames[t.text] && !cAttributeNames[t.text] {
+				!cReservedNames[t.text] && !cAttributeNames[t.text] && !cTypeWords[t.text] {
 				names = append(names, t)
 			}
 		}

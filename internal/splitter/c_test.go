@@ -218,3 +218,39 @@ func TestSplitC_ManyFunctions(t *testing.T) {
 		t.Fatalf("got %d chunks, last %+v", len(chunks), chunks[len(chunks)-1])
 	}
 }
+
+func TestCDeclarations(t *testing.T) {
+	code := "int proto(int);\n" + // 1
+		"static void fwd(void);\n" + // 2
+		"extern int a(void), b(int);\n" + // 3
+		"typedef int (*handler)(int);\n" + // 4
+		"static int (*table[])(int) = { proto };\n" + // 5
+		"EXPORT_SYMBOL(proto);\n" + // 6
+		"int proto(int x) { return x; }\n" // 7
+	got := CDeclarations(code)
+	want := map[int]map[string]bool{
+		1: {"proto": true},
+		2: {"fwd": true},
+		3: {"a": true, "b": true},
+		6: {"EXPORT_SYMBOL": true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CDeclarations = %v, want %v", got, want)
+	}
+}
+
+func TestCDefinitionHeader(t *testing.T) {
+	code := "#ifdef WIDE\nint conv(long v) /* conv */\n#else\nint conv(int v)\n#endif\n{\n    return conv_inner(v);\n}"
+	name, names, brace, ok := CDefinitionHeader(code)
+	if !ok || name != "conv" || len(names) != 2 || code[brace] != '{' {
+		t.Fatalf("CDefinitionHeader = %q %v %d %v", name, names, brace, ok)
+	}
+	for _, n := range names {
+		if code[n[0]:n[1]] != "conv" || n[0] > brace {
+			t.Errorf("occurrence %v is %q", n, code[n[0]:n[1]])
+		}
+	}
+	if _, _, _, ok := CDefinitionHeader("struct point { int x; };"); ok {
+		t.Error("a struct body is not a function header")
+	}
+}

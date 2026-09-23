@@ -91,7 +91,7 @@ func main() {
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
-	minLines := flag.Int("min-lines", 5, "skip chunks with fewer than N non-blank lines")
+	minLines := flag.Int("min-lines", 5, "skip chunks with fewer than N code lines (comments, blank lines, imports, and C preprocessor lines do not count)")
 	var ignoreFlags multiFlag
 	flag.Var(&ignoreFlags, "ignore", "skip paths matching this ignore_paths-style pattern (repeatable; merged with .codetwin.json ignore_paths)")
 	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
@@ -1417,7 +1417,7 @@ FLAGS:
   --plain              no ANSI colors, suitable for pipes and CI
   --json               output as JSON
   --verbose            show all pairs including weak similarities
-  --min-lines int      skip chunks with fewer than N non-blank lines (default 5)
+  --min-lines int      skip chunks with fewer than N code lines (default 5)
   --ignore pattern     skip paths matching an ignore_paths-style pattern (repeatable)
   --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
                        the 'strong clone' band)

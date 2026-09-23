@@ -86,3 +86,25 @@ func TestLexicalTerms_CSkipsKeywordsAndIncludes(t *testing.T) {
 		}
 	}
 }
+
+// Every preprocessor line is configuration, not code, for similarity:
+// conditional-compilation lines, #define constants, and continued macro
+// bodies are stripped (as PMD CPD does), so two functions that differ
+// only in their #ifdef scaffolding still match and a file of macro
+// boilerplate has little code left. References still see directives.
+func TestTokenize_CStripsAllPreprocessorLines(t *testing.T) {
+	withPP := "#define SYMBOL_NAME cosh4\n#include \"ifunc.h\"\nint f(int x)\n{\n#ifdef FAST\n\tx <<= 1;\n#else\n\tx *= 2;\n#endif\n#define LONG_MACRO(a) \\\n\tdo { a; } while (0)\n\treturn x;\n}\n"
+	plain := "int f(int x)\n{\n\tx <<= 1;\n\tx *= 2;\n\treturn x;\n}\n"
+	got, lines := TokenizeWithLines(withPP, C)
+	want := Tokenize(plain, C)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tokens = %v\nwant     %v", got, want)
+	}
+	if lines[0] != 3 || lines[len(lines)-1] != 13 {
+		t.Errorf("line numbers must still point at the source: %v", lines)
+	}
+	refs := refWords(References("#define CALL_HELPER() helper()\nint g(void) { return 0; }\n", C))
+	if len(refs["helper"]) != 1 {
+		t.Errorf("a #define body must still count as a reference: %v", refs)
+	}
+}
