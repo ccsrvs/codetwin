@@ -1,0 +1,42 @@
+* CHKDATE: validate a YYYYMMDD date. R1 -> A(date). RC 0 = valid,
+* RC 8 = not numeric, or the month or day is out of range.
+CHKDATE  CSECT
+         STM   14,12,12(13)
+         LR    12,15
+         USING CHKDATE,12
+         LA    15,SAVEAREA
+         ST    13,4(,15)          chain the save areas
+         ST    15,8(,13)
+         LR    13,15
+         L     2,0(,1)            A(date)
+         TRT   0(8,2),NUMTAB      all eight bytes digits?
+         BNZ   BADDATE
+         PACK  DWORK,4(2,2)       month
+         CVB   3,DWORK
+         CH    3,=H'1'
+         BL    BADDATE
+         CH    3,=H'12'
+         BH    BADDATE
+         PACK  DWORK,6(2,2)       day
+         CVB   4,DWORK
+         LTR   4,4
+         BZ    BADDATE
+         SLL   3,1                halfword index into MAXDAY
+         CH    4,MAXDAY-2(3)      past the end of the month?
+         BH    BADDATE
+         SR    15,15
+         B     RETURN
+BADDATE  LA    15,8
+RETURN   L     13,4(,13)
+         L     14,12(,13)
+         LM    0,12,20(13)
+         BR    14
+SAVEAREA DS    18F
+DWORK    DS    D
+MAXDAY   DC    H'31,29,31,30,31,30,31,31,30,31,30,31'
+NUMTAB   DC    256X'FF'           nonzero for every byte ...
+         ORG   NUMTAB+C'0'
+         DC    10X'00'            ... except the digits 0-9
+         ORG
+         LTORG
+         END   CHKDATE

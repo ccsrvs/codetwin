@@ -1,0 +1,27 @@
+*---------------------------------------------------------------------*
+* SUMTAB: add up a table of fullword counters.                        *
+* On entry R1 -> A(table),A(count),A(total). RC 8 on overflow.        *
+*---------------------------------------------------------------------*
+SUMTAB   CSECT
+SUMTAB   AMODE 31
+SUMTAB   RMODE ANY
+         STM   14,12,12(13)       save caller registers
+         LR    12,15              establish base
+         USING SUMTAB,12
+         LM    2,4,0(1)           R2=table R3=A(count) R4=A(total)
+         L     3,0(,3)            number of entries
+         SR    5,5                clear accumulator
+         LTR   3,3                any entries?
+         BNP   DONE               no, the total is zero
+LOOP     A     5,0(,2)            add next entry
+         BO    OVERFLOW           stop on overflow
+         LA    2,4(,2)            step to next entry
+         BCT   3,LOOP             count down
+DONE     ST    5,0(,4)            store the total
+         SR    15,15              rc=0
+         B     RETURN
+OVERFLOW LA    15,8               rc=8
+RETURN   L     14,12(,13)         restore return address
+         LM    0,12,20(13)        restore R0-R12, keep rc in R15
+         BR    14
+         END   SUMTAB

@@ -48,6 +48,10 @@ func TestIsTestFile_TableDriven(t *testing.T) {
 		{"arch/x86/lib/testsetbit.S", false},
 		{"src/x86/test_helpers.asm", false},
 		{"src/runtime/asm_amd64.s", false},
+		{"rt/test/TESTINS1.MLC", true},
+		{"tests/hlasm/copy.hlasm", true},
+		{"maclib/TESTAUTH.MAC", false}, // a production macro named TEST*
+		{"src/PROG.ASSEMBLE", false},
 
 		// Python: test_*.py, *_test.py, tests/ or test/ dir component.
 		{"test_foo.py", true},

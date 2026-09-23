@@ -323,8 +323,9 @@ alive:
   including `start_link` (Elixir), `main`/`WinMain`/`DllMain`, fuzzer
   hooks, and constructor/destructor functions (C).
 - Assembly: declaration directives (`.globl`, `.type`, `global`,
-  `PUBLIC`, …) are not uses, `foo` and `_foo` are one symbol, and every
-  finding stays advisory (`unused-in-scan`). Routines named through
+  `PUBLIC`, …, and HLASM's `EXTRN`, `WXTRN`, `ENTRY`, `ALIAS`) are not
+  uses, `foo` and `_foo` are one symbol, HLASM symbols match in any
+  case, and every finding stays advisory (`unused-in-scan`). Routines named through
   x86inc's `cglobal` or dav1d's `function` macro are never reported.
 - Test entry points a harness finds by name are never reported:
   `test*` functions in C and Python test files, Python `Test*` classes,

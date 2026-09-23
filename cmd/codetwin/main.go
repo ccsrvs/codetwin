@@ -62,6 +62,12 @@ var supportedExts = map[string]bool{
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
 	".c": true, ".h": true,
 	".s": true, ".S": true, ".asm": true, ".ASM": true,
+	// HLASM: claimed by extension, or (.mac/.macro) when the content is
+	// HLASM. Mainframe exports are usually upper case.
+	".hlasm": true, ".HLASM": true, ".mlc": true, ".MLC": true,
+	".assemble": true, ".ASSEMBLE": true, ".asmpgm": true, ".ASMPGM": true,
+	".asmmac": true, ".ASMMAC": true, ".mac": true, ".MAC": true,
+	".macro": true, ".MACRO": true,
 }
 
 // buildVersion is stamped by the release workflow via
@@ -1403,7 +1409,8 @@ USAGE:
                                  CODETWIN_NO_UPDATE_CHECK=1)
 
   Paths can be files or directories (scanned recursively).
-  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h .s .S .asm
+  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h .s .S .asm,
+  and HLASM .mlc .hlasm .assemble .asmpgm .asmmac (.mac .macro by content)
 
   Two or more DIRECTORY roots switch on cross-repo mode: each root is a
   "repo" (labelled by its base name; duplicates become name~2, name~3 …

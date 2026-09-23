@@ -21,7 +21,7 @@ const (
 // IsAssembly reports whether lang is one of the assembly dialects.
 func IsAssembly(lang Language) bool {
 	switch lang {
-	case AsmGAS, AsmNASM, AsmMASM, AsmPlan9:
+	case AsmGAS, AsmNASM, AsmMASM, AsmPlan9, AsmHLASM:
 		return true
 	}
 	return false
@@ -52,6 +52,11 @@ func asmDialect(filename, code string) Language {
 	c := asmSniffComments.ReplaceAllString(code, " ")
 	if plan9TextRe.MatchString(c) || !dotAsm && plan9IncludeRe.MatchString(code) {
 		return AsmPlan9
+	}
+	// HLASM before NASM/armasm/MASM (armasm shares MACRO/MEND, MASM
+	// EXTRN) and before GAS (z/OS UNIX .s files).
+	if hlasmContent(code) {
+		return AsmHLASM
 	}
 	if dotAsm {
 		switch {
@@ -147,7 +152,25 @@ type asmSyntax struct {
 	// NASM's `name rest count`.
 	nameFirst    map[string]bool
 	statementSep bool // ';' separates statements (GAS, Plan 9) instead of starting a comment
+	// ident overrides the identifier pattern; its first submatch is the
+	// identifier (HLASM symbols contain @ # $).
+	ident *regexp.Regexp
+	// columnLabels: a statement that starts in column 1 begins with its
+	// name, which has no colon (HLASM's name field).
+	columnLabels bool
+	// operand, when set, classifies operand-field words, given the
+	// statement's operation (HLASM).
+	operand func(op, seg string, start, end int) asmClass
 }
+
+// asmClass is how an identifier is tokenized.
+type asmClass int
+
+const (
+	asmName asmClass = iota // normalized to VAR
+	asmKeep                 // kept, lowercased: an operation, register, or keyword
+	asmNum                  // normalized to NUM (HLASM register spellings)
+)
 
 var (
 	generalRegisterRe = regexp.MustCompile(`^(?:[re]?[abcd]x|[abcd][lh]|[re]?(?:si|di|sp|bp|ip)|(?:si|di|sp|bp)l|r(?:[89]|1[0-5])[dwb]?|[xyz]mm(?:[12]?\d|3[01])|k[0-7]|mm[0-7]|st|[c-gs]s|[xw](?:[12]?\d|30)|[xw]zr|wsp|lr|fp|[bhsdqvz](?:[12]?\d|3[01])|p(?:\d|1[0-5])|r(?:\d|1[0-5])|pc|a[0-7]|v[1-8]|zero|ra|gp|tp|t[0-6]|s(?:\d|1[01])|f[tsa]?\d{1,2}|r\d{1,2}[qdwbh]?|[xyz]?m\d{1,2})$`)
@@ -225,9 +248,26 @@ var (
 	asmLabelRe = regexp.MustCompile(`^\s*[.$]?[A-Za-z_][\w.$]*\s*:`)
 )
 
-// classify reports each identifier on one line with whether it is kept
-// verbatim (lowercased) or normalized as a name.
-func (a *asmSyntax) classify(line string, visit func(start, end int, kept bool)) {
+// identIndexes returns the [start, end) byte ranges of the identifiers
+// in seg.
+func (a *asmSyntax) identIndexes(seg string) [][]int {
+	if a.ident == nil {
+		return asmIdentRe.FindAllStringIndex(seg, -1)
+	}
+	var out [][]int
+	for _, m := range a.ident.FindAllStringSubmatchIndex(seg, -1) {
+		out = append(out, []int{m[2], m[3]})
+	}
+	return out
+}
+
+// classify reports each identifier on one line with how it is
+// tokenized.
+func (a *asmSyntax) classify(line string, visit func(start, end int, c asmClass)) {
+	if a.columnLabels {
+		a.classifyColumns(line, visit)
+		return
+	}
 	stmts := [][2]int{{0, len(line)}}
 	if a.statementSep && strings.Contains(line, ";") {
 		stmts = stmts[:0]
@@ -247,11 +287,11 @@ func (a *asmSyntax) classify(line string, visit func(start, end int, kept bool))
 			!strings.HasPrefix(seg[loc[1]:], ":") && !strings.HasPrefix(seg[loc[1]:], "=") {
 			labelEnd = loc[1]
 		}
-		idents := asmIdentRe.FindAllStringIndex(seg, -1)
+		idents := a.identIndexes(seg)
 		first := -1
 		for k, m := range idents {
 			if m[0] < labelEnd {
-				visit(st[0]+m[0], st[0]+m[1], false) // the label's own name
+				visit(st[0]+m[0], st[0]+m[1], asmName) // the label's own name
 				continue
 			}
 			if first < 0 {
@@ -274,7 +314,42 @@ func (a *asmSyntax) classify(line string, visit func(start, end int, kept bool))
 				kept = a.register(word) || a.keywords[lower] ||
 					dataDirectives[lower] && strings.EqualFold(seg[idents[first][0]:idents[first][1]], "times")
 			}
-			visit(st[0]+m[0], st[0]+m[1], kept)
+			c := asmName
+			if kept {
+				c = asmKeep
+			}
+			visit(st[0]+m[0], st[0]+m[1], c)
+		}
+	}
+}
+
+// classifyColumns handles a fixed-format statement ("name op operands",
+// a leading blank when there is no name): identifiers in the name field
+// are names, the operation is kept unless it is a variable symbol
+// (&OP), and operand words go to the dialect's operand classifier.
+func (a *asmSyntax) classifyColumns(line string, visit func(start, end int, c asmClass)) {
+	nameEnd := 0
+	if line != "" && line[0] != ' ' && line[0] != '\t' {
+		if k := strings.IndexAny(line, " \t"); k >= 0 {
+			nameEnd = k
+		} else {
+			nameEnd = len(line)
+		}
+	}
+	op := ""
+	for _, m := range a.identIndexes(line) {
+		switch {
+		case m[0] < nameEnd:
+			visit(m[0], m[1], asmName)
+		case op == "":
+			op = line[m[0]:m[1]]
+			if m[0] > 0 && line[m[0]-1] == '&' {
+				visit(m[0], m[1], asmName) // a variable symbol as the operation
+			} else {
+				visit(m[0], m[1], asmKeep)
+			}
+		default:
+			visit(m[0], m[1], a.operand(op, line, m[0], m[1]))
 		}
 	}
 }
@@ -298,14 +373,16 @@ func (a *asmSyntax) definesName(seg string, name, kw []int) bool {
 func (a *asmSyntax) normalizeLine(line string) string {
 	var b strings.Builder
 	last := 0
-	a.classify(line, func(start, end int, kept bool) {
+	a.classify(line, func(start, end int, c asmClass) {
 		b.WriteString(line[last:start])
 		word := line[start:end]
 		switch {
 		case word == "STR" || word == "NUM":
 			b.WriteString(word)
-		case kept:
+		case c == asmKeep:
 			b.WriteString(strings.ToLower(word))
+		case c == asmNum:
+			b.WriteString("NUM")
 		default:
 			b.WriteString("VAR")
 		}
@@ -319,8 +396,8 @@ func (a *asmSyntax) normalizeLine(line string) string {
 // the content vocabulary LexicalTerms harvests.
 func (a *asmSyntax) names(line string) []string {
 	var out []string
-	a.classify(line, func(start, end int, kept bool) {
-		if w := line[start:end]; !kept && w != "STR" && w != "NUM" && w != "LREF" {
+	a.classify(line, func(start, end int, c asmClass) {
+		if w := line[start:end]; c == asmName && w != "STR" && w != "NUM" && w != "LREF" {
 			out = append(out, w)
 		}
 	})

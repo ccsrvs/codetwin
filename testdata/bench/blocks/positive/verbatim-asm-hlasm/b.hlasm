@@ -1,0 +1,65 @@
+* Block-clone fixture (positive/verbatim-asm-hlasm), b side: copy the
+* INPUT records that begin with the PARM key to OUTPUT.
+SELRECS  CSECT
+         STM   14,12,12(13)
+         BALR  12,0
+         USING *,12
+         ST    13,SAVEAREA+4
+         LA    13,SAVEAREA
+         ZAP   COUNT,=P'0'        records selected
+         MVI   EOFSW,C'N'
+         XC    RECORD,RECORD
+         LA    15,4               default: nothing selected
+         ST    15,RETCODE
+         LTR   1,1                any parameter list?
+         BZ    NOPARM
+         L     2,0(,1)            A(PARM length + text)
+         LH    3,0(,2)            PARM length
+         LTR   3,3                empty PARM?
+         BNP   NOPARM
+         CH    3,=H'64'           longer than we allow?
+         BH    BADPARM
+         BCTR  3,0                length - 1 for EX
+         EX    3,MOVEPARM         copy the PARM text
+         OC    PARMAREA,BLANKS    fold to upper case
+         LA    3,1(,3)            restore the true length
+         STH   3,PARMLEN
+         OPEN  (INDCB,(INPUT),OUTDCB,(OUTPUT))
+         LH    3,PARMLEN
+         BCTR  3,0                key length - 1 for EX
+NEXTREC  GET   INDCB,RECORD
+         EX    3,KEYCOMP          record starts with the key?
+         BNE   NEXTREC
+         PUT   OUTDCB,RECORD
+         AP    COUNT,=P'1'
+         B     NEXTREC
+EOF      CLOSE (INDCB,,OUTDCB)
+         CP    COUNT,=P'0'
+         BE    RETURN             keep rc 4
+         XC    RETCODE,RETCODE
+         B     RETURN
+NOPARM   LA    15,8               a key is required
+         ST    15,RETCODE
+         B     RETURN
+BADPARM  LA    15,12
+         ST    15,RETCODE
+RETURN   L     13,SAVEAREA+4
+         L     15,RETCODE
+         L     14,12(,13)
+         LM    0,12,20(13)
+         BR    14
+MOVEPARM MVC   PARMAREA(0),2(2)
+KEYCOMP  CLC   RECORD(0),PARMAREA
+SAVEAREA DS    18F
+RETCODE  DS    F
+COUNT    DS    PL4
+EOFSW    DS    C
+PARMLEN  DS    H
+PARMAREA DC    CL64' '
+BLANKS   DC    CL64' '
+RECORD   DS    CL80
+INDCB    DCB   DDNAME=INPUT,DSORG=PS,MACRF=GM,EODAD=EOF
+OUTDCB   DCB   DDNAME=OUTPUT,DSORG=PS,MACRF=PM,RECFM=FB,               X
+               LRECL=80
+         LTORG
+         END   SELRECS

@@ -1,0 +1,38 @@
+         YREGS
+*
+* countrec: count the records in the INPUT file and report the total
+*
+countrec csect
+         stm   r14,r12,12(r13)
+         balr  r12,0
+         using *,r12
+         st    r13,savearea+4
+         la    r13,savearea
+         open  (indcb,(INPUT))
+         sr    r3,r3
+* read to end of file, counting as we go
+read     get   indcb,record
+         la    r3,1(,r3)
+         b     read
+eof      close (indcb)
+* format the count for the operator message
+         cvd   r3,dwork
+         unpk  msgcnt,dwork
+         oi    msgcnt+7,x'f0'
+         wto   mf=(E,msg)
+         l     r13,savearea+4
+         lm    r14,r12,12(r13)
+         sr    r15,r15
+         br    r14
+*
+savearea ds    18f
+dwork    ds    d
+record   ds    cl80
+msg      dc    al2(msgend-msg),al2(0)
+         dc    c'RECORDS READ: '
+msgcnt   ds    cl8
+msgend   equ   *
+indcb    dcb   ddname=INPUT,      input file                           x
+               dsorg=PS,macrf=GM, sequential, move mode                x
+               eodad=eof,recfm=FB,lrecl=80
+         end   countrec

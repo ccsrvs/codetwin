@@ -416,3 +416,18 @@ func TestProcessFile_MinLinesCountsCodeLinesNotComments(t *testing.T) {
 		}
 	}
 }
+
+// A .mac file is scanned only when it reads as HLASM: MACRO-11, NASM,
+// and VMS macro files share the extension.
+func TestProcessFile_ContentClaimedExtensions(t *testing.T) {
+	dir := t.TempDir()
+	macro11 := writeFile(t, dir, "util.mac", ".TITLE UTIL\n\tMOV R0,R1\n\tMOV R1,R2\n\tMOV R2,R3\n\tMOV R3,R4\n\tRTS PC\n")
+	hlasm := writeFile(t, dir, "CLEARF.MAC", "         MACRO\n&L       CLEARF &F\n&L       XC    &F,&F\n         XC    &F,&F\n         XC    &F,&F\n         XC    &F,&F\n         MEND\n")
+	if got, warning := ProcessFile(macro11, 1, nil, nil, "", GranularityFunction); len(got) != 0 || warning != "" {
+		t.Errorf("MACRO-11 .mac file must be skipped, got %d snippets (%q)", len(got), warning)
+	}
+	got, warning := ProcessFile(hlasm, 1, nil, nil, "", GranularityFunction)
+	if warning != "" || len(got) != 1 || got[0].Symbol != "CLEARF" || got[0].Lang != "asm-hlasm" {
+		t.Errorf("HLASM .MAC file: %+v (%q)", got, warning)
+	}
+}

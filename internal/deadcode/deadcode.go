@@ -96,7 +96,7 @@ func Analyze(snippets []scan.Snippet, files ...string) ([]Finding, []string) {
 		// can. They are never referenced by name — an anonymous chunk
 		// runs when its enclosing function does — so they have no place
 		// in name-based reachability.
-		if strings.ContainsRune(s.Symbol, '@') {
+		if syntheticSymbolRe.MatchString(s.Symbol) {
 			continue
 		}
 		defs[s.Symbol] = append(defs[s.Symbol], defSite{snip: s})
@@ -135,6 +135,9 @@ func Analyze(snippets []scan.Snippet, files ...string) ([]Finding, []string) {
 			// A file with no chunks got its dialect from the extension
 			// alone; its content decides.
 			lang = tokenizer.Detect(path, string(data))
+			if lang == tokenizer.Unknown {
+				continue // a .mac file that is not HLASM is not scanned
+			}
 		}
 		isTest := fileIsTest[path]
 		bySym := selfSpans[path]
@@ -240,6 +243,12 @@ func firstLine(code string) string {
 	return code
 }
 
+// syntheticSymbolRe matches the line-qualified symbols splitters give
+// chunks that have no name of their own (goroutine@L41, TEST@L12,
+// CSECT@L7). HLASM names may contain "@" themselves (SUB@1), so only
+// the @L<line> suffix marks a symbol as synthetic.
+var syntheticSymbolRe = regexp.MustCompile(`@L\d+$`)
+
 // count records one reference to sym from a test or production file.
 func count(isTest bool, sym string, prodRefs, testRefs map[string]int) {
 	if isTest {
@@ -269,9 +278,9 @@ var asmDeclRe = map[tokenizer.Language]*regexp.Regexp{
 	tokenizer.AsmNASM:  regexp.MustCompile(`(?i)^\s*(?:global|extern|cextern|cglobal|common|GLOBAL_FUNCTION|GLOBAL_DATA)\b`),
 	tokenizer.AsmMASM:  regexp.MustCompile(`(?i)^\s*(?:PUBLIC|EXTRN|EXTERNDEF|EXPORT|IMPORT)\b`),
 	tokenizer.AsmPlan9: regexp.MustCompile(`^\s*GLOBL\b`),
+	// HLASM statements are normalized to "name op operands".
+	tokenizer.AsmHLASM: regexp.MustCompile(`(?i)^\S*[ \t]+(?:EXTRN|WXTRN|ENTRY|ALIAS)\b`),
 }
-
-var asmWordRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 
 func asmDeclarations(code string, lang tokenizer.Language) map[int]map[string]bool {
 	re := asmDeclRe[lang]
@@ -281,7 +290,7 @@ func asmDeclarations(code string, lang tokenizer.Language) map[int]map[string]bo
 			continue
 		}
 		words := map[string]bool{}
-		for _, w := range asmWordRe.FindAllString(line, -1) {
+		for _, w := range tokenizer.ReferenceWords(line, lang) {
 			words[w] = true
 		}
 		decls[i+1] = words

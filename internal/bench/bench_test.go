@@ -383,7 +383,8 @@ func TestBench_GroundTruth(t *testing.T) {
 	// exact/near bands explicitly so the in-loop guard can't go vacuous
 	// if a fixture edit drops them below 0.85.
 	for _, name := range []string{"positive/go-renamed", "positive/python-renamed", "positive/go-renamed-rich",
-		"positive/c-renamed-goto-cleanup", "positive/asm-gas-renamed-x86", "positive/asm-plan9-renamed"} {
+		"positive/c-renamed-goto-cleanup", "positive/asm-gas-renamed-x86", "positive/asm-plan9-renamed",
+		"positive/asm-hlasm-renamed-sub"} {
 		label, ok := topBandLabels[name]
 		if !ok {
 			t.Errorf("%s: expected the renamed positive to score above %.2f (rename invariance)", name, twinMin)

@@ -1,0 +1,58 @@
+* Block-clone fixture (positive/verbatim-asm-hlasm), review 5.3.
+* Shared verbatim block: a.hlasm lines 15-27 == b.hlasm lines 14-26
+* (JCL PARM validation). The hosts differ: a.hlasm centres the PARM
+* as a report title, b.hlasm selects the input records it matches.
+RPTINIT  CSECT
+         SAVE  (14,12)
+         LR    12,15
+         USING RPTINIT,12
+         LA    11,SAVEAREA
+         ST    13,4(,11)
+         ST    11,8(,13)
+         LR    13,11
+         MVI   TITLE,C' '         clear the title line
+         MVC   TITLE+1(131),TITLE
+         LTR   1,1                any parameter list?
+         BZ    NOPARM
+         L     2,0(,1)            A(PARM length + text)
+         LH    3,0(,2)            PARM length
+         LTR   3,3                empty PARM?
+         BNP   NOPARM
+         CH    3,=H'64'           longer than we allow?
+         BH    BADPARM
+         BCTR  3,0                length - 1 for EX
+         EX    3,MOVEPARM         copy the PARM text
+         OC    PARMAREA,BLANKS    fold to upper case
+         LA    3,1(,3)            restore the true length
+         STH   3,PARMLEN
+         LH    4,=H'132'          centre the title:
+         SH    4,PARMLEN          spare columns ...
+         SRL   4,1                ... split both sides
+         LA    5,TITLE(4)         where the title starts
+         LH    3,PARMLEN
+         BCTR  3,0
+         EX    3,MOVETTL
+         TIME  DEC                R1 = 0CYYDDDF
+         ST    1,DATEWK
+         UNPK  TDATE,DATEWK+1(3)  YYDDD
+         OI    TDATE+4,X'F0'
+         MVC   TITLE+120(5),TDATE
+         SR    15,15
+         B     RETURN
+NOPARM   MVC   TITLE+56(20),=CL20'NO TITLE GIVEN'
+         SR    15,15
+         B     RETURN
+BADPARM  LA    15,12
+RETURN   L     13,4(,13)
+         RETURN (14,12),RC=(15)
+MOVEPARM MVC   PARMAREA(0),2(2)
+MOVETTL  MVC   0(0,5),PARMAREA
+SAVEAREA DS    18F
+DATEWK   DS    F
+PARMLEN  DS    H
+PARMAREA DC    CL64' '
+BLANKS   DC    CL64' '
+TITLE    DS    CL132
+TDATE    DS    CL5
+         LTORG
+         END   RPTINIT

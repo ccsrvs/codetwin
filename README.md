@@ -2,7 +2,8 @@
 
 Multi-language code similarity detector — finds duplicate and refactorable code
 across `.go`, `.js`, `.ts`, `.jsx`, `.tsx`, `.py`, `.java`, `.rs`,
-`.ex`/`.exs`, `.c`/`.h`, and assembly (`.s`, `.S`, `.asm`) files. Function-level chunking, semantic + structural scoring,
+`.ex`/`.exs`, `.c`/`.h`, and assembly (`.s`, `.S`, `.asm`, and IBM HLASM's
+`.mlc`, `.hlasm`, `.assemble`, `.mac`) files. Function-level chunking, semantic + structural scoring,
 DBSCAN clustering, no external dependencies.
 
 What sets codetwin apart from other clone detectors:
@@ -357,11 +358,11 @@ scaffolding still match. Dead-code analysis still reads them, because a
 
 ## Assembly
 
-Assembly comes in four dialects with different comment, string, and
+Assembly comes in five dialects with different comment, string, and
 routine syntax, and file extensions do not tell them apart (`.asm`
-holds NASM, MASM, armasm, and even GAS; `.s` holds GAS or Go's
-assembler). codetwin picks the dialect from each file's content and
-reports it as the pair's language:
+holds NASM, MASM, armasm, HLASM, and even GAS; `.s` holds GAS, Go's
+assembler, or HLASM from GCC's MVS target). codetwin picks the dialect
+from each file's content and reports it as the pair's language:
 
 | Language | Dialect | Routines are found by |
 |---|---|---|
@@ -369,6 +370,7 @@ reports it as the pair's language:
 | `asm-nasm` | NASM/YASM, including x86inc | `cglobal`, or a label named by `global` |
 | `asm-masm` | MASM and armasm | `name PROC` … `ENDP` |
 | `asm-plan9` | Go's assembler | `TEXT sym(SB)` up to the next `TEXT`, `DATA`, or `GLOBL` |
+| `asm-hlasm` | IBM High Level Assembler (z/OS, z/VM, z390) | `MACRO` … `MEND`, named by the prototype; `CSECT`/`RSECT`/`START` sections, split at every label that `BAL`, `BAS`, `BRAS`, `BRASL`, `JAS`, or `JASL` calls |
 
 A routine ends at its dialect's end marker (`.size`, `endfunc`, `ENDP`,
 …) or where the next one starts. Local labels never start a routine,
@@ -387,6 +389,47 @@ tokens in common and is not reported.
 
 `--suggest` does not generate assembly helpers; factor shared
 instructions into an assembler macro by hand.
+
+### HLASM
+
+HLASM is read by its fixed format: a statement runs through column 71,
+a mark in column 72 continues it on the next line from column 16, and
+columns 73–80 hold sequence numbers. Comments (`*` or `.*` in column
+1), remarks after the operands, sequence numbers, and continuation
+style are layout, and so are case (HLASM is case-insensitive) and
+register spelling (`R14`, `14`, `GR14`): two copies of a program that
+differ only in these are exact clones. The alternate continuation
+format, conditional-assembly expressions with blanks in them,
+attribute references (`L'FIELD`), macro prototypes, and `EXEC CICS`
+commands are handled. A `DSECT` or `COM` area is a data map, not a
+routine, and `END` ends one program of a batch rather than the file.
+
+Files ending in `.mlc`, `.hlasm`, `.assemble`, `.asmpgm`, or `.asmmac`
+are HLASM; `.asm` and `.s` files are HLASM when their content is; and
+`.mac`/`.macro` files are scanned only when their content is HLASM,
+since MACRO-11 and other assemblers use `.mac` too. On 21,192 publicly
+available HLASM files, content detection recognizes 97.5% — the misses
+are tiny macro and register-equate members — with no false positives
+on 1,169 files from other assemblers that share these extensions.
+Members exported from a PDS as `.txt` or with no extension need
+renaming first.
+
+Some statements describe the program rather than being it and are left
+out of similarity, as C's preprocessor lines are: EQU constants
+(register equates, field offsets, flag bits; `EQU *` stays, since it
+labels the next instruction), the linkage declarations `EXTRN`,
+`WXTRN`, `ENTRY`, and `ALIAS`, `COPY`, and listing control (`TITLE`,
+`EJECT`, `SPACE`, `PRINT`). An EQU reads as the same `VAR equ NUM`
+line whatever it defines: in one large public corpus, blocks of nothing
+but EQUs were 30% of the partial clones, most of them unrelated tables
+matched to each other. Data definitions (`DS`, `DC`) stay, because a
+record layout copied between programs is real duplication.
+
+Standard save-area linkage is 8 lines when written out in full (the
+section statement and seven instructions), so two sections with
+identical linkage reach the partial-clone floor and can report it as a
+partial clone. Raise `--min-block-lines` if such findings crowd the
+report.
 
 ## Class-level matching
 
@@ -567,7 +610,7 @@ Classification is by path only (no file contents are read):
 | Rust | a `tests/` directory component |
 | Elixir | `*_test.exs`, or a `test/` directory component |
 | C | `test_*`, `*_test`, `*_tests`, `test-*`, `*-test`, `tst-*`, `*_unittest`, `*_kunit`, `test.c`/`testN.c`, or a `test/`, `tests/`, `testing/`, or `selftests/` directory component (`.h` too) |
-| Assembly | a `test/`, `tests/`, `testing/`, or `selftests/` directory component (file names alone are not a signal) |
+| Assembly, including HLASM | a `test/`, `tests/`, `testing/`, or `selftests/` directory component (file names alone are not a signal) |
 
 This is presentation-layer only: scores, the similarity graph, and
 clustering are unchanged, and suppression happens after threshold
@@ -618,13 +661,15 @@ JS `export`, Elixir `def` vs `defp`, C `static` (a `static inline`
 helper in a header stays exported: every includer can call it). A C
 prototype or forward declaration names a function without using it, so
 it never keeps a definition alive. For assembly, declaration directives
-(`.globl`, `.type`, `.size`, `global`, `PUBLIC`, `ENTRY()`, …) likewise
-name a routine without calling it; `foo` and `_foo` are the same symbol
-(macOS and 32-bit Windows prefix C names with `_`); every assembly
-finding stays in the advisory `unused-in-scan` tier, since exported
-routines are called from outside the scan; and routines whose names are
-pasted together by a macro (x86inc's `cglobal`, dav1d's `function`) are
-never reported, because the literal name never appears at a call site.
+(`.globl`, `.type`, `.size`, `global`, `PUBLIC`, `ENTRY()`, …, and
+HLASM's `EXTRN`, `WXTRN`, `ENTRY`, and `ALIAS`) likewise name a routine
+without calling it; `foo` and `_foo` are the same symbol (macOS and 32-bit
+Windows prefix C names with `_`), and HLASM symbols match in any case;
+every assembly finding stays in the advisory `unused-in-scan` tier,
+since exported routines are called from outside the scan; and routines
+whose names are pasted together by a macro (x86inc's `cglobal`, dav1d's
+`function`) are never reported, because the literal name never appears
+at a call site.
 
 What it cannot see — verify before deleting: consumers outside the
 scanned roots (the whole `unused-in-scan` tier exists because of them),

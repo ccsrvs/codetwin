@@ -659,6 +659,7 @@ never collide with a whole-chunk preview of the same snippet.
 | Elixir | `.ex` `.exs` |
 | C | `.c` `.h` |
 | Assembly (GAS, NASM, MASM/armasm, Go) | `.s` `.S` `.asm` — dialect detected from content |
+| IBM HLASM | `.mlc` `.hlasm` `.assemble` `.asmpgm` `.asmmac`; `.asm`, `.s`, `.mac`, and `.macro` when the content is HLASM |
 
 ## Running tests
 

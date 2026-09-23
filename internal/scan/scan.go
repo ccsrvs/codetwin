@@ -260,6 +260,9 @@ func ProcessFile(
 
 	code := string(data)
 	lang := tokenizer.Detect(path, code)
+	if lang == tokenizer.Unknown && tokenizer.ClaimedByContentOnly(path) {
+		return nil, "" // e.g. a .mac file that is MACRO-11, not HLASM
+	}
 	var chunks []splitter.Chunk
 	if granularity == GranularityFile {
 		chunks = []splitter.Chunk{splitter.WholeFile(path, code)}
