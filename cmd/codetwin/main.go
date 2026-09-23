@@ -61,6 +61,7 @@ var supportedExts = map[string]bool{
 	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
 	".py": true, ".java": true, ".rs": true, ".ex": true, ".exs": true,
 	".c": true, ".h": true,
+	".s": true, ".S": true, ".asm": true, ".ASM": true,
 }
 
 // buildVersion is stamped by the release workflow via
@@ -91,7 +92,7 @@ func main() {
 	plain := flag.Bool("plain", false, "plain text output (no ANSI colors, suitable for CI)")
 	jsonOut := flag.Bool("json", false, "output results as JSON")
 	verbose := flag.Bool("verbose", false, "show all pairs including weak similarities")
-	minLines := flag.Int("min-lines", 5, "skip chunks with fewer than N non-blank lines")
+	minLines := flag.Int("min-lines", 5, "skip chunks with fewer than N code lines (comments, blank lines, imports, and C preprocessor lines do not count)")
 	var ignoreFlags multiFlag
 	flag.Var(&ignoreFlags, "ignore", "skip paths matching this ignore_paths-style pattern (repeatable; merged with .codetwin.json ignore_paths)")
 	eps := flag.Float64("eps", 0.35, "DBSCAN epsilon: max distance for two snippets to be neighbours (linking requires pair score ≥ 1−eps; the default keeps clusters in the 'strong clone' band)")
@@ -1402,7 +1403,7 @@ USAGE:
                                  CODETWIN_NO_UPDATE_CHECK=1)
 
   Paths can be files or directories (scanned recursively).
-  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h
+  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h .s .S .asm
 
   Two or more DIRECTORY roots switch on cross-repo mode: each root is a
   "repo" (labelled by its base name; duplicates become name~2, name~3 …
@@ -1417,7 +1418,7 @@ FLAGS:
   --plain              no ANSI colors, suitable for pipes and CI
   --json               output as JSON
   --verbose            show all pairs including weak similarities
-  --min-lines int      skip chunks with fewer than N non-blank lines (default 5)
+  --min-lines int      skip chunks with fewer than N code lines (default 5)
   --ignore pattern     skip paths matching an ignore_paths-style pattern (repeatable)
   --eps float          DBSCAN epsilon distance (default 0.35; links pairs ≥ 65%%,
                        the 'strong clone' band)

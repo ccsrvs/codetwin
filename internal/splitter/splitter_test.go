@@ -1246,3 +1246,20 @@ func TestSplit_FallbackUsesWholeFileShape(t *testing.T) {
 		t.Errorf("fallback chunk = %+v, want %+v", chunks[0], want)
 	}
 }
+
+// A Go function declared without a body is implemented elsewhere —
+// typically in assembly (`func Compare(a, b []byte) int` next to
+// compare_amd64.s) or via go:linkname. It has no body to chunk and
+// must not borrow the next function's body.
+func TestSplit_GoBodylessDeclarationDoesNotSwallowNextFunction(t *testing.T) {
+	code := "package bytealg\n\n//go:noescape\nfunc Compare(a, b []byte) int\n\nfunc helper(x int) int {\n\treturn x + 1\n}\n"
+	chunks := Split("p.go", code, tokenizer.Go)
+	for _, c := range chunks {
+		if c.Symbol == "Compare" {
+			t.Fatalf("bodyless Compare emitted as chunk %d-%d:\n%s", c.StartLine, c.EndLine, c.Code)
+		}
+	}
+	if len(chunks) != 1 || chunks[0].Symbol != "helper" || chunks[0].StartLine != 6 || chunks[0].EndLine != 8 {
+		t.Fatalf("want only helper at 6-8, got %+v", chunks)
+	}
+}

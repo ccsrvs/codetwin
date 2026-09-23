@@ -78,8 +78,12 @@ Elixir `def`/`defp`, and C function definition. The C splitter masks
 comments, literals, and preprocessor lines, then makes one linear pass
 that follows `#if`/`#else` branches with saved and restored state, so
 GNU-style and K&R headers, `#ifdef` variants, and `extern "C"` wrappers
-split correctly without running a preprocessor. Each chunk is then
-compared independently. A 500-line
+split correctly without running a preprocessor. Assembly is split into
+routines by each dialect's markers (GAS exported labels and
+`ENTRY`/`endfunc`-style macros, NASM `cglobal`/`global`, MASM
+`PROC`/`ENDP`, Go's `TEXT`); the tokenizer keeps instructions,
+directives, and registers as tokens and normalizes labels and symbols.
+Each chunk is then compared independently. A 500-line
 module with one duplicated 20-line helper now scores high on that helper
 instead of being washed out by 480 lines of unrelated code. For the
 container languages (Python, Java, JS/TS, Elixir, Rust) the splitter ALSO

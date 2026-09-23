@@ -59,6 +59,8 @@ var blockCases = []blockCase{
 	{name: "import-adjacent-python"},
 	{name: "verbatim-c", positive: true, a: lineRange{13, 25}, b: lineRange{16, 28}},
 	{name: "errcheck-chain-c"},
+	{name: "verbatim-asm-gas", positive: true, a: lineRange{11, 22}, b: lineRange{13, 24}},
+	{name: "frame-boilerplate-asm-gas"},
 }
 
 func blockCaseDir(c blockCase) string {

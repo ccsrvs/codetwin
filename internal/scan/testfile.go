@@ -22,6 +22,8 @@ import (
 //	         *_kunit, test/testN (test.c, test1.c), or a test/, tests/,
 //	         testing/, or selftests/ directory component; .h files follow
 //	         the same rule
+//	Asm      a test/, tests/, testing/, or selftests/ directory component
+//	         (.s, .S, .asm); file names alone are not a signal
 //
 // Paths in unsupported extensions are never classified as tests.
 func IsTestFile(path string) bool {
@@ -51,12 +53,17 @@ func IsTestFile(path string) bool {
 			hasDirComponent(p, "test")
 	case ".c", ".h":
 		return cTestStem(strings.TrimSuffix(base, filepath.Ext(base))) ||
-			hasDirComponent(p, "test") ||
-			hasDirComponent(p, "tests") ||
-			hasDirComponent(p, "testing") ||
-			hasDirComponent(p, "selftests")
+			cTestDir(p)
+	case ".s", ".asm":
+		return cTestDir(p)
 	}
 	return false
+}
+
+// cTestDir reports a test directory component for C and assembly.
+func cTestDir(p string) bool {
+	return hasDirComponent(p, "test") || hasDirComponent(p, "tests") ||
+		hasDirComponent(p, "testing") || hasDirComponent(p, "selftests")
 }
 
 // cTestStem reports whether a C file's name (without extension) follows

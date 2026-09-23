@@ -115,6 +115,15 @@ func Analyze(snippets []scan.Snippet, files ...string) ([]Finding, []string) {
 	// fall outside every same-file definition span of that symbol.
 	prodRefs := map[string]int{}
 	testRefs := map[string]int{}
+	// underscoreAlias maps foo to an assembly definition _foo.
+	underscoreAlias := map[string]string{}
+	for sym, sites := range defs {
+		for _, site := range sites {
+			if tokenizer.IsAssembly(site.snip.Lang) && strings.HasPrefix(sym, "_") && len(sym) > 1 {
+				underscoreAlias[sym[1:]] = sym
+			}
+		}
+	}
 	var warnings []string
 	for path, lang := range fileLang {
 		data, err := os.ReadFile(path)
@@ -122,15 +131,30 @@ func Analyze(snippets []scan.Snippet, files ...string) ([]Finding, []string) {
 			warnings = append(warnings, "dead-code: could not re-read "+path+": "+err.Error())
 			continue
 		}
+		if tokenizer.IsAssembly(lang) {
+			// A file with no chunks got its dialect from the extension
+			// alone; its content decides.
+			lang = tokenizer.Detect(path, string(data))
+		}
 		isTest := fileIsTest[path]
 		bySym := selfSpans[path]
 		declared := declarationSites(string(data), lang)
 		for _, ref := range tokenizer.References(string(data), lang) {
-			if _, defined := defs[ref.Word]; !defined {
-				continue
-			}
 			if declared[ref.Line][ref.Word] {
 				continue // a prototype or directive names it without using it
+			}
+			// Mach-O and 32-bit Windows prefix C symbols with "_": C's
+			// foo is _foo in assembly, and assembly calls _foo for it.
+			if alt, ok := underscoreAlias[ref.Word]; ok && !inAnySpan(bySym[alt], ref.Line) {
+				count(isTest, alt, prodRefs, testRefs)
+			}
+			if tokenizer.IsAssembly(lang) && strings.HasPrefix(ref.Word, "_") {
+				if base := ref.Word[1:]; defs[base] != nil && !inAnySpan(bySym[base], ref.Line) {
+					count(isTest, base, prodRefs, testRefs)
+				}
+			}
+			if _, defined := defs[ref.Word]; !defined {
+				continue
 			}
 			if inAnySpan(bySym[ref.Word], ref.Line) {
 				continue
@@ -216,18 +240,59 @@ func firstLine(code string) string {
 	return code
 }
 
+// count records one reference to sym from a test or production file.
+func count(isTest bool, sym string, prodRefs, testRefs map[string]int) {
+	if isTest {
+		testRefs[sym]++
+	} else {
+		prodRefs[sym]++
+	}
+}
+
 // declarationSites returns, by 1-based line, the words a file mentions
 // without using them: C prototypes and forward declarations.
 func declarationSites(code string, lang tokenizer.Language) map[int]map[string]bool {
-	if lang == tokenizer.C {
+	switch {
+	case lang == tokenizer.C:
 		return splitter.CDeclarations(code)
+	case tokenizer.IsAssembly(lang):
+		return asmDeclarations(code, lang)
 	}
 	return nil
 }
 
+// asmDeclRe matches, per dialect, the lines that declare symbols —
+// export and visibility directives, symbol types and sizes, routine
+// start/end markers — which name a symbol without calling it.
+var asmDeclRe = map[tokenizer.Language]*regexp.Regexp{
+	tokenizer.AsmGAS:   regexp.MustCompile(`^\s*(?:\.(?:globl|global|type|size|hidden|weak|protected|internal|local|extern|def|scl|endef|func|endfunc|ent|end)\b|(?:ENTRY\w*|END\w*|ENDPROC|WEAK_ENTRY|LEAF|NESTED|SYM_\w+)\s*\()`),
+	tokenizer.AsmNASM:  regexp.MustCompile(`(?i)^\s*(?:global|extern|cextern|cglobal|common|GLOBAL_FUNCTION|GLOBAL_DATA)\b`),
+	tokenizer.AsmMASM:  regexp.MustCompile(`(?i)^\s*(?:PUBLIC|EXTRN|EXTERNDEF|EXPORT|IMPORT)\b`),
+	tokenizer.AsmPlan9: regexp.MustCompile(`^\s*GLOBL\b`),
+}
+
+var asmWordRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+
+func asmDeclarations(code string, lang tokenizer.Language) map[int]map[string]bool {
+	re := asmDeclRe[lang]
+	decls := map[int]map[string]bool{}
+	for i, line := range strings.Split(tokenizer.StripComments(code, lang), "\n") {
+		if !re.MatchString(line) {
+			continue
+		}
+		words := map[string]bool{}
+		for _, w := range asmWordRe.FindAllString(line, -1) {
+			words[w] = true
+		}
+		decls[i+1] = words
+	}
+	return decls
+}
+
 var (
-	cStaticRe   = regexp.MustCompile(`\bstatic\b`)
-	cCtorDtorRe = regexp.MustCompile(`__attribute__\s*\(\(\s*(?:constructor|destructor)\b`)
+	asmPastedNameRe = regexp.MustCompile(`^\s*(?:cglobal|function)\s`)
+	cStaticRe       = regexp.MustCompile(`\bstatic\b`)
+	cCtorDtorRe     = regexp.MustCompile(`__attribute__\s*\(\(\s*(?:constructor|destructor)\b`)
 )
 
 // pyFixtureRe matches a pytest fixture decorator: @pytest.fixture,
@@ -304,7 +369,9 @@ func isExported(sym string, s *scan.Snippet) bool {
 		}
 		return !cStaticRe.MatchString(cSpecifiers(s.Code, sym))
 	}
-	return true // unknown language: assume exported, stay advisory
+	// Assembly (and any unknown language): exported symbols may be
+	// called from outside the scan, so findings stay advisory.
+	return true
 }
 
 // suppressed reports definitions that must never be flagged: entry
@@ -350,6 +417,19 @@ func suppressed(sym string, s *scan.Snippet) bool {
 		// Unit-test harnesses reach test functions through a dispatcher
 		// that is often generated (curl's tests/unit) or outside the scan.
 		if s.IsTest && strings.HasPrefix(sym, "test") {
+			return true
+		}
+	}
+	if tokenizer.IsAssembly(s.Lang) {
+		// x86inc's cglobal and dav1d's `function` macro paste a prefix
+		// and CPU suffix onto the name (dav1d_put_bilin_8bpc_ssse3), so
+		// the literal name never appears at a call site; names built
+		// from macro parameters (%1, \w) are not names at all.
+		if asmPastedNameRe.MatchString(firstLine(s.Code)) || strings.ContainsAny(sym, "%\\") {
+			return true
+		}
+		switch sym {
+		case "_start", "start", "main", "_main", "DllMain", "WinMain":
 			return true
 		}
 	}

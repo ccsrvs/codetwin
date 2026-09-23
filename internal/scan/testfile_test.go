@@ -40,6 +40,15 @@ func TestIsTestFile_TableDriven(t *testing.T) {
 		{"src/attest/x.c", false},
 		{"src/server.h", false},
 
+		// Assembly: directory components only — names like testsetbit.S
+		// are production code in the Linux kernel.
+		{"tests/checkasm/x86/checkasm.asm", true},
+		{"tools/testing/selftests/x86/raw_syscall.S", true},
+		{"test/stub_amd64.s", true},
+		{"arch/x86/lib/testsetbit.S", false},
+		{"src/x86/test_helpers.asm", false},
+		{"src/runtime/asm_amd64.s", false},
+
 		// Python: test_*.py, *_test.py, tests/ or test/ dir component.
 		{"test_foo.py", true},
 		{"foo_test.py", true},

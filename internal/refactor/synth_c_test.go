@@ -156,3 +156,14 @@ func TestBuildPatch_CFixtures_PlaceAboveFunctionAndCompile(t *testing.T) {
 		})
 	}
 }
+
+func TestSynthesize_AssemblyExplainsWhyNoHelper(t *testing.T) {
+	al := Alignment{Common: []LineSpan{{AStart: 1, AEnd: 3, BStart: 1, BEnd: 3}}}
+	for _, lang := range []tokenizer.Language{tokenizer.AsmGAS, tokenizer.AsmNASM, tokenizer.AsmMASM, tokenizer.AsmPlan9} {
+		a := scan.Snippet{Name: "a.s:1-3 f", Lang: lang, Code: "f:\n\tret\n"}
+		s := Synthesize(a, a, "deadbeef", al)
+		if s.HelperSrc != "" || !strings.Contains(s.Note, "assembly") || !strings.Contains(s.Note, "macro") {
+			t.Errorf("%s: Note=%q HelperSrc=%q", lang, s.Note, s.HelperSrc)
+		}
+	}
+}
