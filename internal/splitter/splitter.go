@@ -37,7 +37,10 @@ import (
 //
 // v4: C files are split into function chunks (they previously fell back
 // to one whole-file chunk under a heuristically detected language).
-const SchemaVersion = 4
+//
+// v5: Go functions declared without a body (implemented in assembly)
+// are no longer chunked with the next function's body.
+const SchemaVersion = 5
 
 // ChunkKind classifies the granularity of a chunk. Downstream scoring
 // only compares chunks of the same kind: a class span weakly resembling
@@ -482,6 +485,9 @@ func splitGo(code string) []Chunk {
 		var symbol string
 		switch {
 		case goFuncRe.MatchString(line):
+			if !goSignatureHasBody(lines, i) {
+				continue // declared here, implemented in assembly or via linkname
+			}
 			symbol = goFuncRe.FindStringSubmatch(line)[1]
 		case goGoroutineRe.MatchString(line):
 			symbol = fmt.Sprintf("goroutine@L%d", i+1)
@@ -503,6 +509,35 @@ func splitGo(code string) []Chunk {
 		chunks = append(chunks, chunkSpan(lines, i, end, symbol, ""))
 	}
 	return append(chunks, goMethodsetGroups(lines)...)
+}
+
+// goSignatureHasBody reports whether the named func whose header starts
+// at line start has a body. Go puts the body's "{" on the signature's
+// last line (a newline after ")" would end the declaration), so the
+// signature has no body when its parentheses and brackets close on a
+// line without a "{" outside them. Without this check, findBraceEnd
+// would give a bodyless declaration — `func Compare(a, b []byte) int`,
+// implemented in assembly — the next function's body.
+func goSignatureHasBody(lines []string, start int) bool {
+	depth := 0
+	for j := start; j < len(lines); j++ {
+		for _, r := range lines[j] {
+			switch r {
+			case '(', '[':
+				depth++
+			case ')', ']':
+				depth--
+			case '{':
+				if depth <= 0 {
+					return true
+				}
+			}
+		}
+		if depth <= 0 {
+			return false
+		}
+	}
+	return false
 }
 
 // lineSpan is a 0-based inclusive line range within a file.
