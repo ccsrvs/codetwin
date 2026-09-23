@@ -18,6 +18,9 @@ import (
 //	Java     a src/test/ path component sequence
 //	Rust     a tests/ directory component
 //	Elixir   *_test.exs, or a test/ directory component
+//	C        test_*, *_test, *_tests, test-*, *-test, tst-*, *_unittest,
+//	         test/testN (test.c, test1.c), or a test/ or tests/ directory
+//	         component; .h files follow the same rule
 //
 // Paths in unsupported extensions are never classified as tests.
 func IsTestFile(path string) bool {
@@ -45,6 +48,31 @@ func IsTestFile(path string) bool {
 	case ".ex", ".exs":
 		return strings.HasSuffix(base, "_test.exs") ||
 			hasDirComponent(p, "test")
+	case ".c", ".h":
+		return cTestStem(strings.TrimSuffix(base, filepath.Ext(base))) ||
+			hasDirComponent(p, "test") ||
+			hasDirComponent(p, "tests")
+	}
+	return false
+}
+
+// cTestStem reports whether a C file's name (without extension) follows
+// a test naming convention seen across C projects: test_ / _test(s)
+// (SQLite, the Linux kernel, OpenSBI), test- / -test and glibc's tst-,
+// _unittest, and test harness drivers named test, test1, test2, ...
+func cTestStem(stem string) bool {
+	for _, prefix := range []string{"test_", "test-", "tst-"} {
+		if strings.HasPrefix(stem, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range []string{"_test", "_tests", "-test", "_unittest"} {
+		if strings.HasSuffix(stem, suffix) {
+			return true
+		}
+	}
+	if rest, ok := strings.CutPrefix(stem, "test"); ok {
+		return strings.Trim(rest, "0123456789") == ""
 	}
 	return false
 }

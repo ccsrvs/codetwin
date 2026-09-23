@@ -16,6 +16,26 @@ func TestIsTestFile_TableDriven(t *testing.T) {
 		{"attest.go", false},              // suffix must be _test.go
 		{"/abs/path/pkg/x_test.go", true}, // absolute paths work
 
+		// C: test/tests dirs; test_*, *_test(s), test-*, *-test, tst-*,
+		// test/testN, *_unittest basenames; headers follow the same rule.
+		{"tests/unit/unit1300.c", true},
+		{"test/example.c", true},
+		{"src/test_vfs.c", true},
+		{"src/test1.c", true},
+		{"test.c", true},
+		{"lib/sbi_bitmap_test.c", true},
+		{"src/zmalloc_tests.c", true},
+		{"string/tst-strlcat.c", true},
+		{"benchtests/test-memcpy.c", true},
+		{"tools/speed-test.c", true},
+		{"src/crc64_unittest.c", true},
+		{"tests/helpers.h", true},
+		{"src/latest.c", false}, // "test" inside a word is not a convention
+		{"src/contest.c", false},
+		{"src/testing_mode.c", false}, // test_ prefix needs the underscore right after "test"
+		{"src/attest/x.c", false},
+		{"src/server.h", false},
+
 		// Python: test_*.py, *_test.py, tests/ or test/ dir component.
 		{"test_foo.py", true},
 		{"foo_test.py", true},

@@ -116,7 +116,7 @@ func main() {
 	blame := flag.Bool("blame", false, "annotate each finding with git provenance (when introduced, by whom, last touched). Requires git on PATH and a git repository.")
 	updateBaselinePath := flag.String("update-baseline", "", "after the scan, write a clone-watchlist snapshot of the visible clusters to <file> and exit 0 (the normal report still prints). Compare later runs against it with --baseline.")
 	baselinePath := flag.String("baseline", "", "compare this scan's clusters against the snapshot in <file>: drift events print to stderr (one line each) and any drift exits 1 — a CI gate. Create the snapshot with --update-baseline; both runs must use the same threshold/eps/min-pts/granularity/include-tests.")
-	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair or partial-clone block (look up the 8-char ID in --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir; blocks: Go and Python. Other languages print a 'note' explaining why.")
+	suggest := flag.String("suggest", "", "print a unified diff that adds a starter helper extracted from the matching pair or partial-clone block (look up the 8-char ID in --json output). Pairs: Go, Python, Java, JS/TS, Rust, Elixir, C; blocks: Go and Python. Other languages print a 'note' explaining why.")
 	suggestAll := flag.Bool("suggest-all", false, "with --json: populate `suggested_patch` on every visible pair and partial clone. Off by default — synthesis adds work proportional to finding count.")
 	deadCode := flag.Bool("dead-code", false, "report definitions nothing in the scan references (name-based reachability; conservative). Adds a DEAD CODE section / dead_symbols in JSON. Requires --granularity function.")
 	skill := flag.Bool("skill", false, "print the codetwin skill guide and exit")
@@ -1402,7 +1402,7 @@ USAGE:
                                  CODETWIN_NO_UPDATE_CHECK=1)
 
   Paths can be files or directories (scanned recursively).
-  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs
+  Supported: .go .js .ts .jsx .tsx .py .java .rs .ex .exs .c .h
 
   Two or more DIRECTORY roots switch on cross-repo mode: each root is a
   "repo" (labelled by its base name; duplicates become name~2, name~3 …
@@ -1469,8 +1469,8 @@ FLAGS:
                        --update-baseline.
   --suggest string     print a unified diff that adds a starter helper extracted from
                        the pair or partial-clone block with the given 8-char ID (look
-                       it up in --json output). Pairs: all six languages; blocks: Go
-                       and Python. Rejections print a 'note' on stderr and exit 1.
+                       it up in --json output). Pairs: Go, Python, Java, JS/TS, Rust,
+                       Elixir, C; blocks: Go and Python. Rejections print a 'note' on stderr and exit 1.
   --suggest-all        with --json: populate suggested_patch on every visible pair and
                        partial clone (off by default — synthesis cost scales with
                        finding count)
